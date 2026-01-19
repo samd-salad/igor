@@ -126,8 +126,19 @@ class PiClient:
         stream = self.audio.open_stream()
 
         try:
-            audio_bytes = stream.read(1280, exception_on_overflow=False)
-            wake_word = self.wakeword_detector.predict(audio_bytes)
+            wake_word = None
+            while not wake_word:
+                # Read audio chunk (1280 samples = 80ms at 16kHz)
+                audio_bytes = stream.read(1280, exception_on_overflow=False)
+
+                # Get predictions for all wake words
+                predictions = self.wakeword_detector.predict(audio_bytes)
+
+                # Check if any wake word exceeded threshold
+                for name, score in predictions.items():
+                    if score >= WAKE_THRESHOLD:
+                        wake_word = name
+                        break
         finally:
             stream.close()
 

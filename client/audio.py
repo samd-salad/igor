@@ -157,8 +157,8 @@ class Audio:
                 # Clean up temp file
                 try:
                     os.unlink(temp_path)
-                except:
-                    pass
+                except OSError:
+                    pass  # File may already be deleted
 
         except subprocess.TimeoutExpired:
             logger.error("Audio playback timed out")
