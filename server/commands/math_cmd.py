@@ -90,17 +90,8 @@ def try_unit_conversion(expression: str) -> str | None:
 def try_math_expression(expression: str) -> str | None:
     """Try to evaluate as a math expression."""
     if not SIMPLEEVAL_AVAILABLE:
-        # Fallback to basic eval with restrictions
-        try:
-            # Only allow safe characters
-            if not re.match(r'^[\d\s\+\-\*\/\.\(\)\^]+$', expression):
-                return None
-            # Replace ^ with ** for exponentiation
-            expr = expression.replace('^', '**')
-            result = eval(expr, {"__builtins__": {}}, {})
-            return format_result(result)
-        except Exception:
-            return None
+        # No fallback - simpleeval is required for safety
+        return None
 
     try:
         # Replace common notations
