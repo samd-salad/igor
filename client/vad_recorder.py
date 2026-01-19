@@ -3,7 +3,7 @@ import numpy as np
 import pyaudio
 import wave
 from enum import Enum
-from config import (
+from client.config import (
     SAMPLE_RATE, MIN_RECORDING, MAX_RECORDING,
     SILENCE_END_DURATION, RMS_SILENCE_THRESHOLD
 )
