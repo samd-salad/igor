@@ -27,7 +27,7 @@ MAX_RECORDING = 15  # Maximum recording duration in seconds
 
 # Paths
 BASE_DIR = Path(__file__).parent.parent
-MODELS_DIR = BASE_DIR / "models"  # Wake word models
+MODELS_DIR = BASE_DIR / "onnx_models"  # Wake word models
 OWW_MODELS_DIR = BASE_DIR / "oww_models"  # OpenWakeWord models
 TEMP_WAV = "/tmp/recording.wav"  # Temporary recording file
 

@@ -1,6 +1,6 @@
 """Network monitoring commands."""
 from .base import Command
-from testing.network_monitor import (
+from .network_monitor import (
     get_known_devices,
     get_pending_alerts,
     add_known_device,

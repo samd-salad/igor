@@ -16,12 +16,12 @@ OLLAMA_MODEL = "qwen3:30b"
 MAX_CONVERSATION_HISTORY = 10  # Keep last 10 messages
 
 # Whisper model - speech recognition
-WHISPER_MODEL = "base"  # tiny = fastest, base = balanced, small = slower/accurate
+WHISPER_MODEL = "small"  # tiny = fastest, base = balanced, small = slower/accurate
 WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE_TYPE = "int8"
 
 # Piper TTS model
-PIPER_VOICE = os.path.expanduser("~/.local/share/piper-voices/en_US-arctic-medium.onnx")
+PIPER_VOICE = os.path.expanduser("./voices/en_US-arctic-medium.onnx")
 PIPER_SAMPLE_RATE = 22050
 
 # Paths on PC
