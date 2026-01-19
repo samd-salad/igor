@@ -126,7 +126,7 @@ class PiClient:
         stream = self.audio.open_stream()
 
         try:
-            wake_word = self.wakeword_detector.listen(stream)
+            wake_word = self.wakeword_detector.predict(stream)
         finally:
             stream.close()
 
