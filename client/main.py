@@ -126,7 +126,8 @@ class PiClient:
         stream = self.audio.open_stream()
 
         try:
-            wake_word = self.wakeword_detector.predict(stream)
+            audio_bytes = stream.read(1280, exception_on_overflow=False)
+            wake_word = self.wakeword_detector.predict(audio_bytes)
         finally:
             stream.close()
 
