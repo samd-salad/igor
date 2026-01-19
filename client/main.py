@@ -123,7 +123,7 @@ class PiClient:
         """Handle a single voice interaction."""
         # Step 1: Listen for wake word
         logger.debug("Listening for wake word...")
-        stream = self.audio.open_stream()
+        stream = self.audio#.open_stream()
 
         try:
             wake_word = self.wakeword_detector.predict(stream)

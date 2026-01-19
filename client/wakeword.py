@@ -50,6 +50,9 @@ class WakeWordDetector:
                 print(f"  -> {fpath.stat().st_size} bytes")
     
     def predict(self, audio: np.ndarray) -> dict[str, float]:
+        if isinstance(audio, (bytes, bytearray)):
+            audio = np.frombuffer(audio, dtype=np.int16)
+        
         audio_float = audio.astype(np.float32).reshape(1, -1) / 32768.0
         mel = self.melspec.run(None, {"input": audio_float})[0]
         mel = (mel / 10.0) + 2.0
