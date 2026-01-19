@@ -150,7 +150,8 @@ class Orchestrator:
 
         # Calculate total time
         timings['total'] = sum(timings.values())
-        logger.info(f"Interaction complete in {timings['total']:.2f}s (STT: {timings['stt']:.2f}s, LLM: {timings['llm']:.2f}s, TTS: {timings['tts']:.2f}s)")
+        # Log with detailed statistics
+        self._log_interaction_stats(timings, transcription, response_text)
 
         return {
             'transcription': transcription,
@@ -236,6 +237,73 @@ class Orchestrator:
 
         except Exception as e:
             logger.error(f"Failed to log benchmark: {e}")
+
+    def _load_benchmark_stats(self, stage: str) -> Dict[str, float]:
+        """Load historical statistics for a stage from benchmark.csv."""
+        durations = []
+        per_word_times = []
+
+        if not BENCHMARK_FILE.exists():
+            return {'avg_duration': 0, 'avg_per_word': 0}
+
+        try:
+            with open(BENCHMARK_FILE, 'r', newline='') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row['stage'] == stage:
+                        if row['duration_s']:
+                            durations.append(float(row['duration_s']))
+                        if row['per_word_s']:
+                            per_word_times.append(float(row['per_word_s']))
+
+            return {
+                'avg_duration': sum(durations) / len(durations) if durations else 0,
+                'avg_per_word': sum(per_word_times) / len(per_word_times) if per_word_times else 0
+            }
+        except Exception as e:
+            logger.debug(f"Failed to load stats for {stage}: {e}")
+            return {'avg_duration': 0, 'avg_per_word': 0}
+
+    def _log_interaction_stats(self, timings: Dict[str, float], transcription: str, response_text: str):
+        """Log interaction summary with performance comparison to historical averages."""
+        total = timings['total']
+        stt_time = timings['stt']
+        llm_time = timings['llm']
+        tts_time = timings['tts']
+
+        # Calculate word counts
+        stt_words = len(transcription.split()) if transcription else 0
+        tts_words = len(response_text.split()) if response_text else 0
+
+        # Calculate per-word metrics
+        stt_per_word = stt_time / stt_words if stt_words > 0 else 0
+        tts_per_word = tts_time / tts_words if tts_words > 0 else 0
+
+        # Load historical averages
+        stt_stats = self._load_benchmark_stats('stt')
+        llm_stats = self._load_benchmark_stats('llm')
+        tts_stats = self._load_benchmark_stats('tts')
+
+        # Compare to averages
+        def compare(current, avg):
+            if avg == 0:
+                return ""
+            pct = ((current - avg) / avg) * 100
+            if pct < -5:
+                return f" \u2193{abs(pct):.0f}%"  # ↓ faster
+            elif pct > 5:
+                return f" \u2191{pct:.0f}%"  # ↑ slower
+            return " ~"  # similar
+
+        # Format log message
+        logger.info(f"Interaction complete in {total:.2f}s")
+        logger.info(f"┌─────────┬──────────┬────────────┬──────────────┬────────────┐")
+        logger.info(f"│ Stage   │ Time     │ vs Avg     │ Per Word     │ vs Avg     │")
+        logger.info(f"├─────────┼──────────┼────────────┼──────────────┼────────────┤")
+        logger.info(f"│ STT     │ {stt_time:6.2f}s │{compare(stt_time, stt_stats['avg_duration']):>11s} │ {stt_per_word:8.3f}s/w │{compare(stt_per_word, stt_stats['avg_per_word']):>11s} │")
+        logger.info(f"│ LLM     │ {llm_time:6.2f}s │{compare(llm_time, llm_stats['avg_duration']):>11s} │ {'N/A':>12s} │ {'N/A':>10s} │")
+        logger.info(f"│ TTS     │ {tts_time:6.2f}s │{compare(tts_time, tts_stats['avg_duration']):>11s} │ {tts_per_word:8.3f}s/w │{compare(tts_per_word, tts_stats['avg_per_word']):>11s} │")
+        logger.info(f"└─────────┴──────────┴────────────┴──────────────┴────────────┘")
 
     def get_conversation_history(self) -> List[Dict]:
         """Get current conversation history from LLM."""

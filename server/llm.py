@@ -85,7 +85,8 @@ class LLM:
                     "model": self.model,
                     "messages": messages,
                     "tools": ollama_tools,
-                    "stream": False
+                    "stream": False,
+                    "keep_alive": "30m"  # Keep model loaded for 30 minutes
                 },
                 timeout=60
             )
@@ -139,7 +140,8 @@ class LLM:
                         "model": self.model,
                         "messages": messages,
                         "tools": ollama_tools,
-                        "stream": False
+                        "stream": False,
+                        "keep_alive": "30m"  # Keep model loaded
                     },
                     timeout=60
                 )

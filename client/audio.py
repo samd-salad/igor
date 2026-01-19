@@ -48,6 +48,7 @@ class Audio:
         self.device = device
         self.pa: Optional[pyaudio.PyAudio] = None
         self.vad_recorder: Optional[VADRecorder] = None
+        self.device_index: Optional[int] = None  # Cache device index
         logger.info(f"Audio initialized (device: {device}, rate: {sample_rate})")
 
     def initialize(self) -> bool:
@@ -56,12 +57,12 @@ class Audio:
             with suppress_alsa_errors():
                 self.pa = pyaudio.PyAudio()
 
-            dev_index = self._get_device_index()
-            if dev_index is None:
+            self.device_index = self._find_device_index()
+            if self.device_index is None:
                 logger.error("No USB microphone found")
                 return False
 
-            self.vad_recorder = VADRecorder(self.pa, dev_index)
+            self.vad_recorder = VADRecorder(self.pa, self.device_index)
             logger.info("Audio system initialized successfully")
             return True
 
@@ -78,8 +79,8 @@ class Audio:
                 logger.error(f"Error terminating PyAudio: {e}")
             self.pa = None
 
-    def _get_device_index(self) -> Optional[int]:
-        """Find USB microphone device index."""
+    def _find_device_index(self) -> Optional[int]:
+        """Find USB microphone device index (called once during init)."""
         if not self.pa:
             return None
 
@@ -97,14 +98,13 @@ class Audio:
         if not self.pa:
             raise RuntimeError("Audio not initialized")
 
-        dev_index = self._get_device_index()
         return self.pa.open(
             rate=self.sample_rate,
             channels=1,
             format=pyaudio.paInt16,
             input=True,
             frames_per_buffer=1280,
-            input_device_index=dev_index
+            input_device_index=self.device_index
         )
 
     def record(self, output_path: str = TEMP_WAV) -> bool:

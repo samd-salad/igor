@@ -148,8 +148,13 @@ class PiClient:
 
         logger.info(f"Wake word detected: {wake_word}")
 
-        # Step 2: Record speech
-        self.audio.beep_start()
+        # Step 2: Play start beep and record speech
+        try:
+            self.audio.beep_start()
+        except Exception as e:
+            logger.warning(f"Start beep failed: {e}")
+
+        time.sleep(0.1)  # Small delay to let beep finish
         if not self.audio.record(TEMP_WAV):
             logger.error("Recording failed")
             self.audio.beep_error()
@@ -172,7 +177,8 @@ class PiClient:
             )
 
             # Send to server
-            logger.info("Sending audio to server...")
+            audio_size_mb = len(audio_bytes) / (1024 * 1024)
+            logger.info(f"Sending audio to server ({audio_size_mb:.2f}MB)...")
             response = requests.post(
                 f"{self.server_url}{PROCESS_INTERACTION_ENDPOINT}",
                 json=request.model_dump(),
@@ -182,9 +188,8 @@ class PiClient:
 
             result = response.json()
 
-            # Log transcription and response
+            # Log transcription
             logger.info(f"Transcription: {result['transcription']}")
-            logger.info(f"Response: {result['response_text'][:100]}...")
 
             # Check for errors
             if result.get('error'):
@@ -194,7 +199,6 @@ class PiClient:
 
             # Step 4: Play response audio
             if result.get('audio_base64'):
-                logger.info("Playing response...")
                 response_audio = decode_audio_base64(result['audio_base64'])
                 if self.audio.play_audio_bytes(response_audio):
                     self.audio.beep_done()
