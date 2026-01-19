@@ -1,48 +1,66 @@
-# smart_assistant
-boris
+# Dr. Butts Voice Assistant
 
-## Architecture Overview
+A local, privacy-focused voice assistant with personality. Say "Doctor Butts" and ask questions, set timers, control your home, or just chat.
 
-The voice assistant is split between two machines:
+## Features
 
-- **Raspberry Pi (Client)**: Wake word detection, audio I/O, hardware control
-- **PC (Server)**: Speech-to-text, LLM processing, text-to-speech, command execution
+- **Wake word detection** - Always listening for "Doctor Butts"
+- **Natural conversation** - LLM-powered responses with memory
+- **Command execution** - Timers, weather, math, volume control, and more
+- **Split architecture** - Pi handles audio, PC handles compute (40-67% faster)
+- **Privacy-first** - All processing happens locally on your network
 
-## Prerequisites
+## Architecture
 
-### On PC (Server)
-- Python 3.13+ (Python 3.14 not yet fully supported by onnxruntime)
-- Ollama installed and running with qwen3:30b model
-- Piper TTS installed
-- Faster Whisper model files
-- Network connectivity to Raspberry Pi
+- **Raspberry Pi (Client)**: Wake word detection, audio recording/playback, hardware control
+- **PC (Server)**: Speech-to-text (Whisper), LLM (Ollama), text-to-speech (Piper)
+- **Communication**: HTTP REST API over local network
 
-### On Raspberry Pi (Client)
+## Quick Start
+
+### Prerequisites
+
+**On PC (Server):**
+- Python 3.13+
+- Ollama with qwen3:30b model
+- Piper TTS
+- Network connectivity to Pi
+
+**On Raspberry Pi (Client):**
 - Python 3.9+
-- USB microphone
-- Speaker/audio output via ALSA
-- Wake word ONNX models
+- USB microphone and speaker
 - Network connectivity to PC
 
-## Installation
+### Installation
 
-### 1. Server Setup (PC)
+#### 1. Server Setup (PC)
 
 ```bash
-- Create virtual environment with Python 3.13
-.venv\Scripts\activate # on windows to activate
+cd /path/to/smart_assistant
 
-# Install server dependencies
+# Create virtual environment with Python 3.13
+python3.13 -m venv .venv
+.venv\Scripts\activate  # Windows
+# OR
+source .venv/bin/activate  # Linux/Mac
+
+# Install dependencies
 pip install -r requirements-server.txt
+
+# Download Piper voice model
+# Windows:
+Invoke-WebRequest https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/arctic/medium/en_US-arctic-medium.onnx -OutFile voices/en_US-arctic-medium.onnx
+Invoke-WebRequest https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/arctic/medium/en_US-arctic-medium.onnx.json -OutFile voices/en_US-arctic-medium.onnx.json
+
+# Linux/Mac:
+wget -P voices/ https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/arctic/medium/en_US-arctic-medium.onnx
+wget -P voices/ https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/arctic/medium/en_US-arctic-medium.onnx.json
 
 # Verify Ollama is running
 curl http://localhost:11434/api/tags
-
-# Verify Piper is installed
-piper --version
 ```
 
-### 2. Client Setup (Raspberry Pi)
+#### 2. Client Setup (Raspberry Pi)
 
 ```bash
 cd /path/to/smart_assistant
@@ -51,67 +69,48 @@ cd /path/to/smart_assistant
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Install client dependencies
+# Install dependencies
 pip install -r requirements-client.txt
 
-# Verify audio devices
-aplay -l
+# Test audio devices
 arecord -l
-
-# Test microphone
+aplay -l
 arecord -d 3 test.wav && aplay test.wav
 ```
 
-## Configuration
+### Configuration
 
-### Server Configuration ([server/config.py](server/config.py))
+#### Server ([server/config.py](server/config.py))
 
-Key settings:
+Update IP addresses to match your network:
+
 ```python
 SERVER_HOST = "0.0.0.0"  # Listen on all interfaces
 SERVER_PORT = 8000
 
-PI_HOST = "192.168.0.3"  # Your Pi's IP
+PI_HOST = "192.168.0.3"  # Your Pi's IP address
 PI_PORT = 8080
 
-OLLAMA_URL = "http://localhost:11434"
-OLLAMA_MODEL = "qwen3:30b"
-
-WHISPER_MODEL = "base"  # or "small", "medium"
-PIPER_VOICE = "path/to/voice.onnx"
-# Invoke-WebRequest https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/arctic/medium/en_US-arctic-medium.onnx.json -OutFile voices/en_US-arctic-medium.onnx.json
-# and then the same thing without json
-
+PIPER_VOICE = "voices/en_US-arctic-medium.onnx"
 ```
 
-### Client Configuration ([client/config.py](client/config.py))
+#### Client ([client/config.py](client/config.py))
 
-Key settings:
 ```python
-SERVER_HOST = "192.168.0.4"  # Your PC's IP
+SERVER_HOST = "192.168.0.4"  # Your PC's IP address
 SERVER_PORT = 8000
 
-CLIENT_HOST = "0.0.0.0"
-CLIENT_PORT = 8080
-
-AUDIO_DEVICE = "plughw:2,0"  # Your audio device
-WAKE_WORDS = ["doctor_butts"]
-WAKE_THRESHOLD = 0.1
+AUDIO_DEVICE = "plughw:2,0"  # Run 'arecord -L' to find yours
+WAKE_THRESHOLD = 0.1  # Lower = more sensitive (0.0-1.0)
 ```
 
-## Running
+### Running
 
-### Start Server (on PC)
+#### Start Server (PC)
 
 ```bash
-cd /path/to/smart_assistant
 source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-
-# Run server
 python -m server.main
-
-# Or with uvicorn directly
-uvicorn server.main:app --host 0.0.0.0 --port 8000
 ```
 
 Expected output:
@@ -122,13 +121,10 @@ Expected output:
 2026-01-19 12:00:10 - server - INFO - Starting server on 0.0.0.0:8000
 ```
 
-### Start Client (on Raspberry Pi)
+#### Start Client (Pi)
 
 ```bash
-cd /path/to/smart_assistant
 source .venv/bin/activate
-
-# Run client
 python -m client.main
 ```
 
@@ -138,52 +134,38 @@ Expected output:
 2026-01-19 12:00:02 - client - INFO - Loading audio system...
 2026-01-19 12:00:03 - client - INFO - Loading wake word detection...
 2026-01-19 12:00:04 - client - INFO - All components initialized successfully
-2026-01-19 12:00:04 - client - INFO - Pi server started on 0.0.0.0:8080
 2026-01-19 12:00:05 - client - INFO - Entering main loop. Listening for wake word...
 ```
 
-## Testing
+### Usage
 
-### Test Server Health
+1. Say **"Doctor Butts"** (wake word)
+2. Wait for ascending beep
+3. Speak your command
+4. Wait for descending beep
+5. Listen to response
 
+**Example commands:**
+- "What time is it?"
+- "Set a timer for 5 minutes"
+- "What's the weather like?"
+- "Calculate 15% tip on $47.32"
+- "Remember that I prefer dark roast coffee"
+- "Set volume to 75"
+
+## Health Checks
+
+Test server:
 ```bash
 curl http://192.168.0.4:8000/api/health
 ```
 
-Expected response:
-```json
-{
-  "status": "healthy",
-  "services": {
-    "whisper": "loaded",
-    "ollama": "connected",
-    "piper": "ready",
-    "pi_client": "ready",
-    "pi": "reachable"
-  },
-  "uptime_seconds": 123.45,
-  "additional_info": {
-    "conversation_messages": 0
-  }
-}
-```
-
-### Test Client Health
-
+Test client:
 ```bash
 curl http://192.168.0.3:8080/api/health
 ```
 
-### Test End-to-End
-
-1. Say the wake word: "Doctor Butts"
-2. Wait for ascending beep
-3. Speak your command
-4. Wait for descending beep
-5. Server processes (STT → LLM → TTS)
-6. Response plays on Pi
-
-## Systemd Services (Optional)
+## Systemd Services (Auto-start on Boot)
 
 ### Server Service
 
@@ -207,7 +189,7 @@ RestartSec=10
 WantedBy=multi-user.target
 ```
 
-Enable and start:
+Enable:
 ```bash
 sudo systemctl enable drbutts-server
 sudo systemctl start drbutts-server
@@ -236,7 +218,7 @@ RestartSec=10
 WantedBy=multi-user.target
 ```
 
-Enable and start:
+Enable:
 ```bash
 sudo systemctl enable drbutts-client
 sudo systemctl start drbutts-client
@@ -245,102 +227,57 @@ sudo systemctl status drbutts-client
 
 ## Troubleshooting
 
-### Server Issues
-
-**Ollama not connecting:**
-```bash
-# Check if Ollama is running
-systemctl status ollama
-# Or start it
-ollama serve
-```
-
-**Piper not found:**
-```bash
-# Install Piper
-# See: https://github.com/rhasspy/piper
-```
-
-**Whisper model download:**
-```bash
-# Models download automatically on first run
-# Or pre-download:
-python -c "from faster_whisper import WhisperModel; WhisperModel('base')"
-```
-
-### Client Issues
-
-**No audio devices:**
-```bash
-# List devices
-aplay -L
-arecord -L
-
-# Update AUDIO_DEVICE in client/config.py
-```
-
-**Wake word not detecting:**
-- Check models exist in `models/` directory
-- Adjust WAKE_THRESHOLD (lower = more sensitive)
+### Wake word not detecting
+- Check models downloaded to `onnx_models/doctor_butts.onnx`
+- Adjust `WAKE_THRESHOLD` in [client/config.py](client/config.py) (lower = more sensitive)
 - Test microphone: `arecord -d 5 test.wav && aplay test.wav`
+- Check logs: wake word score appears in client logs
 
-**Can't connect to server:**
+### Server connection issues
 - Verify server is running: `curl http://192.168.0.4:8000/api/health`
-- Check firewall rules
-- Verify IP addresses in configs match your network
+- Check firewall rules (allow port 8000 on PC, port 8080 on Pi)
+- Verify IP addresses in config files match your network
+- Test connectivity: `ping 192.168.0.4` from Pi
 
-### Network Issues
+### Audio issues on Pi
+- List devices: `aplay -l` and `arecord -l`
+- Update `AUDIO_DEVICE` in [client/config.py](client/config.py)
+- Check ALSA volume: `amixer get PCM`
+- Test playback: `speaker-test -c2 -t wav`
 
-**Pi can't reach server:**
-```bash
-# Test connectivity
-ping 192.168.0.4
-curl http://192.168.0.4:8000/api/health
-```
+### Ollama not responding
+- Check if running: `systemctl status ollama` or `ollama serve`
+- Verify model: `ollama list` (should show qwen3:30b)
+- Test directly: `curl http://localhost:11434/api/tags`
 
-**Server can't callback to Pi:**
-```bash
-# Test Pi server
-curl http://192.168.0.3:8080/api/health
-```
-
-## Performance
-
-Expected latency (after wake word):
-- **Network transfer**: ~0.1-0.3s
-- **STT (Whisper base)**: ~3-4s
-- **LLM (qwen3:30b local)**: ~2-10s
-- **TTS (Piper)**: ~3-7s
-- **Total**: ~8-20s (vs 11-51s all on Pi)
-
-## Security Notes
-
-- Running on trusted home network (no TLS/auth)
-- Input validation on all API endpoints
-- Command whitelisting for hardware control
-- See [SECURITY_REVIEW.md](SECURITY_REVIEW.md) for full analysis
-
-## Logs
-
-### View Server Logs
+### View logs
 ```bash
 # If running directly
-python -m server.main
-
-# If using systemd
-sudo journalctl -u drbutts-server -f
-```
-
-### View Client Logs
-```bash
-# If running directly
+python -m server.main  # Shows logs in terminal
 python -m client.main
 
 # If using systemd
+sudo journalctl -u drbutts-server -f
 sudo journalctl -u drbutts-client -f
 ```
 
-## Useful Commands
+## API Reference
+
+### Server Endpoints (PC)
+
+- `POST /api/process_interaction` - Main endpoint for voice processing
+- `GET /api/health` - Server health status
+- `GET /api/conversation/history` - View conversation history
+- `POST /api/conversation/clear` - Clear conversation history
+
+### Client Endpoints (Pi)
+
+- `POST /api/play_audio` - Play audio from timer alerts
+- `POST /api/hardware_control` - Execute hardware commands (volume, etc.)
+- `POST /api/play_beep` - Play notification beeps
+- `GET /api/health` - Client health status
+
+## Utilities
 
 ```bash
 # Clear conversation history
@@ -348,22 +285,13 @@ curl -X POST http://192.168.0.4:8000/api/conversation/clear
 
 # View conversation history
 curl http://192.168.0.4:8000/api/conversation/history
-
-# Test timer alert (from server)
-# Set timer via voice: "Doctor Butts, set a timer for 1 minute"
 ```
 
-## Next Steps
+## Security
 
-1. Test basic interaction
-2. Test timer alerts (PC → Pi callbacks)
-3. Test volume control (PC → Pi RPC)
-4. Monitor performance with benchmark.csv
-5. Customize wake word if desired
-6. Add more commands as needed
-
-## Support
-
-- Issues: https://github.com/yourusername/smart_assistant/issues
-- Documentation: [CLAUDE.md](CLAUDE.md)
-- Security: [SECURITY_REVIEW.md](SECURITY_REVIEW.md)
+- All processing happens locally on your network
+- No data sent to cloud services
+- Input validation on all API endpoints
+- No shell injection vulnerabilities
+- Command whitelisting for hardware control
+- Designed for trusted home network (no TLS/authentication)
