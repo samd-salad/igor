@@ -42,6 +42,10 @@ class VADRecorder:
             input_device_index=self.device_index
         )
 
+        # Flush initial frames to clear residual audio from buffers
+        for _ in range(3):
+            stream.read(self.chunk_size, exception_on_overflow=False)
+
         state = VADState.WAITING_FOR_SPEECH
         frames = []
         silence_frames = 0

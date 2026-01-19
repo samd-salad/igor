@@ -297,13 +297,13 @@ class Orchestrator:
 
         # Format log message
         logger.info(f"Interaction complete in {total:.2f}s")
-        logger.info(f"┌─────────┬──────────┬────────────┬──────────────┬────────────┐")
-        logger.info(f"│ Stage   │ Time     │ vs Avg     │ Per Word     │ vs Avg     │")
-        logger.info(f"├─────────┼──────────┼────────────┼──────────────┼────────────┤")
-        logger.info(f"│ STT     │ {stt_time:6.2f}s │{compare(stt_time, stt_stats['avg_duration']):>11s} │ {stt_per_word:8.3f}s/w │{compare(stt_per_word, stt_stats['avg_per_word']):>11s} │")
-        logger.info(f"│ LLM     │ {llm_time:6.2f}s │{compare(llm_time, llm_stats['avg_duration']):>11s} │ {'N/A':>12s} │ {'N/A':>10s} │")
-        logger.info(f"│ TTS     │ {tts_time:6.2f}s │{compare(tts_time, tts_stats['avg_duration']):>11s} │ {tts_per_word:8.3f}s/w │{compare(tts_per_word, tts_stats['avg_per_word']):>11s} │")
-        logger.info(f"└─────────┴──────────┴────────────┴──────────────┴────────────┘")
+        logger.info(f"┌─────┬──────┬────────┬─────────┬────────┐")
+        logger.info(f"│Stage│ Time │vs Avg  │Per Word │vs Avg  │")
+        logger.info(f"├─────┼──────┼────────┼─────────┼────────┤")
+        logger.info(f"│ STT │{stt_time:5.2f}s│{compare(stt_time, stt_stats['avg_duration']):>8s}│{stt_per_word:7.3f}s│{compare(stt_per_word, stt_stats['avg_per_word']):>8s}│")
+        logger.info(f"│ LLM │{llm_time:5.2f}s│{compare(llm_time, llm_stats['avg_duration']):>8s}│  {'N/A':>5s}  │  {'N/A':>4s}  │")
+        logger.info(f"│ TTS │{tts_time:5.2f}s│{compare(tts_time, tts_stats['avg_duration']):>8s}│{tts_per_word:7.3f}s│{compare(tts_per_word, tts_stats['avg_per_word']):>8s}│")
+        logger.info(f"└─────┴──────┴────────┴─────────┴────────┘")
 
     def get_conversation_history(self) -> List[Dict]:
         """Get current conversation history from LLM."""

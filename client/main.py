@@ -148,6 +148,12 @@ class PiClient:
 
         logger.info(f"Wake word detected: {wake_word}")
 
+        # Reset wake word detector buffers to prevent interference with recording
+        self.wakeword_detector.reset()
+
+        # Give audio system time to flush buffers
+        time.sleep(0.2)
+
         # Step 2: Play start beep and record speech
         try:
             self.audio.beep_start()
@@ -177,8 +183,8 @@ class PiClient:
             )
 
             # Send to server
-            audio_size_mb = len(audio_bytes) / (1024 * 1024)
-            logger.info(f"Sending audio to server ({audio_size_mb:.2f}MB)...")
+            audio_size_kb = len(audio_bytes) / 1024
+            logger.info(f"Sending audio to server ({audio_size_kb:.1f}KB)...")
             response = requests.post(
                 f"{self.server_url}{PROCESS_INTERACTION_ENDPOINT}",
                 json=request.model_dump(),
