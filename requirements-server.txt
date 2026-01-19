@@ -1,0 +1,12 @@
+# Server dependencies for PC
+faster-whisper
+numpy
+requests>=2.32.0
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+simpleeval
+pint
+
+# Optional: anthropic for Claude API (if switching from Ollama)
+# anthropic

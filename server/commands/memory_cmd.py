@@ -1,7 +1,5 @@
-from pathlib import Path
 from .base import Command
-
-MEMORY_FILE = Path(__file__).parent.parent / "memory.txt"
+from server.config import MEMORY_FILE
 
 class SaveMemoryCommand(Command):
     name = "save_memory"

@@ -1,7 +1,7 @@
 """Timer command for setting named timers."""
 import re
 from .base import Command
-from event_loop import get_event_loop
+from server.event_loop import get_event_loop
 
 
 def parse_duration(duration_str: str) -> float | None:

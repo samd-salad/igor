@@ -21,7 +21,7 @@ AUDIO_DEVICE = "plughw:2,0"       # ALSA hardware device identifier for mic/spea
 
 # Silence detection - controls when recording starts and stops
 SILENCE_END_DURATION = 2.0       # Seconds of silence required to STOP recording
-RMS_SILENCE_THRESHOLD = 1000     # RMS value below which audio is considered silence
+RMS_SILENCE_THRESHOLD = 1200     # RMS value below which audio is considered silence
                                  # Typical speech: 1000-10000, silence: 50-200
                                  # Adjust based on your microphone gain
 MIN_RECORDING = 0.7              # Minimum recording duration in seconds

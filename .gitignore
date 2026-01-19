@@ -9,6 +9,9 @@ venv/
 memory.txt
 known_devices.json
 benchmark.csv
+data/*.txt
+data/*.json
+data/*.csv
 
 # Claude Code local settings
 .claude/
