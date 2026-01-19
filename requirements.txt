@@ -1,0 +1,10 @@
+# Core dependencies
+faster-whisper
+pyaudio
+numpy
+requests
+onnxruntime
+
+# Math and unit conversion
+simpleeval
+pint
