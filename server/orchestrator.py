@@ -8,11 +8,19 @@ from server.transcription import Transcriber
 from server.llm import LLM
 from server.synthesis import Synthesizer
 from server.pi_callback import PiCallbackClient
-from server.config import BENCHMARK_FILE
+from server.config import BENCHMARK_FILE, SPEAKER_EMBEDDINGS_FILE, SPEAKER_SIMILARITY_THRESHOLD
 from server.commands.memory_cmd import load_persistent_memory
 import server.commands as commands
 
 logger = logging.getLogger(__name__)
+
+# Try to import speaker identification (optional dependency)
+try:
+    from server.speaker_id import SpeakerIdentifier
+    SPEAKER_ID_AVAILABLE = True
+except ImportError:
+    SPEAKER_ID_AVAILABLE = False
+    logger.info("Speaker identification not available (resemblyzer not installed)")
 
 
 class Orchestrator:
@@ -23,12 +31,30 @@ class Orchestrator:
         transcriber: Transcriber,
         llm: LLM,
         synthesizer: Synthesizer,
-        pi_client: PiCallbackClient
+        pi_client: PiCallbackClient,
+        enable_speaker_id: bool = True
     ):
         self.transcriber = transcriber
         self.llm = llm
         self.synthesizer = synthesizer
         self.pi_client = pi_client
+
+        # Initialize speaker identification if available
+        self.speaker_identifier = None
+        if enable_speaker_id and SPEAKER_ID_AVAILABLE:
+            try:
+                self.speaker_identifier = SpeakerIdentifier(
+                    SPEAKER_EMBEDDINGS_FILE,
+                    SPEAKER_SIMILARITY_THRESHOLD
+                )
+                speakers = self.speaker_identifier.list_speakers()
+                if speakers:
+                    logger.info(f"Speaker identification enabled. Enrolled: {speakers}")
+                else:
+                    logger.info("Speaker identification enabled (no speakers enrolled)")
+            except Exception as e:
+                logger.warning(f"Failed to initialize speaker identification: {e}")
+
         logger.info("Orchestrator initialized")
 
     def process_interaction(self, audio_bytes: bytes, wake_word: str) -> Dict:
@@ -64,6 +90,7 @@ class Orchestrator:
                 'audio_base64': '',
                 'commands_executed': [],
                 'timings': {},
+                'speaker': None,
                 'error': 'Audio file too large'
             }
 
@@ -79,6 +106,7 @@ class Orchestrator:
                 'audio_base64': '',
                 'commands_executed': [],
                 'timings': timings,
+                'speaker': None,
                 'error': 'Speech recognition failed'
             }
 
@@ -90,6 +118,26 @@ class Orchestrator:
 
         logger.info(f"Transcribed: '{transcription[:100]}...'")  # Log first 100 chars only
         self._log_benchmark('stt', timings['stt'], transcription)
+
+        # Step 1b: Speaker Identification (optional, runs in parallel with STT conceptually)
+        speaker_name = None
+        speaker_confidence = 0.0
+        if self.speaker_identifier:
+            try:
+                start_speaker = time.time()
+                # Convert audio bytes to numpy for speaker ID
+                audio_array = self._audio_bytes_to_numpy(audio_bytes)
+                if audio_array is not None:
+                    result = self.speaker_identifier.identify(audio_array, sample_rate=16000)
+                    speaker_name = result.name if result.is_known else None
+                    speaker_confidence = result.confidence
+                    timings['speaker_id'] = time.time() - start_speaker
+                    if speaker_name:
+                        logger.info(f"Identified speaker: {speaker_name} ({speaker_confidence:.0%})")
+                    else:
+                        logger.debug(f"Unknown speaker (best match: {result.confidence:.0%})")
+            except Exception as e:
+                logger.warning(f"Speaker identification failed: {e}")
 
         # Step 2: LLM Processing
         start = time.time()
@@ -118,6 +166,7 @@ class Orchestrator:
                 'audio_base64': '',
                 'commands_executed': commands_executed,
                 'timings': timings,
+                'speaker': speaker_name,
                 'error': 'AI processing failed'
             }
 
@@ -137,6 +186,7 @@ class Orchestrator:
                 'audio_base64': '',
                 'commands_executed': commands_executed,
                 'timings': timings,
+                'speaker': speaker_name,
                 'error': 'Text-to-speech failed'
             }
 
@@ -159,8 +209,28 @@ class Orchestrator:
             'audio_base64': audio_base64,
             'commands_executed': commands_executed,
             'timings': timings,
+            'speaker': speaker_name,
             'error': None
         }
+
+    def _audio_bytes_to_numpy(self, audio_bytes: bytes):
+        """Convert WAV audio bytes to numpy array for speaker identification."""
+        import io
+        import wave
+        import numpy as np
+
+        try:
+            # Parse WAV header and extract PCM data
+            with io.BytesIO(audio_bytes) as wav_buffer:
+                with wave.open(wav_buffer, 'rb') as wav_file:
+                    # Read all frames
+                    frames = wav_file.readframes(wav_file.getnframes())
+                    # Convert to numpy array (assuming 16-bit PCM)
+                    audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+                    return audio
+        except Exception as e:
+            logger.warning(f"Failed to convert audio bytes to numpy: {e}")
+            return None
 
     def _execute_command(self, name: str, **kwargs) -> str:
         """
@@ -297,12 +367,12 @@ class Orchestrator:
 
         # Format log message
         logger.info(f"Interaction complete in {total:.2f}s")
-        logger.info(f"┌─────┬──────┬────────┬─────────┬────────┐")
-        logger.info(f"│Stage│ Time │vs Avg  │Per Word │vs Avg  │")
-        logger.info(f"├─────┼──────┼────────┼─────────┼────────┤")
-        logger.info(f"│ STT │{stt_time:5.2f}s│{compare(stt_time, stt_stats['avg_duration']):>8s}│{stt_per_word:7.3f}s│{compare(stt_per_word, stt_stats['avg_per_word']):>8s}│")
-        logger.info(f"│ LLM │{llm_time:5.2f}s│{compare(llm_time, llm_stats['avg_duration']):>8s}│  {'N/A':>5s}  │  {'N/A':>4s}  │")
-        logger.info(f"│ TTS │{tts_time:5.2f}s│{compare(tts_time, tts_stats['avg_duration']):>8s}│{tts_per_word:7.3f}s│{compare(tts_per_word, tts_stats['avg_per_word']):>8s}│")
+        logger.info(f"┌─────┬──────┬───────┬────────┬───────┐")
+        logger.info(f"│Stage│ Time │vs Avg │Per Word│vs Avg │")
+        logger.info(f"├─────┼──────┼───────┼────────┼───────┤")
+        logger.info(f"│ STT │{stt_time:5.2f}s│{compare(stt_time, stt_stats['avg_duration']):>7s}│{stt_per_word:7.3f}s│{compare(stt_per_word, stt_stats['avg_per_word']):>8s}│")
+        logger.info(f"│ LLM │{llm_time:5.2f}s│{compare(llm_time, llm_stats['avg_duration']):>7s}│  {'N/A':>5s} │  {'N/A':>4s} │")
+        logger.info(f"│ TTS │{tts_time:5.2f}s│{compare(tts_time, tts_stats['avg_duration']):>7s}│{tts_per_word:7.3f}s│{compare(tts_per_word, tts_stats['avg_per_word']):>8s}│")
         logger.info(f"└─────┴──────┴────────┴─────────┴────────┘")
 
     def get_conversation_history(self) -> List[Dict]:

@@ -12,7 +12,7 @@ PI_PORT = 8080
 
 # LLM configuration - local Ollama instance
 OLLAMA_URL = "http://localhost:11434"  # Running locally on PC
-OLLAMA_MODEL = "qwen3:30b"
+OLLAMA_MODEL = "gpt-oss:20b"
 MAX_CONVERSATION_HISTORY = 10  # Keep last 10 messages
 
 # Whisper model - speech recognition
@@ -31,6 +31,10 @@ MEMORY_FILE = DATA_DIR / "memory.txt"
 KNOWN_DEVICES_FILE = DATA_DIR / "known_devices.json"
 BENCHMARK_FILE = DATA_DIR / "benchmark.csv"
 CONVERSATION_STATE_FILE = DATA_DIR / "conversation_state.json"
+
+# Speaker identification
+SPEAKER_EMBEDDINGS_FILE = DATA_DIR / "speaker_embeddings.json"
+SPEAKER_SIMILARITY_THRESHOLD = 0.75  # 0-1, higher = stricter matching
 
 # Ensure data directory exists
 DATA_DIR.mkdir(exist_ok=True)

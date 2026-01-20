@@ -63,6 +63,7 @@ class ProcessInteractionResponse(BaseModel):
     audio_base64: str = Field(..., max_length=20_000_000, description="Base64-encoded WAV audio of TTS response")
     commands_executed: List[str] = Field(default_factory=list, max_length=50, description="List of command names executed")
     timings: Dict[str, float] = Field(default_factory=dict, description="Performance timings for each stage")
+    speaker: Optional[str] = Field(None, max_length=100, description="Identified speaker name, if recognized")
     error: Optional[str] = Field(None, max_length=1000, description="Error message if processing failed")
 
 
