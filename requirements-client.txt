@@ -1,7 +1,7 @@
 # Client dependencies for Raspberry Pi
 pyaudio
-numpy
+numpy>=1.24.0
 requests>=2.32.0
 flask>=3.0.0
-openwakeword
-pydantic
+pvporcupine>=3.0.0
+pydantic>=2.0.0

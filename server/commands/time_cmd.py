@@ -4,7 +4,11 @@ from .base import Command
 class TimeCommand(Command):
     name = "get_time"
     description = "Get the current time and/or date"
-    
+
+    @property
+    def required_parameters(self) -> list:
+        return []
+
     @property
     def parameters(self) -> dict:
         return {

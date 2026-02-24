@@ -10,9 +10,9 @@ SERVER_PORT = 8000
 PI_HOST = "192.168.0.3"
 PI_PORT = 8080
 
-# LLM configuration - local Ollama instance
-OLLAMA_URL = "http://localhost:11434"  # Running locally on PC
-OLLAMA_MODEL = "gpt-oss:20b"
+# LLM configuration - Claude API
+CLAUDE_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 MAX_CONVERSATION_HISTORY = 10  # Keep last 10 messages
 
 # Whisper model - speech recognition
@@ -20,13 +20,13 @@ WHISPER_MODEL = "small"  # tiny = fastest, base = balanced, small = slower/accur
 WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE_TYPE = "int8"
 
-# Piper TTS model
-PIPER_VOICE = os.path.expanduser("./voices/en_US-arctic-medium.onnx")
-PIPER_SAMPLE_RATE = 22050
-
 # Paths on PC
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
+
+# Piper TTS model
+PIPER_VOICE = str(BASE_DIR / "voices" / "en_US-arctic-medium.onnx")
+PIPER_SAMPLE_RATE = 22050
 MEMORY_FILE = DATA_DIR / "memory.txt"
 KNOWN_DEVICES_FILE = DATA_DIR / "known_devices.json"
 BENCHMARK_FILE = DATA_DIR / "benchmark.csv"

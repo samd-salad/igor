@@ -107,22 +107,23 @@ class Audio:
             input_device_index=self.device_index
         )
 
-    def record(self, output_path: str = TEMP_WAV) -> bool:
+    def record(self, output_path: str = TEMP_WAV, timeout: float = None) -> bool:
         """
         Record audio with VAD.
 
         Args:
             output_path: Path to save WAV file
+            timeout: Max seconds to wait for speech to begin (None = no limit)
 
         Returns:
-            True if speech was captured, False otherwise
+            True if speech was captured, False otherwise (including timeout)
         """
         if not self.vad_recorder:
             logger.error("VAD recorder not initialized")
             return False
 
         try:
-            return self.vad_recorder.record_with_vad(output_path)
+            return self.vad_recorder.record_with_vad(output_path, initial_timeout=timeout)
         except Exception as e:
             logger.error(f"Recording failed: {e}")
             return False

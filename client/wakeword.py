@@ -1,85 +1,46 @@
-"""Minimal wake word detector using raw ONNX inference."""
+"""Wake word detector using Picovoice Porcupine.
+
+.ppn keyword files must be downloaded from console.picovoice.ai for your
+Pi's CPU (Cortex-A72 for Pi 4, Cortex-A53 for Pi 3).
+Place them in porcupine_models/ and set paths in client/config.py.
+"""
 import numpy as np
-import os
-os.environ["ORT_DISABLE_ALL_LOGS"] = "1"
-import onnxruntime as ort
-ort.set_default_logger_severity(3)  # Suppress warnings
 from pathlib import Path
-import urllib.request
+import pvporcupine
+
 
 class WakeWordDetector:
-    def __init__(self, model_paths: list[str], threshold: float = 0.5):
-        self.threshold = threshold
-        self.models = {}
-        self.buffers = {}
-        
-        oww_path = Path(__file__).parent / "oww_models"
-        oww_path.mkdir(exist_ok=True)
-        
-        self._ensure_base_models(oww_path)
-        
-        opts = ort.SessionOptions()
-        opts.inter_op_num_threads = 1
-        opts.intra_op_num_threads = 1
-        opts.log_severity_level = 3
-        
-        self.melspec = ort.InferenceSession(str(oww_path / "melspectrogram.onnx"), opts, providers=["CPUExecutionProvider"])
-        self.embedding = ort.InferenceSession(str(oww_path / "embedding_model.onnx"), opts, providers=["CPUExecutionProvider"])
-        
-        for path in model_paths:
-            name = Path(path).stem
-            sess = ort.InferenceSession(path, opts, providers=["CPUExecutionProvider"])
-            self.models[name] = {
-                "session": sess,
-                "input_name": sess.get_inputs()[0].name
-            }
-            self.buffers[name] = np.zeros((1, 16, 96), dtype=np.float32)
-        
-        self.mel_buffer = np.zeros((0, 32), dtype=np.float32)
-    
-    def _ensure_base_models(self, path: Path):
-        urls = {
-            "melspectrogram.onnx": "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/melspectrogram.onnx",
-            "embedding_model.onnx": "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx"
-        }
-        for fname, url in urls.items():
-            fpath = path / fname
-            if not fpath.exists() or fpath.stat().st_size < 1000:
-                print(f"Downloading {fname}...")
-                urllib.request.urlretrieve(url, fpath)
-                print(f"  -> {fpath.stat().st_size} bytes")
-    
-    def predict(self, audio: np.ndarray) -> dict[str, float]:
+    def __init__(self, access_key: str, keyword_paths: list[str],
+                 sensitivities: list[float] | None = None):
+        self._porcupine = pvporcupine.create(
+            access_key=access_key,
+            keyword_paths=keyword_paths,
+            sensitivities=sensitivities or [0.5] * len(keyword_paths),
+        )
+        # Derive clean names: "doctor-butts_en_raspberry-pi_v3_0_0" → "doctor-butts"
+        self._keywords = [Path(p).stem.split('_en_')[0] for p in keyword_paths]
+        self._buffer = np.array([], dtype=np.int16)
+
+    def predict(self, audio: bytes | np.ndarray) -> dict[str, float]:
+        """Feed a raw audio chunk; return {keyword: score} (1.0=detected, 0.0=not)."""
         if isinstance(audio, (bytes, bytearray)):
             audio = np.frombuffer(audio, dtype=np.int16)
-        
-        audio_float = audio.astype(np.float32).reshape(1, -1) / 32768.0
-        mel = self.melspec.run(None, {"input": audio_float})[0]
-        mel = (mel / 10.0) + 2.0
-        mel = mel.squeeze()
-        if mel.ndim == 1:
-            mel = mel.reshape(1, -1)
-        
-        self.mel_buffer = np.concatenate([self.mel_buffer, mel], axis=0)
-        results = {name: 0.0 for name in self.models}
-        
-        while self.mel_buffer.shape[0] >= 76:
-            mel_chunk = self.mel_buffer[:76, :].reshape(1, 76, 32, 1)
-            self.mel_buffer = self.mel_buffer[8:, :]
-            emb = self.embedding.run(None, {"input_1": mel_chunk})[0]
-            emb = emb.flatten()[:96]
-            
-            for name in self.models:
-                self.buffers[name] = np.roll(self.buffers[name], -1, axis=1)
-                self.buffers[name][0, -1, :] = emb
-            
-            for name, model_info in self.models.items():
-                out = model_info["session"].run(None, {model_info["input_name"]: self.buffers[name]})[0]
-                results[name] = max(results[name], float(out[0][0]))
-        
-        return results
-    
+
+        self._buffer = np.concatenate([self._buffer, audio])
+        frame_len = self._porcupine.frame_length
+        result = {kw: 0.0 for kw in self._keywords}
+
+        while len(self._buffer) >= frame_len:
+            frame = self._buffer[:frame_len]
+            self._buffer = self._buffer[frame_len:]
+            idx = self._porcupine.process(frame)
+            if idx >= 0:
+                result[self._keywords[idx]] = 1.0
+
+        return result
+
     def reset(self):
-        for name in self.buffers:
-            self.buffers[name] = np.zeros((1, 16, 96), dtype=np.float32)
-        self.mel_buffer = np.zeros((0, 32), dtype=np.float32)
+        self._buffer = np.array([], dtype=np.int16)
+
+    def delete(self):
+        self._porcupine.delete()

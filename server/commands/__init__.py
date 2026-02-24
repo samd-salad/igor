@@ -32,3 +32,9 @@ def execute(name: str, **kwargs) -> str:
     if name not in _registry:
         return f"Unknown command: {name}"
     return _registry[name].execute(**kwargs)
+
+def inject_pi_client(pi_client):
+    """Inject pi_client into hardware commands that need it."""
+    for cmd in _registry.values():
+        if hasattr(cmd, 'pi_client') or cmd.name in ('set_volume', 'get_volume'):
+            cmd.pi_client = pi_client

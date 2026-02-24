@@ -92,7 +92,7 @@ class SetTimerCommand(Command):
             else:
                 duration_str = f"{mins} minute{'s' if mins != 1 else ''}"
         else:
-            duration_str = f"{int(seconds)} second{'s' if seconds != 1 else ''}"
+            duration_str = f"{int(seconds)} second{'s' if int(seconds) != 1 else ''}"
 
         return f"Timer '{name}' set for {duration_str}"
 

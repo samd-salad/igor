@@ -12,12 +12,17 @@ class Command(ABC):
     def parameters(self) -> dict:
         """JSON schema for command parameters."""
         pass
-    
+
+    @property
+    def required_parameters(self) -> list:
+        """List of required parameter names. Override to make some optional."""
+        return list(self.parameters.keys())
+
     @abstractmethod
     def execute(self, **kwargs) -> str:
         """Execute the command and return a response string."""
         pass
-    
+
     def to_tool(self) -> dict:
         """Convert to Claude tool format."""
         return {
@@ -26,6 +31,6 @@ class Command(ABC):
             "input_schema": {
                 "type": "object",
                 "properties": self.parameters,
-                "required": list(self.parameters.keys())
+                "required": self.required_parameters
             }
         }

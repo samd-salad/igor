@@ -91,6 +91,7 @@ class Orchestrator:
                 'commands_executed': [],
                 'timings': {},
                 'speaker': None,
+                'await_followup': False,
                 'error': 'Audio file too large'
             }
 
@@ -107,6 +108,7 @@ class Orchestrator:
                 'commands_executed': [],
                 'timings': timings,
                 'speaker': None,
+                'await_followup': False,
                 'error': 'Speech recognition failed'
             }
 
@@ -150,15 +152,16 @@ class Orchestrator:
             commands_executed.append(name)
             return self._execute_command(name, **kwargs)
 
-        response_text = self.llm.chat(
+        llm_result = self.llm.chat(
             user_text=transcription,
             tools=tools,
             tool_executor=tool_executor,
-            persistent_memory=persistent_memory
+            persistent_memory=persistent_memory,
+            speaker=speaker_name
         )
         timings['llm'] = time.time() - start
 
-        if not response_text:
+        if not llm_result:
             logger.error("LLM failed to generate response")
             return {
                 'transcription': transcription,
@@ -167,8 +170,11 @@ class Orchestrator:
                 'commands_executed': commands_executed,
                 'timings': timings,
                 'speaker': speaker_name,
+                'await_followup': False,
                 'error': 'AI processing failed'
             }
+
+        response_text, await_followup = llm_result
 
         logger.info(f"LLM response generated")
         self._log_benchmark('llm', timings['llm'])
@@ -187,6 +193,7 @@ class Orchestrator:
                 'commands_executed': commands_executed,
                 'timings': timings,
                 'speaker': speaker_name,
+                'await_followup': await_followup,
                 'error': 'Text-to-speech failed'
             }
 
@@ -210,6 +217,7 @@ class Orchestrator:
             'commands_executed': commands_executed,
             'timings': timings,
             'speaker': speaker_name,
+            'await_followup': await_followup,
             'error': None
         }
 
@@ -368,12 +376,12 @@ class Orchestrator:
         # Format log message
         logger.info(f"Interaction complete in {total:.2f}s")
         logger.info(f"┌─────┬──────┬───────┬────────┬───────┐")
-        logger.info(f"│Stage│ Time │vs Avg │Per Word│vs Avg │")
+        logger.info(f"│Stage│ Time │vs. Avg│Per Word│vs. Avg│")
         logger.info(f"├─────┼──────┼───────┼────────┼───────┤")
-        logger.info(f"│ STT │{stt_time:5.2f}s│{compare(stt_time, stt_stats['avg_duration']):>7s}│{stt_per_word:7.3f}s│{compare(stt_per_word, stt_stats['avg_per_word']):>8s}│")
-        logger.info(f"│ LLM │{llm_time:5.2f}s│{compare(llm_time, llm_stats['avg_duration']):>7s}│  {'N/A':>5s} │  {'N/A':>4s} │")
-        logger.info(f"│ TTS │{tts_time:5.2f}s│{compare(tts_time, tts_stats['avg_duration']):>7s}│{tts_per_word:7.3f}s│{compare(tts_per_word, tts_stats['avg_per_word']):>8s}│")
-        logger.info(f"└─────┴──────┴────────┴─────────┴────────┘")
+        logger.info(f"│ STT │{stt_time:5.2f}s│  {compare(stt_time, stt_stats['avg_duration']):>4s} │ {stt_per_word:5.3f}s │  {compare(stt_per_word, stt_stats['avg_per_word']):>4s} │")
+        logger.info(f"│ LLM │{llm_time:5.2f}s│  {compare(llm_time, llm_stats['avg_duration']):>4s} │  {'N/A':>5s} │  {'N/A':>4s} │")
+        logger.info(f"│ TTS │{tts_time:5.2f}s│  {compare(tts_time, tts_stats['avg_duration']):>4s} │ {tts_per_word:5.3f}s │  {compare(tts_per_word, tts_stats['avg_per_word']):>4s} │")
+        logger.info(f"└─────┴──────┴───────┴────────┴───────┘")
 
     def get_conversation_history(self) -> List[Dict]:
         """Get current conversation history from LLM."""

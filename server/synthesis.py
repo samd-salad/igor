@@ -1,5 +1,6 @@
 """Text-to-speech synthesis using Piper."""
 import logging
+import re
 import subprocess
 import tempfile
 import os
@@ -9,6 +10,46 @@ from typing import Optional
 from server.config import PIPER_VOICE, PIPER_SAMPLE_RATE
 
 logger = logging.getLogger(__name__)
+
+
+def _preprocess_text(text: str) -> str:
+    """
+    Clean text for TTS synthesis.
+
+    - Removes/replaces quotes that cause Piper parsing errors
+    - Normalizes punctuation for natural speech
+    - Removes problematic characters
+    """
+    # Replace smart quotes with nothing (they cause issues)
+    text = text.replace('"', '').replace('"', '').replace('"', '')
+    text = text.replace("'", "'").replace("'", "'")  # Normalize apostrophes
+
+    # Remove straight double quotes entirely (cause Piper errors)
+    text = text.replace('"', '')
+
+    # Replace semicolons with commas (more natural pause)
+    text = text.replace(';', ',')
+
+    # Replace colons mid-sentence with commas (except time like 3:00)
+    text = re.sub(r':(?!\d)', ',', text)
+
+    # Normalize multiple spaces
+    text = re.sub(r' +', ' ', text)
+
+    # Remove asterisks (markdown artifacts)
+    text = text.replace('*', '')
+
+    # Normalize dashes to simple pauses
+    text = text.replace('—', ', ').replace('–', ', ').replace(' - ', ', ')
+
+    # Remove parentheses (speak content naturally)
+    text = text.replace('(', ', ').replace(')', ', ')
+
+    # Clean up multiple commas/spaces from replacements
+    text = re.sub(r',\s*,', ',', text)
+    text = re.sub(r' +', ' ', text)
+
+    return text.strip()
 
 
 class Synthesizer:
@@ -38,6 +79,13 @@ class Synthesizer:
         """
         if not text:
             logger.warning("Empty text provided for synthesis")
+            return None
+
+        # Preprocess text to avoid TTS errors
+        text = _preprocess_text(text)
+
+        if not text:
+            logger.warning("Text empty after preprocessing")
             return None
 
         # Truncate text for logging to avoid leaking sensitive data

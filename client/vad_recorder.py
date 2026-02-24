@@ -28,10 +28,15 @@ class VADRecorder:
         """Calculate Root Mean Square of audio chunk."""
         return np.sqrt(np.mean(audio_chunk.astype(np.float32) ** 2))
 
-    def record_with_vad(self, output_path: str) -> bool:
+    def record_with_vad(self, output_path: str, initial_timeout: float = None) -> bool:
         """
         Record audio with VAD state machine.
-        Returns True if speech was captured, False otherwise.
+
+        Args:
+            output_path: Path to save WAV file
+            initial_timeout: Max seconds to wait for speech to begin (None = no limit)
+
+        Returns True if speech was captured, False otherwise (including timeout).
         """
         stream = self.pa.open(
             rate=self.sample_rate,
@@ -50,12 +55,14 @@ class VADRecorder:
         frames = []
         silence_frames = 0
         total_frames = 0
+        waiting_frames = 0
 
         # Calculate frame counts
         frames_per_second = self.sample_rate / self.chunk_size
         min_frames = int(MIN_RECORDING * frames_per_second)
         max_frames = int(MAX_RECORDING * frames_per_second)
         silence_threshold_frames = int(SILENCE_END_DURATION * frames_per_second)
+        initial_timeout_frames = int(initial_timeout * frames_per_second) if initial_timeout else None
 
         try:
             while state != VADState.DONE:
@@ -66,7 +73,11 @@ class VADRecorder:
                 is_speech = rms > RMS_SILENCE_THRESHOLD
 
                 if state == VADState.WAITING_FOR_SPEECH:
-                    if is_speech:
+                    waiting_frames += 1
+                    # Check for initial timeout (e.g., follow-up mode)
+                    if initial_timeout_frames and waiting_frames >= initial_timeout_frames:
+                        state = VADState.DONE  # Timeout, no speech detected
+                    elif is_speech:
                         state = VADState.RECORDING
                         frames.append(audio_bytes)
                         total_frames = 1

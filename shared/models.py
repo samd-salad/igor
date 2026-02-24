@@ -64,6 +64,7 @@ class ProcessInteractionResponse(BaseModel):
     commands_executed: List[str] = Field(default_factory=list, max_length=50, description="List of command names executed")
     timings: Dict[str, float] = Field(default_factory=dict, description="Performance timings for each stage")
     speaker: Optional[str] = Field(None, max_length=100, description="Identified speaker name, if recognized")
+    await_followup: bool = Field(False, description="If true, bot is expecting a follow-up response (no wake word needed)")
     error: Optional[str] = Field(None, max_length=1000, description="Error message if processing failed")
 
 

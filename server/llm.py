@@ -1,52 +1,84 @@
-"""LLM integration with Ollama for conversational AI."""
+"""LLM integration with Claude API for conversational AI."""
 import logging
 import re
-from typing import Optional, List, Dict
-import requests
+from typing import Optional, List, Dict, Tuple
+import anthropic
 
-from server.config import OLLAMA_URL, OLLAMA_MODEL, MAX_CONVERSATION_HISTORY
+from datetime import datetime
+from server.config import CLAUDE_API_KEY, CLAUDE_MODEL, MAX_CONVERSATION_HISTORY
 from prompt import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
 
 class LLM:
-    """Handles LLM interactions with Ollama."""
+    """Handles LLM interactions with the Claude API."""
 
-    def __init__(self, url: str = OLLAMA_URL, model: str = OLLAMA_MODEL, max_history: int = MAX_CONVERSATION_HISTORY):
-        self.url = url
+    def __init__(self, api_key: str = CLAUDE_API_KEY, model: str = CLAUDE_MODEL, max_history: int = MAX_CONVERSATION_HISTORY):
+        self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
         self.max_history = max_history
         self.conversation_history: List[Dict] = []
-        logger.info(f"LLM initialized: {url} ({model})")
+        logger.info(f"LLM initialized: Claude API ({model})")
 
-    def _get_system_prompt(self, persistent_memory: str = "") -> str:
-        """Build system prompt with current persistent memory."""
-        return SYSTEM_PROMPT.format(persistent_memory=persistent_memory)
+    def _get_system_prompt(self, persistent_memory: str = "", speaker: str = None) -> str:
+        """Build system prompt with current context injected."""
+        now = datetime.now()
+        time_context = f"Current: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
 
-    def _convert_tools(self, tools: List[Dict]) -> List[Dict]:
-        """Convert Anthropic tool format to Ollama/OpenAI format."""
-        return [{
-            "type": "function",
-            "function": {
-                "name": t["name"],
-                "description": t["description"],
-                "parameters": t["input_schema"]
-            }
-        } for t in tools]
+        if speaker:
+            time_context += f" | Speaking: {speaker}"
+
+        prompt = SYSTEM_PROMPT.format(persistent_memory=persistent_memory)
+        prompt += f"\n<current_context>\n{time_context}\n</current_context>"
+        return prompt
 
     @staticmethod
-    def _strip_thinking(text: str) -> str:
-        """Remove Qwen3 thinking tags from response."""
-        return re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL).strip()
+    def _strip_await_marker(text: str) -> Tuple[str, bool]:
+        """
+        Detect and strip [AWAIT] marker from response.
+
+        Returns:
+            Tuple of (cleaned_text, await_followup)
+        """
+        await_pattern = r'\s*\[AWAIT\]\s*$'
+        if re.search(await_pattern, text, re.IGNORECASE):
+            cleaned = re.sub(await_pattern, '', text, flags=re.IGNORECASE).strip()
+            return (cleaned, True)
+        return (text, False)
+
+    @staticmethod
+    def _serialize_content(content) -> list:
+        """Convert Anthropic SDK content block objects to plain dicts for history storage."""
+        result = []
+        for block in content:
+            if block.type == "text":
+                result.append({"type": "text", "text": block.text})
+            elif block.type == "tool_use":
+                result.append({
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                })
+        return result
+
+    def _trim_history(self):
+        """Trim conversation history to max_history and ensure it starts with a user message."""
+        if len(self.conversation_history) > self.max_history:
+            self.conversation_history = self.conversation_history[-self.max_history:]
+        # Claude API requires messages start with 'user' role
+        while self.conversation_history and self.conversation_history[0]["role"] != "user":
+            self.conversation_history.pop(0)
 
     def chat(
         self,
         user_text: str,
         tools: List[Dict],
         tool_executor,
-        persistent_memory: str = ""
-    ) -> Optional[str]:
+        persistent_memory: str = "",
+        speaker: str = None
+    ) -> Optional[Tuple[str, bool]]:
         """
         Send message to LLM and get response.
 
@@ -55,63 +87,53 @@ class LLM:
             tools: List of available tools in Anthropic format
             tool_executor: Callback function to execute tools (name, **kwargs) -> result
             persistent_memory: Persistent memory to include in system prompt
+            speaker: Identified speaker name (if known)
 
         Returns:
-            LLM's reply or None on failure
+            Tuple of (reply_text, await_followup) or None on failure
         """
-        # Add user message to history
         self.conversation_history.append({"role": "user", "content": user_text})
+        self._trim_history()
 
-        # Trim history if needed
-        if len(self.conversation_history) > self.max_history:
-            self.conversation_history = self.conversation_history[-self.max_history:]
-
-        # Build messages with system prompt
-        messages = [
-            {"role": "system", "content": self._get_system_prompt(persistent_memory)}
-        ] + self.conversation_history
-
-        # Convert tools to Ollama format
-        ollama_tools = self._convert_tools(tools)
+        system_prompt = self._get_system_prompt(persistent_memory, speaker)
 
         # First LLM call
         try:
-            # Truncate user text for logging to avoid leaking sensitive data
             log_text = user_text[:50] + "..." if len(user_text) > 50 else user_text
             logger.debug(f"Sending message to LLM: '{log_text}'")
-            response = requests.post(
-                f"{self.url}/api/chat",
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "tools": ollama_tools,
-                    "stream": False,
-                    "keep_alive": "30m"  # Keep model loaded for 30 minutes
-                },
-                timeout=60
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=1024,
+                system=system_prompt,
+                tools=tools,
+                messages=self.conversation_history,
             )
-            response.raise_for_status()
-            message = response.json().get("message", {})
-        except requests.Timeout:
-            logger.error("LLM request timed out")
+        except anthropic.APIStatusError as e:
+            logger.error(f"LLM request failed ({e.status_code}): {e.message}")
             return None
-        except requests.RequestException as e:
-            logger.error(f"LLM request failed: {e}")
+        except anthropic.APIConnectionError as e:
+            logger.error(f"LLM connection error: {e}")
             return None
         except Exception as e:
             logger.error(f"LLM error: {e}")
             return None
 
         # Handle tool calls
-        if message.get("tool_calls"):
-            logger.info(f"LLM requested {len(message['tool_calls'])} tool call(s)")
+        if response.stop_reason == "tool_use":
+            tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+            logger.info(f"LLM requested {len(tool_use_blocks)} tool call(s)")
+
+            # Store assistant turn with full content (text + tool_use blocks)
+            self.conversation_history.append({
+                "role": "assistant",
+                "content": self._serialize_content(response.content),
+            })
+
+            # Execute each tool and collect results
             tool_results = []
-
-            for tool_call in message["tool_calls"]:
-                func = tool_call["function"]
-                tool_name = func["name"]
-                tool_args = func["arguments"]
-
+            for tool_use in tool_use_blocks:
+                tool_name = tool_use.name
+                tool_args = tool_use.input
                 logger.info(f"Executing tool: {tool_name}({tool_args})")
                 try:
                     result = tool_executor(tool_name, **tool_args)
@@ -120,56 +142,52 @@ class LLM:
                     logger.error(f"Tool '{tool_name}' failed: {e}")
                     result = f"Error executing {tool_name}: {e}"
 
-                tool_results.append({"role": "tool", "content": result})
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use.id,
+                    "content": str(result),
+                })
 
-            # Add tool call message and results to history
-            self.conversation_history.append(message)
-            self.conversation_history.extend(tool_results)
-
-            # Rebuild messages with tool results
-            messages = [
-                {"role": "system", "content": self._get_system_prompt(persistent_memory)}
-            ] + self.conversation_history
+            # Tool results go back as a user message (Anthropic format)
+            self.conversation_history.append({
+                "role": "user",
+                "content": tool_results,
+            })
 
             # Follow-up LLM call
             try:
                 logger.debug("Sending follow-up message to LLM with tool results")
-                response = requests.post(
-                    f"{self.url}/api/chat",
-                    json={
-                        "model": self.model,
-                        "messages": messages,
-                        "tools": ollama_tools,
-                        "stream": False,
-                        "keep_alive": "30m"  # Keep model loaded
-                    },
-                    timeout=60
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=1024,
+                    system=system_prompt,
+                    tools=tools,
+                    messages=self.conversation_history,
                 )
-                response.raise_for_status()
-                message = response.json().get("message", {})
             except Exception as e:
                 logger.error(f"LLM follow-up failed: {e}")
                 return None
 
-        # Extract and clean response
-        reply = self._strip_thinking(message.get("content", ""))
+        # Extract text from final response
+        reply = "".join(block.text for block in response.content if block.type == "text").strip()
 
         if not reply:
             logger.warning("LLM returned empty response")
             return None
 
-        # Truncate reply for logging
+        reply, await_followup = self._strip_await_marker(reply)
+
+        if await_followup:
+            logger.info("LLM is awaiting follow-up response")
+
         log_reply = reply[:100] + "..." if len(reply) > 100 else reply
         logger.info(f"LLM replied: '{log_reply}'")
 
-        # Add assistant message to history
+        # Store final assistant turn
         self.conversation_history.append({"role": "assistant", "content": reply})
+        self._trim_history()
 
-        # Trim history again
-        if len(self.conversation_history) > self.max_history:
-            self.conversation_history = self.conversation_history[-self.max_history:]
-
-        return reply
+        return (reply, await_followup)
 
     def clear_history(self):
         """Clear conversation history."""

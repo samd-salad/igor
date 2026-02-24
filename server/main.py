@@ -16,12 +16,13 @@ from server.pi_callback import PiCallbackClient
 from server.orchestrator import Orchestrator
 from server.api import create_app
 from server.event_loop import initialize_event_loop
+import server.commands as commands
 from server.config import (
     SERVER_HOST,
     SERVER_PORT,
     WHISPER_MODEL,
-    OLLAMA_URL,
-    OLLAMA_MODEL,
+    CLAUDE_MODEL,
+    CLAUDE_API_KEY,
     PIPER_VOICE,
     PI_HOST,
     PI_PORT
@@ -30,6 +31,10 @@ from shared.utils import setup_logging
 
 # Configure logging
 logger = setup_logging('server', level=logging.INFO)
+
+if not CLAUDE_API_KEY:
+    logger.error("ANTHROPIC_API_KEY environment variable is not set. Exiting.")
+    sys.exit(1)
 
 
 def initialize_services():
@@ -44,8 +49,8 @@ def initialize_services():
         sys.exit(1)
 
     # Initialize LLM
-    logger.info(f"Connecting to Ollama: {OLLAMA_URL} ({OLLAMA_MODEL})")
-    llm = LLM(OLLAMA_URL, OLLAMA_MODEL)
+    logger.info(f"Connecting to Claude API ({CLAUDE_MODEL})")
+    llm = LLM()
 
     # Initialize Synthesizer
     logger.info(f"Loading Piper voice: {PIPER_VOICE}")
@@ -59,6 +64,9 @@ def initialize_services():
     pi_url = f"http://{PI_HOST}:{PI_PORT}"
     logger.info(f"Pi client URL: {pi_url}")
     pi_client = PiCallbackClient(pi_url)
+
+    # Inject pi_client into hardware commands
+    commands.inject_pi_client(pi_client)
 
     # Initialize Event Loop (for timers with Pi callbacks)
     logger.info("Starting event loop for timers")
