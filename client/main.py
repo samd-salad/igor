@@ -4,6 +4,8 @@ import sys
 import logging
 import time
 import threading
+import wave
+from collections import deque
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -14,8 +16,12 @@ from client.config import (
     SERVER_URL,
     CLIENT_HOST,
     CLIENT_PORT,
+    SAMPLE_RATE,
     OWW_MODEL_PATHS,
     OWW_THRESHOLD,
+    OWW_AUTO_SAVE_SAMPLES,
+    OWW_SAMPLE_BUFFER_SECONDS,
+    WAKE_SAMPLES_DIR,
     TEMP_WAV,
     REQUEST_TIMEOUT,
     FOLLOWUP_TIMEOUT
@@ -118,12 +124,19 @@ class PiClient:
     def _handle_interaction(self):
         """Handle a single voice interaction (may include follow-ups)."""
         logger.debug("Listening for wake word...")
-        stream = self.audio.open_stream()
 
+        # Rolling buffer: keeps the last N chunks so we can save the detection audio
+        chunk_bytes = 1280
+        buffer_chunks = int(OWW_SAMPLE_BUFFER_SECONDS * SAMPLE_RATE * 2 / chunk_bytes) + 1
+        audio_buffer = deque(maxlen=buffer_chunks) if OWW_AUTO_SAVE_SAMPLES else None
+
+        stream = self.audio.open_stream()
         try:
             wake_word = None
             while not wake_word:
-                audio_bytes = stream.read(1280, exception_on_overflow=False)
+                audio_bytes = stream.read(chunk_bytes, exception_on_overflow=False)
+                if audio_buffer is not None:
+                    audio_buffer.append(audio_bytes)
                 predictions = self.wakeword_detector.predict(audio_bytes)
                 for name, score in predictions.items():
                     if score >= OWW_THRESHOLD:
@@ -138,6 +151,9 @@ class PiClient:
 
         logger.info(f"Wake word detected: {wake_word}")
         self.wakeword_detector.reset()
+
+        if audio_buffer:
+            self._save_wake_sample(audio_buffer)
         time.sleep(0.2)
 
         try:
@@ -147,6 +163,21 @@ class PiClient:
 
         time.sleep(0.1)
         self._process_and_respond(wake_word, is_followup=False)
+
+    def _save_wake_sample(self, audio_buffer: deque):
+        """Save the buffered detection audio as a positive training sample."""
+        try:
+            WAKE_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
+            existing = len(list(WAKE_SAMPLES_DIR.glob("auto_*.wav")))
+            filepath = WAKE_SAMPLES_DIR / f"auto_{existing:04d}.wav"
+            with wave.open(str(filepath), 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(SAMPLE_RATE)
+                wf.writeframes(b"".join(audio_buffer))
+            logger.debug(f"Saved wake sample: {filepath.name}")
+        except Exception as e:
+            logger.warning(f"Failed to save wake sample: {e}")
 
     MAX_FOLLOWUP_DEPTH = 5
 

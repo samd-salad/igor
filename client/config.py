@@ -25,6 +25,12 @@ OWW_MODEL_DIR = BASE_DIR / "oww_models"
 OWW_MODEL_PATHS = [str(p) for p in sorted(OWW_MODEL_DIR.glob("*.onnx"))]
 OWW_THRESHOLD = 0.5  # Detection threshold (0–1). Higher = fewer false positives.
 
+# Auto-save detected wake words as training samples
+# Saves the audio that triggered each detection to wakeword_samples/positive/
+OWW_AUTO_SAVE_SAMPLES = True
+OWW_SAMPLE_BUFFER_SECONDS = 2.5  # How much audio before detection to capture
+WAKE_SAMPLES_DIR = BASE_DIR / "wakeword_samples" / "positive"
+
 # Voice Activity Detection (VAD) settings
 SILENCE_END_DURATION = 2.0
 RMS_SILENCE_THRESHOLD = 1200

@@ -65,11 +65,16 @@ rsync -av pi@<PI_IP>:~/smart_assistant/wakeword_samples/ wakeword_samples/
 ### Step 3 — Train the model (on PC)
 
 ```bash
-pip install openwakeword[training]   # one-time
+# One-time installs (CPU-only torch ~150 MB):
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install openwakeword
+
 python onnx_models/wakeword_creation/train_wakeword.py
 ```
 
 Output: `oww_models/doctor_butts.onnx`
+
+The script uses synthetic negatives (noise/silence) by default. For fewer false positives in noisy rooms, record real background audio (TV, music, other speech) into `wakeword_samples/negative/*.wav` — the script picks them up automatically.
 
 ### Step 4 — Deploy to Pi
 

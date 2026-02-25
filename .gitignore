@@ -6,9 +6,6 @@ venv/
 .venv/
 
 # Local data (contains personal info)
-memory.txt
-known_devices.json
-benchmark.csv
 data/*.txt
 data/*.json
 data/*.csv
@@ -16,8 +13,18 @@ data/*.csv
 # Claude Code local settings
 .claude/
 
-# Audio temp files
+# Audio files (recordings, samples)
 *.wav
+
+# Trained wake word models (personal voice data, large binaries)
+oww_models/*.onnx
+
+# Wake word samples (personal voice recordings)
+wakeword_samples/positive/*.wav
+wakeword_samples/negative/*.wav
+
+# Speaker embeddings (biometric voice data)
+data/speaker_embeddings.json
 
 # IDE
 .vscode/
