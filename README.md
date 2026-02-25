@@ -2,9 +2,8 @@
 
 Local, privacy-focused voice assistant. Say "Doctor Butts" and ask questions, set timers, control volume, or just chat.
 
-- **Pi (Client)**: Wake word detection, audio recording/playback, hardware control
-- **PC (Server)**: Whisper STT, Claude LLM, Piper TTS
-- **Wake word**: Picovoice Porcupine (custom keywords, no training required)
+- **Pi (Client)**: Sherpa-ONNX wake word, audio recording/playback, hardware control
+- **PC (Server)**: Whisper STT, Claude API LLM, Piper TTS
 
 ---
 
@@ -29,18 +28,19 @@ python -m server.main
 
 ### Client (Pi)
 
-**1. Get Porcupine keyword files:**
-- Create a free account at [console.picovoice.ai](https://console.picovoice.ai)
-- Create keywords: "doctor butts" and "stop"
-- Download `.ppn` files for **Raspberry Pi** (Cortex-A72 for Pi 4, Cortex-A53 for Pi 3)
-- Place in `porcupine_models/`
+**1. Download the wake word model:**
+```bash
+mkdir -p sherpa_onnx_models && cd sherpa_onnx_models
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2
+tar xf sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2 --strip-components=1
+rm sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2
+cd ..
+```
 
 **2. Install and run:**
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-client.txt
-
-export PORCUPINE_ACCESS_KEY=your-key-here
 python -m client.main
 ```
 
@@ -49,15 +49,14 @@ python -m client.main
 Edit `server/config.py`:
 ```python
 PI_HOST = "192.168.0.3"   # Your Pi's IP
-PI_PORT = 8080
 ```
 
 Edit `client/config.py`:
 ```python
-SERVER_HOST = "192.168.0.4"          # Your PC's IP
-AUDIO_DEVICE = "plughw:2,0"          # Run 'arecord -L' to find yours
-PORCUPINE_KEYWORD_PATHS = [...]       # Paths to your .ppn files
-PORCUPINE_SENSITIVITIES = [0.5, 0.5] # Per-keyword sensitivity
+SERVER_HOST = "192.168.0.4"   # Your PC's IP
+AUDIO_DEVICE = "plughw:2,0"   # Run 'arecord -L' to find yours
+WAKE_WORDS = ["doctor butts", "stop"]
+WAKE_THRESHOLD = 0.25         # Lower = more sensitive
 ```
 
 ---
@@ -89,7 +88,6 @@ Create unit files at `/etc/systemd/system/drbutts-server.service` and `drbutts-c
 ```ini
 [Service]
 Environment="ANTHROPIC_API_KEY=..."   # server only
-Environment="PORCUPINE_ACCESS_KEY=..." # client only
 ExecStart=/path/to/.venv/bin/python -m server.main
 Restart=always
 ```
@@ -104,11 +102,11 @@ sudo systemctl enable drbutts-server && sudo systemctl start drbutts-server
 
 | Problem | Fix |
 |---------|-----|
-| Wake word not triggering | Adjust `PORCUPINE_SENSITIVITIES` (higher = more sensitive) |
-| `.ppn` file not found | Check `PORCUPINE_KEYWORD_PATHS` in `client/config.py` |
+| Wake word not triggering | Lower `WAKE_THRESHOLD` in `client/config.py` |
+| Model directory not found | Check `SHERPA_MODEL_DIR` path, re-run download steps |
 | Can't connect to server | Verify IPs in config, check firewall (ports 8000 PC, 8080 Pi) |
 | Audio device not found | Run `arecord -L`, update `AUDIO_DEVICE` |
-| No API key error | Set `ANTHROPIC_API_KEY` / `PORCUPINE_ACCESS_KEY` env vars |
+| No API key error | Set `ANTHROPIC_API_KEY` env var |
 
 ```bash
 sudo journalctl -u drbutts-server -f

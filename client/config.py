@@ -15,17 +15,17 @@ CLIENT_PORT = 8080
 SAMPLE_RATE = 16000
 AUDIO_DEVICE = "plughw:2,0"  # Run 'arecord -L' to find yours
 
-# Porcupine wake word detection
-# Get a free access key at console.picovoice.ai
-PORCUPINE_ACCESS_KEY = os.environ.get("PORCUPINE_ACCESS_KEY", "")
+# Paths
+BASE_DIR = Path(__file__).parent.parent
+TEMP_WAV = "/tmp/recording.wav"
 
-# Download .ppn files from console.picovoice.ai for your Pi's CPU:
-#   Pi 4 → Cortex-A72    Pi 3 → Cortex-A53
-PORCUPINE_KEYWORD_PATHS = [
-    str(Path(__file__).parent.parent / "porcupine_models" / "doctor-butts_en_raspberry-pi_v3_0_0.ppn"),
-    str(Path(__file__).parent.parent / "porcupine_models" / "stop_en_raspberry-pi_v3_0_0.ppn"),
-]
-PORCUPINE_SENSITIVITIES = [0.5, 0.5]  # Per-keyword, 0.0–1.0 (higher = more sensitive)
+# Sherpa-ONNX keyword spotting
+# Download model: https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models
+# Recommended: sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01
+# Extract contents into sherpa_onnx_models/
+SHERPA_MODEL_DIR = str(BASE_DIR / "sherpa_onnx_models")
+WAKE_WORDS = ["doctor butts", "stop"]
+WAKE_THRESHOLD = 0.25  # Lower = more sensitive (more false positives)
 
 # Voice Activity Detection (VAD) settings
 SILENCE_END_DURATION = 2.0
@@ -35,10 +35,6 @@ MAX_RECORDING = 15
 
 # Follow-up mode settings
 FOLLOWUP_TIMEOUT = 5.0
-
-# Paths
-BASE_DIR = Path(__file__).parent.parent
-TEMP_WAV = "/tmp/recording.wav"
 
 # Request timeouts
 REQUEST_TIMEOUT = 60.0

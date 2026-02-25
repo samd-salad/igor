@@ -14,9 +14,9 @@ from client.config import (
     SERVER_URL,
     CLIENT_HOST,
     CLIENT_PORT,
-    PORCUPINE_ACCESS_KEY,
-    PORCUPINE_KEYWORD_PATHS,
-    PORCUPINE_SENSITIVITIES,
+    SHERPA_MODEL_DIR,
+    WAKE_WORDS,
+    WAKE_THRESHOLD,
     TEMP_WAV,
     REQUEST_TIMEOUT,
     FOLLOWUP_TIMEOUT
@@ -45,29 +45,24 @@ class PiClient:
         """Initialize all client components."""
         logger.info("Initializing Dr. Butts Voice Assistant Client...")
 
-        if not PORCUPINE_ACCESS_KEY:
-            logger.error("PORCUPINE_ACCESS_KEY environment variable not set")
-            return False
-
         logger.info("Loading audio system...")
         if not self.audio.initialize():
             logger.error("Failed to initialize audio")
             return False
 
-        logger.info("Loading wake word detection (Porcupine)...")
+        logger.info("Loading wake word detection (Sherpa-ONNX)...")
         try:
-            for path in PORCUPINE_KEYWORD_PATHS:
-                if not Path(path).exists():
-                    logger.error(f"Porcupine keyword model not found: {path}")
-                    logger.error("Download .ppn files from console.picovoice.ai and place in porcupine_models/")
-                    return False
+            if not Path(SHERPA_MODEL_DIR).exists():
+                logger.error(f"Sherpa-ONNX model directory not found: {SHERPA_MODEL_DIR}")
+                logger.error("Download model from https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models")
+                return False
 
             self.wakeword_detector = WakeWordDetector(
-                access_key=PORCUPINE_ACCESS_KEY,
-                keyword_paths=PORCUPINE_KEYWORD_PATHS,
-                sensitivities=PORCUPINE_SENSITIVITIES,
+                model_dir=SHERPA_MODEL_DIR,
+                keywords=WAKE_WORDS,
+                threshold=WAKE_THRESHOLD,
             )
-            logger.info("Wake word detection initialized")
+            logger.info(f"Wake word detection initialized. Keywords: {WAKE_WORDS}")
 
         except Exception as e:
             logger.error(f"Failed to initialize wake word detection: {e}")
@@ -132,7 +127,7 @@ class PiClient:
                 audio_bytes = stream.read(1280, exception_on_overflow=False)
                 predictions = self.wakeword_detector.predict(audio_bytes)
                 for name, score in predictions.items():
-                    if score >= 0.5:
+                    if score >= WAKE_THRESHOLD:
                         wake_word = name
                         break
         finally:

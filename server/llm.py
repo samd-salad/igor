@@ -64,11 +64,17 @@ class LLM:
         return result
 
     def _trim_history(self):
-        """Trim conversation history to max_history and ensure it starts with a user message."""
+        """Trim history and ensure it starts with a plain-text user message.
+
+        A tool_result user message without its preceding tool_use assistant message
+        causes a Claude API validation error, so we walk past any such orphaned messages.
+        """
         if len(self.conversation_history) > self.max_history:
             self.conversation_history = self.conversation_history[-self.max_history:]
-        # Claude API requires messages start with 'user' role
-        while self.conversation_history and self.conversation_history[0]["role"] != "user":
+        while self.conversation_history:
+            first = self.conversation_history[0]
+            if first["role"] == "user" and isinstance(first["content"], str):
+                break
             self.conversation_history.pop(0)
 
     def chat(

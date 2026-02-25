@@ -242,7 +242,7 @@ class ListKnownDevicesCommand(Command):
     def parameters(self) -> dict:
         return {}
 
-    def execute(self) -> str:
+    def execute(self, **_) -> str:
         devices = get_known_devices()
         if not devices:
             return "No known devices configured"
@@ -261,7 +261,7 @@ class ScanNetworkCommand(Command):
     def parameters(self) -> dict:
         return {}
 
-    def execute(self) -> str:
+    def execute(self, **_) -> str:
         devices = scan_network()
         if not devices:
             return "No devices found on network (scan may have failed)"
@@ -293,7 +293,7 @@ class PendingNetworkAlertsCommand(Command):
     def parameters(self) -> dict:
         return {}
 
-    def execute(self) -> str:
+    def execute(self, **_) -> str:
         alerts = get_pending_alerts()
         if not alerts:
             return "No pending network alerts"

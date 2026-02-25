@@ -3,7 +3,7 @@ import logging
 import requests
 from typing import Optional
 
-from shared.protocol import CLIENT_BASE_URL, PLAY_AUDIO_ENDPOINT, HARDWARE_CONTROL_ENDPOINT, PLAY_BEEP_ENDPOINT, REQUEST_TIMEOUT
+from shared.protocol import PLAY_AUDIO_ENDPOINT, HARDWARE_CONTROL_ENDPOINT, PLAY_BEEP_ENDPOINT, REQUEST_TIMEOUT
 from shared.models import PlayAudioRequest, HardwareControlRequest, PlayBeepRequest, BeepType, Priority, Status
 from shared.utils import encode_audio_base64
 
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class PiCallbackClient:
     """Handles callbacks from server to Pi for audio playback and hardware control."""
 
-    def __init__(self, pi_base_url: str = CLIENT_BASE_URL):
+    def __init__(self, pi_base_url: str):
         self.pi_base_url = pi_base_url
         logger.info(f"PiCallbackClient initialized: {pi_base_url}")
 
@@ -37,7 +37,7 @@ class PiCallbackClient:
                 priority=Priority(priority)
             )
 
-            logger.info(f"Sending audio to Pi: '{message[:50]}...'")
+            logger.info(f"Sending audio to Pi: '{message[:50]}{'...' if len(message) > 50 else ''}'")
             response = requests.post(
                 f"{self.pi_base_url}{PLAY_AUDIO_ENDPOINT}",
                 json=request.model_dump(),

@@ -387,10 +387,6 @@ class Orchestrator:
         """Get current conversation history from LLM."""
         return self.llm.get_history()
 
-    def set_conversation_history(self, history: List[Dict]):
-        """Set conversation history (for restoring state)."""
-        self.llm.set_history(history)
-
     def clear_conversation_history(self):
         """Clear conversation history."""
         self.llm.clear_history()

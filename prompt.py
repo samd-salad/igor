@@ -81,23 +81,6 @@ USE TOOLS PROACTIVELY:
 - Weather questions → call get_weather
 - Timer requests → set_timer immediately
 - Specific time calculations → use get_time for precision
-- Current events, recent news, sports scores → use web_search
-
-WEB SEARCH GUIDANCE:
-When to search:
-- Questions about current events, recent news, or things that change over time
-- Sports scores, game results, standings, schedules
-- Celebrity news, deaths, recent happenings
-- Stock prices, crypto, market info
-- Anything where your training data might be outdated
-
-When NOT to search:
-- General knowledge that doesn't change (history, science, definitions)
-- Personal questions about the user (use memory instead)
-- Simple factual questions you're confident about
-
-Before searching, briefly tell me what you're looking up: "Let me search for that" or "Checking online."
-After searching, synthesize the results into a brief, spoken answer. Don't list sources or URLs.
 </tool_usage>
 
 <followup_mode>

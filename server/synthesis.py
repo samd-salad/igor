@@ -147,26 +147,3 @@ class Synthesizer:
                 except Exception as e:
                     logger.warning(f"Failed to remove temp file {temp_wav}: {e}")
 
-    def synthesize_to_file(self, text: str, output_path: str) -> bool:
-        """
-        Synthesize text to speech and save to file.
-
-        Args:
-            text: Text to speak
-            output_path: Path to save WAV file
-
-        Returns:
-            True on success, False on failure
-        """
-        audio_data = self.synthesize(text)
-        if not audio_data:
-            return False
-
-        try:
-            with open(output_path, 'wb') as f:
-                f.write(audio_data)
-            logger.info(f"Saved synthesized audio to: {output_path}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to save audio: {e}")
-            return False

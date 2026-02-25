@@ -131,7 +131,7 @@ class ListTimersCommand(Command):
     def parameters(self) -> dict:
         return {}
 
-    def execute(self) -> str:
+    def execute(self, **_) -> str:
         event_loop = get_event_loop()
         timers = event_loop.list_timers()
 

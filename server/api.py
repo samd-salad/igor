@@ -109,6 +109,8 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
                 audio_base64=result['audio_base64'],
                 commands_executed=result['commands_executed'],
                 timings=result['timings'],
+                await_followup=result.get('await_followup', False),
+                speaker=result.get('speaker'),
                 error=result.get('error')
             )
 
