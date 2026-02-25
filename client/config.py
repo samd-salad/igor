@@ -23,7 +23,7 @@ TEMP_WAV = "/tmp/recording.wav"
 # Train models with train_wakeword.py on your PC, then copy .onnx files to oww_models/
 OWW_MODEL_DIR = BASE_DIR / "oww_models"
 OWW_MODEL_PATHS = [str(p) for p in sorted(OWW_MODEL_DIR.glob("*.onnx"))]
-OWW_THRESHOLD = 0.5  # Detection threshold (0–1). Higher = fewer false positives.
+OWW_THRESHOLD = 0.7  # Detection threshold (0–1). Higher = fewer false positives.
 
 # Auto-save detected wake words as training samples
 # Saves the audio that triggered each detection to wakeword_samples/positive/
