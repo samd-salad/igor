@@ -168,71 +168,41 @@ class Audio:
             logger.error(f"Audio playback failed: {e}")
             return False
 
-    # Beep sounds using sox/play
-    @staticmethod
-    def beep_start():
+    def _beep(self, args: list):
+        """Play a sox synth beep on the configured output device."""
+        try:
+            env = {**os.environ, 'AUDIODEV': self.device}
+            subprocess.run(
+                ['play', '-n'] + args,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=2,
+                env=env,
+            )
+        except FileNotFoundError:
+            logger.warning("sox 'play' not found — install sox: sudo apt-get install sox")
+        except Exception as e:
+            logger.debug(f"Beep failed: {e}")
+
+    def beep_start(self):
         """Rising tone: 'I'm listening'"""
-        try:
-            subprocess.run(
-                ['play', '-n', 'synth', '0.12', 'sine', '500:900', 'vol', '0.3'],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=1
-            )
-        except Exception as e:
-            logger.debug(f"Beep start failed: {e}")
+        self._beep(['synth', '0.12', 'sine', '500:900', 'vol', '0.3'])
 
-    @staticmethod
-    def beep_end():
+    def beep_end(self):
         """Falling tone: 'Got it'"""
-        try:
-            subprocess.run(
-                ['play', '-n', 'synth', '0.12', 'sine', '700:400', 'vol', '0.25'],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=1
-            )
-        except Exception as e:
-            logger.debug(f"Beep end failed: {e}")
+        self._beep(['synth', '0.12', 'sine', '700:400', 'vol', '0.25'])
 
-    @staticmethod
-    def beep_done():
+    def beep_done(self):
         """Two quick chirps: 'Ready'"""
-        try:
-            subprocess.run(
-                ['play', '-n', 'synth', '0.06', 'sine', '1200', 'vol', '0.2',
-                 'pad', '0', '0.04', 'synth', '0.06', 'sine', '1200', 'vol', '0.2'],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=1
-            )
-        except Exception as e:
-            logger.debug(f"Beep done failed: {e}")
+        self._beep(['synth', '0.06', 'sine', '1200', 'vol', '0.2',
+                    'pad', '0', '0.04', 'synth', '0.06', 'sine', '1200', 'vol', '0.2'])
 
-    @staticmethod
-    def beep_error():
+    def beep_error(self):
         """Low buzz: 'Error occurred'"""
-        try:
-            subprocess.run(
-                ['play', '-n', 'synth', '0.3', 'sine', '200', 'vol', '0.25'],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=1
-            )
-        except Exception as e:
-            logger.debug(f"Beep error failed: {e}")
+        self._beep(['synth', '0.3', 'sine', '200', 'vol', '0.25'])
 
-    @staticmethod
-    def beep_alert():
+    def beep_alert(self):
         """Alert beep: triple ascending chime"""
-        try:
-            subprocess.run(
-                ['play', '-n', 'synth', '0.1', 'sine', '660', 'vol', '0.35',
-                 'pad', '0', '0.08', 'synth', '0.1', 'sine', '880', 'vol', '0.35',
-                 'pad', '0', '0.08', 'synth', '0.15', 'sine', '1100', 'vol', '0.4'],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=1
-            )
-        except Exception as e:
-            logger.debug(f"Beep alert failed: {e}")
+        self._beep(['synth', '0.1', 'sine', '660', 'vol', '0.35',
+                    'pad', '0', '0.08', 'synth', '0.1', 'sine', '880', 'vol', '0.35',
+                    'pad', '0', '0.08', 'synth', '0.15', 'sine', '1100', 'vol', '0.4'])

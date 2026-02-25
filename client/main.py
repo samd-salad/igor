@@ -137,7 +137,8 @@ class PiClient:
             # the cold-start buffer triggers false positives immediately.
             WARMUP_CHUNKS = 25  # ~2s at 1280-sample chunks, 16 kHz
             for _ in range(WARMUP_CHUNKS):
-                stream.read(chunk_bytes, exception_on_overflow=False)
+                audio_bytes = stream.read(chunk_bytes, exception_on_overflow=False)
+                self.wakeword_detector.predict(audio_bytes)
 
             wake_word = None
             while not wake_word:
