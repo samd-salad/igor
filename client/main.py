@@ -19,6 +19,7 @@ from client.config import (
     SAMPLE_RATE,
     OWW_MODEL_PATHS,
     OWW_THRESHOLD,
+    OWW_TRIGGER_FRAMES,
     OWW_AUTO_SAVE_SAMPLES,
     OWW_SAMPLE_BUFFER_SECONDS,
     WAKE_SAMPLES_DIR,
@@ -141,6 +142,7 @@ class PiClient:
                 self.wakeword_detector.predict(audio_bytes)
 
             wake_word = None
+            consecutive: dict[str, int] = {}
             while not wake_word:
                 audio_bytes = stream.read(chunk_bytes, exception_on_overflow=False)
                 if audio_buffer is not None:
@@ -148,8 +150,12 @@ class PiClient:
                 predictions = self.wakeword_detector.predict(audio_bytes)
                 for name, score in predictions.items():
                     if score >= OWW_THRESHOLD:
-                        wake_word = name
-                        break
+                        consecutive[name] = consecutive.get(name, 0) + 1
+                        if consecutive[name] >= OWW_TRIGGER_FRAMES:
+                            wake_word = name
+                            break
+                    else:
+                        consecutive[name] = 0
         finally:
             stream.close()
 

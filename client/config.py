@@ -24,6 +24,9 @@ TEMP_WAV = "/tmp/recording.wav"
 OWW_MODEL_DIR = BASE_DIR / "oww_models"
 OWW_MODEL_PATHS = [str(p) for p in sorted(OWW_MODEL_DIR.glob("*.onnx"))]
 OWW_THRESHOLD = 0.7  # Detection threshold (0–1). Higher = fewer false positives.
+OWW_TRIGGER_FRAMES = 3  # Consecutive frames above threshold required to trigger.
+                         # Each frame is ~80ms (1280 samples at 16kHz).
+                         # Increase to suppress false positives from brief noisy spikes.
 
 # Auto-save detected wake words as training samples
 # Saves the audio that triggered each detection to wakeword_samples/positive/
