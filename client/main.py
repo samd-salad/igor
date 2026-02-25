@@ -132,6 +132,13 @@ class PiClient:
 
         stream = self.audio.open_stream()
         try:
+            # Warm up: feed frames through OWW without checking scores.
+            # The prediction buffer needs ~16 frames to stabilize; without this
+            # the cold-start buffer triggers false positives immediately.
+            WARMUP_CHUNKS = 25  # ~2s at 1280-sample chunks, 16 kHz
+            for _ in range(WARMUP_CHUNKS):
+                stream.read(chunk_bytes, exception_on_overflow=False)
+
             wake_word = None
             while not wake_word:
                 audio_bytes = stream.read(chunk_bytes, exception_on_overflow=False)

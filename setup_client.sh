@@ -3,12 +3,15 @@ set -e
 
 # System dependencies
 sudo apt-get update
-sudo apt-get install -y portaudio19-dev libasound2-dev
+sudo apt-get install -y portaudio19-dev libasound2-dev sox
 
 # Python environment
 python3 -m venv .venv
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -r requirements-client.txt
+# Install openwakeword without tflite-runtime (no Python 3.13 build for aarch64).
+# We use inference_framework="onnx" so only onnxruntime is needed, not tflite.
+.venv/bin/pip install openwakeword --no-deps
 
 # Pre-download OpenWakeWord base models (melspectrogram + embedding)
 # These are ~50MB and download automatically on first Model() init,
