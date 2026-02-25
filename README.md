@@ -12,35 +12,15 @@ Local, privacy-focused voice assistant. Say "Doctor Butts" and ask questions, se
 ### Server (PC)
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate  # or .venv\Scripts\activate
-pip install -r requirements-server.txt
-
-# Download Piper voice model
-mkdir -p voices
-curl -L -o voices/en_US-arctic-medium.onnx \
-  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/arctic/medium/en_US-arctic-medium.onnx
-curl -L -o voices/en_US-arctic-medium.onnx.json \
-  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/arctic/medium/en_US-arctic-medium.onnx.json
-
+bash setup_server.sh
 export ANTHROPIC_API_KEY=sk-ant-...
 python -m server.main
 ```
 
 ### Client (Pi)
 
-**1. Download the wake word model:**
 ```bash
-mkdir -p sherpa_onnx_models && cd sherpa_onnx_models
-wget https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2
-tar xf sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2 --strip-components=1
-rm sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2
-cd ..
-```
-
-**2. Install and run:**
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements-client.txt
+bash setup_client.sh
 python -m client.main
 ```
 
@@ -74,16 +54,14 @@ WAKE_THRESHOLD = 0.25         # Lower = more sensitive
 ## Health Checks
 
 ```bash
-curl http://192.168.0.4:8000/api/health   # Server
-curl http://192.168.0.3:8080/api/health   # Pi client
+curl http://192.168.0.4:8000/api/health
+curl http://192.168.0.3:8080/api/health
 curl -X POST http://192.168.0.4:8000/api/conversation/clear
 ```
 
 ---
 
 ## Auto-start (systemd)
-
-Create unit files at `/etc/systemd/system/drbutts-server.service` and `drbutts-client.service`. Key fields:
 
 ```ini
 [Service]
@@ -103,7 +81,7 @@ sudo systemctl enable drbutts-server && sudo systemctl start drbutts-server
 | Problem | Fix |
 |---------|-----|
 | Wake word not triggering | Lower `WAKE_THRESHOLD` in `client/config.py` |
-| Model directory not found | Check `SHERPA_MODEL_DIR` path, re-run download steps |
+| Model directory not found | Re-run `setup_client.sh` |
 | Can't connect to server | Verify IPs in config, check firewall (ports 8000 PC, 8080 Pi) |
 | Audio device not found | Run `arecord -L`, update `AUDIO_DEVICE` |
 | No API key error | Set `ANTHROPIC_API_KEY` env var |
