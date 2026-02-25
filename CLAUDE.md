@@ -9,7 +9,7 @@ Dr. Butts is a local voice assistant. A **Raspberry Pi** handles audio I/O; a **
 - **STT**: Faster Whisper (`small` model, CPU)
 - **LLM**: Claude API (`claude-haiku-4-5-20251001`)
 - **TTS**: Piper (`en_US-arctic-medium`)
-- **Wake Word**: Sherpa-ONNX keyword spotting (phoneme matching, no training, no account)
+- **Wake Word**: OpenWakeWord custom binary classifier (trained on recorded samples, no account)
 - **Server**: FastAPI · **Client callbacks**: Flask
 
 ## Architecture
@@ -17,7 +17,7 @@ Dr. Butts is a local voice assistant. A **Raspberry Pi** handles audio I/O; a **
 ```
 Pi (client/)                         PC (server/)
 ─────────────────────────────────    ─────────────────────────────
-Sherpa-ONNX wake word detection →    /api/process_interaction
+OpenWakeWord wake word detection →   /api/process_interaction
 PyAudio VAD recording                  Whisper STT
 Flask callback server           ←      Claude LLM + tools
   /api/play_audio                       Piper TTS
@@ -31,7 +31,7 @@ Flask callback server           ←      Claude LLM + tools
 smart_assistant/
 ├── client/          # Raspberry Pi
 │   ├── main.py      # Entry point + main loop
-│   ├── wakeword.py  # Sherpa-ONNX keyword spotter
+│   ├── wakeword.py  # OpenWakeWord detector
 │   ├── audio.py     # PyAudio + beeps (sox)
 │   ├── vad_recorder.py
 │   ├── hardware.py  # ALSA volume
@@ -62,10 +62,14 @@ smart_assistant/
 │   ├── models.py    # Pydantic request/response models
 │   ├── protocol.py  # Endpoint path constants
 │   └── utils.py
-├── sherpa_onnx_models/  # KWS model files (Pi only) — see README for download
+├── oww_models/        # Trained .onnx wake word models (Pi + PC train step)
+├── wakeword_samples/  # Positive samples for training (record on Pi)
+│   └── positive/      # WAV files recorded via record_samples.py
+├── onnx_models/wakeword_creation/train_wakeword.py  # PC training script
+├── record_samples.py  # Pi recording script (run on Pi before training)
 ├── voices/            # Piper .onnx models (PC only)
-├── data/              # Persistent data: memory.txt, benchmark.csv
-├── setup_client.sh    # Pi setup script (deps + model download)
+├── data/              # Persistent data: memory.json, benchmark.csv
+├── setup_client.sh    # Pi setup script (deps + OWW base model download)
 ├── setup_server.sh    # PC setup script (deps + voice download)
 └── prompt.py          # LLM system prompt (Dr. Butts persona)
 ```
@@ -100,7 +104,7 @@ class MyCommand(Command):
 |---------|----------------|
 | `get_time` | "What time is it?" |
 | `calculate` | "15% tip on $47" |
-| `set_volume` / `get_volume` | "Set volume to 75" (RPC → Pi) |
+| `set_volume` / `get_volume` | "Set volume to 75" / "What's the volume?" (RPC → Pi) |
 | `save_memory` / `forget_memory` | "Remember I prefer dark roast" |
 | `set_timer` / `cancel_timer` / `list_timers` | "5 minute timer" |
 | `get_weather` | "What's the weather?" |
@@ -109,7 +113,7 @@ class MyCommand(Command):
 ## Key Configuration
 
 **`server/config.py`** — update `PI_HOST` to your Pi's IP
-**`client/config.py`** — update `SERVER_HOST`, `AUDIO_DEVICE`, `WAKE_WORDS`, `WAKE_THRESHOLD`
+**`client/config.py`** — update `SERVER_HOST`, `AUDIO_DEVICE`, `OWW_THRESHOLD`
 **`shared/protocol.py`** — endpoint path constants only (no IPs)
 
 Environment variables required:
@@ -129,16 +133,20 @@ Environment variables required:
 - History capped at `MAX_CONVERSATION_HISTORY` (10) messages
 - `_trim_history()` ensures history always starts with a plain-text user message — tool_result orphans are dropped to avoid Claude API role errors
 - Follow-up mode: LLM appends `[AWAIT]` to signal the client to listen again without a wake word
-- Persistent memory injected into system prompt from `data/memory.txt`
+- Persistent memory injected into system prompt from `data/memory.json`
 
-## Wake Word (Sherpa-ONNX)
+## Wake Word (OpenWakeWord)
 
-- Model files live in `sherpa_onnx_models/` — downloaded by `setup_client.sh`
-- Keywords are plain text strings in `WAKE_WORDS` in `client/config.py` — no training or account needed
-- Uses phoneme matching (CTC transducer); works well for phonetically distinct phrases
-- `WakeWordDetector.predict()` returns `{keyword: 1.0}` on hit, `0.0` otherwise
-- Tune sensitivity with `WAKE_THRESHOLD` (default 0.25 — lower = more sensitive)
-- If accuracy is poor, add phonetic spelling variations to `WAKE_WORDS` (e.g. `"dok ter buts"`)
+- Trained `.onnx` models live in `oww_models/` — produced by `train_wakeword.py` on the PC
+- Base models (melspectrogram + embedding, ~50 MB) download automatically on first run
+- Add a new wake word: record samples → train → drop `.onnx` in `oww_models/`
+- `WakeWordDetector.predict()` returns `{model_stem: score}` per chunk (0–1 float)
+- Tune sensitivity with `OWW_THRESHOLD` in `client/config.py` (default 0.5)
+- Training workflow:
+  1. Pi: `python record_samples.py`  → `wakeword_samples/positive/*.wav`
+  2. PC: `rsync pi:wakeword_samples/ wakeword_samples/`
+  3. PC: `python onnx_models/wakeword_creation/train_wakeword.py`
+  4. Pi: `scp oww_models/doctor_butts.onnx pi:smart_assistant/oww_models/`
 
 ## Todo
 

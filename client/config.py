@@ -19,13 +19,11 @@ AUDIO_DEVICE = "plughw:2,0"  # Run 'arecord -L' to find yours
 BASE_DIR = Path(__file__).parent.parent
 TEMP_WAV = "/tmp/recording.wav"
 
-# Sherpa-ONNX keyword spotting
-# Download model: https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models
-# Recommended: sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01
-# Extract contents into sherpa_onnx_models/
-SHERPA_MODEL_DIR = str(BASE_DIR / "sherpa_onnx_models")
-WAKE_WORDS = ["doctor butts", "stop"]
-WAKE_THRESHOLD = 0.25  # Lower = more sensitive (more false positives)
+# OpenWakeWord custom models
+# Train models with train_wakeword.py on your PC, then copy .onnx files to oww_models/
+OWW_MODEL_DIR = BASE_DIR / "oww_models"
+OWW_MODEL_PATHS = [str(p) for p in sorted(OWW_MODEL_DIR.glob("*.onnx"))]
+OWW_THRESHOLD = 0.5  # Detection threshold (0–1). Higher = fewer false positives.
 
 # Voice Activity Detection (VAD) settings
 SILENCE_END_DURATION = 2.0

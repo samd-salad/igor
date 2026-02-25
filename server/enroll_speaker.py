@@ -53,21 +53,39 @@ def audio_bytes_to_numpy(audio_bytes: bytes, sample_rate: int = 16000):
     return audio
 
 
-def enroll_interactive(name: str, num_samples: int = 3, duration: float = 5.0):
+ENROLLMENT_VARIATIONS = [
+    ("Conversational",   "Chat naturally — tell us what you had for breakfast, or describe your day"),
+    ("Read aloud",       "Read something nearby: a label, a message on your phone, anything"),
+    ("Different volume", "Speak a bit quieter than usual, like you're in a library"),
+    ("Faster pace",      "Talk a little faster than normal, like you're in a hurry to explain something"),
+    ("Different topic",  "Count slowly from 1 to 20, filling the time with anything extra"),
+    ("Casual/relaxed",   "Describe a room you're in — furniture, colours, whatever comes to mind"),
+    ("Expressive",       "Tell a short joke or something funny that happened recently"),
+    ("Monotone",         "Recite the alphabet or days of the week in a flat, even tone"),
+]
+
+
+def enroll_interactive(name: str, num_samples: int = 5, duration: float = 5.0):
     """Interactively enroll a speaker with multiple voice samples."""
     identifier = SpeakerIdentifier(SPEAKER_EMBEDDINGS_FILE, SPEAKER_SIMILARITY_THRESHOLD)
 
-    print(f"\n=== Enrolling speaker: {name} ===")
-    print(f"You'll record {num_samples} samples of {duration} seconds each.")
-    print("Speak naturally - say different things each time for better accuracy.\n")
+    print(f"\n{'='*60}")
+    print(f"  Speaker enrollment — {name}")
+    print(f"{'='*60}")
+    print(f"  Samples: {num_samples}  |  Duration: {duration}s each")
+    print(f"  Each sample captures your voice characteristics.")
+    print(f"  Variety across samples improves recognition accuracy.\n")
 
     samples = []
     for i in range(num_samples):
-        input(f"Press Enter to start recording sample {i+1}/{num_samples}...")
+        style, instruction = ENROLLMENT_VARIATIONS[i % len(ENROLLMENT_VARIATIONS)]
+        print(f"[{i+1}/{num_samples}]  Style: {style}")
+        print(f"          {instruction}")
+        input("          Press Enter to record... ")
         audio_bytes = record_audio(duration)
         audio = audio_bytes_to_numpy(audio_bytes)
         samples.append(audio)
-        print(f"Sample {i+1} recorded.\n")
+        print(f"  Sample {i+1} saved.\n")
 
     print("Processing voice samples...")
     success = identifier.enroll_speaker(name, samples, sample_rate=16000)
@@ -179,7 +197,7 @@ def main():
     enroll_parser = subparsers.add_parser("enroll", help="Enroll a new speaker")
     enroll_parser.add_argument("name", help="Speaker's name")
     enroll_parser.add_argument("--files", nargs="+", help="Audio files to use (optional)")
-    enroll_parser.add_argument("--samples", type=int, default=3, help="Number of samples to record (default: 3)")
+    enroll_parser.add_argument("--samples", type=int, default=5, help="Number of samples to record (default: 5)")
     enroll_parser.add_argument("--duration", type=float, default=5.0, help="Duration of each sample in seconds (default: 5)")
 
     # Test command

@@ -10,19 +10,21 @@ python3 -m venv .venv
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -r requirements-client.txt
 
-# Sherpa-ONNX wake word model
-MODEL_DIR="sherpa_onnx_models"
-MODEL_TAR="sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2"
-MODEL_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/$MODEL_TAR"
+# Pre-download OpenWakeWord base models (melspectrogram + embedding)
+# These are ~50MB and download automatically on first Model() init,
+# but pre-fetching here avoids latency on first run.
+echo "Pre-downloading OpenWakeWord base models..."
+.venv/bin/python -c "
+from openwakeword.utils import download_models
+download_models()
+print('Base models ready.')
+"
 
-if [ ! -f "$MODEL_DIR/tokens.txt" ]; then
-    echo "Downloading Sherpa-ONNX model..."
-    mkdir -p "$MODEL_DIR"
-    wget -O "/tmp/$MODEL_TAR" "$MODEL_URL"
-    tar xf "/tmp/$MODEL_TAR" --strip-components=1 -C "$MODEL_DIR"
-    rm "/tmp/$MODEL_TAR"
-else
-    echo "Sherpa-ONNX model already present, skipping."
-fi
-
-echo "Client setup complete. Run: python -m client.main"
+echo ""
+echo "Client setup complete."
+echo ""
+echo "Next steps:"
+echo "  1. Record wake word samples: python record_samples.py"
+echo "  2. Transfer wakeword_samples/ to PC and run train_wakeword.py"
+echo "  3. Copy oww_models/*.onnx back here"
+echo "  4. Run: .venv/bin/python -m client.main"

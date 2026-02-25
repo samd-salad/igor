@@ -14,9 +14,8 @@ from client.config import (
     SERVER_URL,
     CLIENT_HOST,
     CLIENT_PORT,
-    SHERPA_MODEL_DIR,
-    WAKE_WORDS,
-    WAKE_THRESHOLD,
+    OWW_MODEL_PATHS,
+    OWW_THRESHOLD,
     TEMP_WAV,
     REQUEST_TIMEOUT,
     FOLLOWUP_TIMEOUT
@@ -50,19 +49,19 @@ class PiClient:
             logger.error("Failed to initialize audio")
             return False
 
-        logger.info("Loading wake word detection (Sherpa-ONNX)...")
+        logger.info("Loading wake word detection (OpenWakeWord)...")
         try:
-            if not Path(SHERPA_MODEL_DIR).exists():
-                logger.error(f"Sherpa-ONNX model directory not found: {SHERPA_MODEL_DIR}")
-                logger.error("Download model from https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models")
+            if not OWW_MODEL_PATHS:
+                logger.error("No .onnx models found in oww_models/")
+                logger.error("Train models with train_wakeword.py then copy .onnx files to oww_models/")
                 return False
 
             self.wakeword_detector = WakeWordDetector(
-                model_dir=SHERPA_MODEL_DIR,
-                keywords=WAKE_WORDS,
-                threshold=WAKE_THRESHOLD,
+                model_paths=OWW_MODEL_PATHS,
+                threshold=OWW_THRESHOLD,
             )
-            logger.info(f"Wake word detection initialized. Keywords: {WAKE_WORDS}")
+            keywords = [Path(p).stem.replace("_", " ") for p in OWW_MODEL_PATHS]
+            logger.info(f"Wake word detection initialized. Keywords: {keywords}")
 
         except Exception as e:
             logger.error(f"Failed to initialize wake word detection: {e}")
@@ -127,7 +126,7 @@ class PiClient:
                 audio_bytes = stream.read(1280, exception_on_overflow=False)
                 predictions = self.wakeword_detector.predict(audio_bytes)
                 for name, score in predictions.items():
-                    if score >= WAKE_THRESHOLD:
+                    if score >= OWW_THRESHOLD:
                         wake_word = name
                         break
         finally:
@@ -193,7 +192,7 @@ class PiClient:
                     self.audio.beep_error()
                     return
 
-                transcription = result['transcription']
+                transcription = result.get('transcription', '')
                 logger.info(f"Transcription: '{transcription[:100]}...'" if len(transcription) > 100 else f"Transcription: '{transcription}'")
 
                 if result.get('error'):

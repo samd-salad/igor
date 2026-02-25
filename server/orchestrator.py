@@ -118,7 +118,7 @@ class Orchestrator:
             transcription = transcription[:10_000]  # Truncate
             logger.warning("Transcription truncated to 10k chars")
 
-        logger.info(f"Transcribed: '{transcription[:100]}...'")  # Log first 100 chars only
+        logger.info(f"Transcribed: '{transcription[:100]}{'...' if len(transcription) > 100 else ''}'")  # Log first 100 chars only
         self._log_benchmark('stt', timings['stt'], transcription)
 
         # Step 1b: Speaker Identification (optional, runs in parallel with STT conceptually)
