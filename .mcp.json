@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "dr-butts": {
+      "command": "C:/Users/samda/Documents/smart_assistant/.venv/Scripts/python",
+      "args": ["C:/Users/samda/Documents/smart_assistant/mcp_server.py"]
+    }
+  }
+}
