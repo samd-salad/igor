@@ -17,7 +17,7 @@ Dr. Butts is a local voice assistant. A **Raspberry Pi** handles audio I/O; a **
 ```
 Pi (client/)                         PC (server/)
 ─────────────────────────────────    ─────────────────────────────
-Porcupine wake word detection   →    /api/process_interaction
+Sherpa-ONNX wake word detection →    /api/process_interaction
 PyAudio VAD recording                  Whisper STT
 Flask callback server           ←      Claude LLM + tools
   /api/play_audio                       Piper TTS
@@ -46,6 +46,8 @@ smart_assistant/
 │   ├── synthesis.py # Piper TTS
 │   ├── event_loop.py  # Timer thread
 │   ├── pi_callback.py # HTTP client → Pi
+│   ├── speaker_id.py  # Resemblyzer speaker identification (optional)
+│   ├── enroll_speaker.py  # CLI tool for enrolling speaker voice profiles
 │   ├── config.py
 │   └── commands/    # Auto-discovered LLM tools
 │       ├── base.py
@@ -54,14 +56,17 @@ smart_assistant/
 │       ├── math_cmd.py
 │       ├── time_cmd.py
 │       ├── weather_cmd.py
-│       └── network_cmd.py
+│       ├── network_cmd.py
+│       └── system_cmd.py  # set_volume / get_volume (RPC → Pi)
 ├── shared/
 │   ├── models.py    # Pydantic request/response models
 │   ├── protocol.py  # Endpoint path constants
 │   └── utils.py
 ├── sherpa_onnx_models/  # KWS model files (Pi only) — see README for download
 ├── voices/            # Piper .onnx models (PC only)
-├── data/              # Persistent data: memory.json, benchmark.csv
+├── data/              # Persistent data: memory.txt, benchmark.csv
+├── setup_client.sh    # Pi setup script (deps + model download)
+├── setup_server.sh    # PC setup script (deps + voice download)
 └── prompt.py          # LLM system prompt (Dr. Butts persona)
 ```
 
@@ -88,7 +93,8 @@ class MyCommand(Command):
 
 - `parameters` returns the **properties dict** (not the full schema — `to_tool()` wraps it)
 - All parameters are required by default; override `required_parameters` property to return a subset
-- Hardware commands (volume, GPIO) use `self.pi_client` injected at startup via `commands.inject_pi_client()`
+- No-parameter commands must use `execute(self, **_)` to avoid TypeError from command dispatch
+- Hardware commands (volume) use `self.pi_client` injected at startup via `commands.inject_pi_client()`
 
 | Command | Trigger example |
 |---------|----------------|
@@ -103,7 +109,7 @@ class MyCommand(Command):
 ## Key Configuration
 
 **`server/config.py`** — update `PI_HOST` to your Pi's IP
-**`client/config.py`** — update `SERVER_HOST` to your PC's IP, `AUDIO_DEVICE`, `PORCUPINE_KEYWORD_PATHS`
+**`client/config.py`** — update `SERVER_HOST`, `AUDIO_DEVICE`, `WAKE_WORDS`, `WAKE_THRESHOLD`
 **`shared/protocol.py`** — endpoint path constants only (no IPs)
 
 Environment variables required:
@@ -127,27 +133,29 @@ Environment variables required:
 
 ## Wake Word (Sherpa-ONNX)
 
-- Model files live in `sherpa_onnx_models/` — download from GitHub releases (see README)
+- Model files live in `sherpa_onnx_models/` — downloaded by `setup_client.sh`
 - Keywords are plain text strings in `WAKE_WORDS` in `client/config.py` — no training or account needed
-- Uses phoneme matching (CTC transducer); accuracy is good for phonetically distinct phrases
+- Uses phoneme matching (CTC transducer); works well for phonetically distinct phrases
 - `WakeWordDetector.predict()` returns `{keyword: 1.0}` on hit, `0.0` otherwise
 - Tune sensitivity with `WAKE_THRESHOLD` (default 0.25 — lower = more sensitive)
+- If accuracy is poor, add phonetic spelling variations to `WAKE_WORDS` (e.g. `"dok ter buts"`)
 
 ## Todo
 
 - [ ] Web dashboard for monitoring
 - [ ] Multiple Pi support
-- [ ] "stop" wakeword interrupt — `.ppn` detected, client needs playback interruption logic
-- [ ] integrate prompt into model (avoid reprompting after tool return)
+- [ ] "stop" wake word interrupt — detected in client, needs playback interruption logic
 - [ ] Smart lights, TV control, calendar, shopping list
 - [ ] commas and quotes not reading right in TTS
 - [ ] Multi-user voice interpretation
-- [x] swap to Claude API
-- [x] wakeword cold-start latency (was Ollama artifact)
 
 ## Quick Reference
 
 ```bash
+# Setup
+bash setup_server.sh   # PC
+bash setup_client.sh   # Pi
+
 # Start
 python -m server.main   # PC
 python -m client.main   # Pi

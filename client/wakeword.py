@@ -13,30 +13,24 @@ class WakeWordDetector:
     def __init__(self, model_dir: str, keywords: list[str], threshold: float = 0.25):
         model_dir = Path(model_dir)
 
-        config = sherpa_onnx.KeywordSpotterConfig(
-            feat_config=sherpa_onnx.FeatureExtractorConfig(
-                sample_rate=16000,
-                feature_dim=80,
-            ),
-            model_config=sherpa_onnx.OnlineModelConfig(
-                transducer=sherpa_onnx.OnlineTransducerModelConfig(
-                    encoder=self._find(model_dir, "encoder"),
-                    decoder=self._find(model_dir, "decoder"),
-                    joiner=self._find(model_dir, "joiner"),
-                ),
-                tokens=str(model_dir / "tokens.txt"),
-                model_type="transducer",
-            ),
+        # Write keywords to file — one phrase per line
+        keywords_file = model_dir / "keywords.txt"
+        keywords_file.write_text('\n'.join(keywords) + '\n')
+
+        self._spotter = sherpa_onnx.KeywordSpotter(
+            tokens=str(model_dir / "tokens.txt"),
+            encoder=self._find(model_dir, "encoder"),
+            decoder=self._find(model_dir, "decoder"),
+            joiner=self._find(model_dir, "joiner"),
+            keywords_file=str(keywords_file),
+            num_threads=2,
             max_active_paths=4,
             keywords_score=1.0,
             keywords_threshold=threshold,
             num_trailing_blanks=1,
         )
-
-        self._spotter = sherpa_onnx.KeywordSpotter(config)
         self._keywords = keywords
-        self._keywords_str = "\n".join(keywords) + "\n"
-        self._stream = self._spotter.create_stream(keywords=self._keywords_str)
+        self._stream = self._spotter.create_stream()
 
     @staticmethod
     def _find(model_dir: Path, prefix: str) -> str:
@@ -65,12 +59,12 @@ class WakeWordDetector:
                 if kw.lower() in detected_lower or detected_lower in kw.lower():
                     result[kw] = 1.0
                     break
-            self._spotter.reset_stream(self._stream)
+            self._stream = self._spotter.create_stream()  # reset after detection
 
         return result
 
     def reset(self):
-        self._spotter.reset_stream(self._stream)
+        self._stream = self._spotter.create_stream()
 
     def delete(self):
-        pass  # Sherpa-ONNX cleans up on GC
+        pass
