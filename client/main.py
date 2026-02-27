@@ -133,22 +133,18 @@ class PiClient:
 
         stream = self.audio.open_stream()
         try:
-            # Warm up: feed frames through OWW without checking scores.
-            # The prediction buffer needs ~16 frames to stabilize; without this
-            # the cold-start buffer triggers false positives immediately.
-            WARMUP_CHUNKS = 25  # ~2s at 1280-sample chunks, 16 kHz
-            for _ in range(WARMUP_CHUNKS):
-                audio_bytes = stream.read(chunk_bytes, exception_on_overflow=False)
-                self.wakeword_detector.predict(audio_bytes)
-
             wake_word = None
             consecutive: dict[str, int] = {}
+            frame_count = 0
             while not wake_word:
                 audio_bytes = stream.read(chunk_bytes, exception_on_overflow=False)
                 if audio_buffer is not None:
                     audio_buffer.append(audio_bytes)
                 predictions = self.wakeword_detector.predict(audio_bytes)
+                frame_count += 1
                 for name, score in predictions.items():
+                    if score > 0.1:
+                        logger.debug(f"score[{name}]={score:.3f} (frame {frame_count})")
                     if score >= OWW_THRESHOLD:
                         consecutive[name] = consecutive.get(name, 0) + 1
                         if consecutive[name] >= OWW_TRIGGER_FRAMES:
