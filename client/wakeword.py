@@ -36,9 +36,11 @@ class WakeWordDetector:
         return {self._stems.get(stem, stem): float(score) for stem, score in prediction.items()}
 
     def reset(self):
-        """Clear detection history (call after a successful detection)."""
-        for buf in self._model.prediction_buffer.values():
-            buf.clear()
+        """Full OWW state reset — call after a detection.
+        Clears prediction_buffer AND preprocessor state (melspectrogram, embeddings).
+        Re-seeds feature_buffer with random noise; warmup on the next cycle displaces it.
+        """
+        self._model.reset()
 
     def delete(self):
         pass
