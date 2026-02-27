@@ -133,6 +133,16 @@ class PiClient:
 
         stream = self.audio.open_stream()
         try:
+            # Prime OWW's internal feature buffers with real audio so cold-start
+            # doesn't cause false positives. We do NOT reset() afterward — the
+            # detection loop's consecutive counter starts at 0 regardless, so
+            # warmup scores can't accumulate toward a trigger.
+            WARMUP_CHUNKS = 25  # ~2s at 80ms/frame, 16 kHz
+            for _ in range(WARMUP_CHUNKS):
+                self.wakeword_detector.predict(
+                    stream.read(chunk_bytes, exception_on_overflow=False)
+                )
+
             wake_word = None
             consecutive: dict[str, int] = {}
             frame_count = 0
