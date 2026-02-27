@@ -28,10 +28,10 @@ def get_all_commands() -> dict[str, Command]:
 def get_tools() -> list[dict]:
     return [cmd.to_tool() for cmd in _registry.values()]
 
-def execute(name: str, **kwargs) -> str:
-    if name not in _registry:
-        return f"Unknown command: {name}"
-    return _registry[name].execute(**kwargs)
+def execute(command_name: str, **kwargs) -> str:
+    if command_name not in _registry:
+        return f"Unknown command: {command_name}"
+    return _registry[command_name].execute(**kwargs)
 
 def inject_pi_client(pi_client):
     """Inject pi_client into hardware commands that need it."""
