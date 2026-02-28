@@ -164,6 +164,7 @@ Environment variables required:
 - [ ] Web dashboard for monitoring
 - [ ] Multiple Pi support
 - [ ] "stop" wake word interrupt — detected in client, needs playback interruption logic
+- [ ] Spotify control (spotipy, needs free developer app registration)
 - [ ] Calendar, shopping list
 - [ ] Puramax2 litterbox control
 - [ ] commas and quotes not reading right in TTS

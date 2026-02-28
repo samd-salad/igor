@@ -13,6 +13,8 @@ PI_PORT = 8080
 # LLM configuration - Claude API
 CLAUDE_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
+CLAUDE_INPUT_COST_PER_M  = 0.80   # USD per million input tokens
+CLAUDE_OUTPUT_COST_PER_M = 4.00   # USD per million output tokens
 MAX_CONVERSATION_HISTORY = 10  # Keep last 10 messages
 
 # Whisper model - speech recognition

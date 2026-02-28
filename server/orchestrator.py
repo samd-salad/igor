@@ -8,7 +8,10 @@ from server.transcription import Transcriber
 from server.llm import LLM
 from server.synthesis import Synthesizer
 from server.pi_callback import PiCallbackClient
-from server.config import BENCHMARK_FILE, SPEAKER_EMBEDDINGS_FILE, SPEAKER_SIMILARITY_THRESHOLD
+from server.config import (
+    BENCHMARK_FILE, SPEAKER_EMBEDDINGS_FILE, SPEAKER_SIMILARITY_THRESHOLD,
+    CLAUDE_INPUT_COST_PER_M, CLAUDE_OUTPUT_COST_PER_M,
+)
 from server.commands.memory_cmd import load_persistent_memory
 import server.commands as commands
 
@@ -176,8 +179,14 @@ class Orchestrator:
 
         response_text, await_followup = llm_result
 
+        usage = self.llm.last_usage
+        llm_cost = (
+            usage["input_tokens"] * CLAUDE_INPUT_COST_PER_M +
+            usage["output_tokens"] * CLAUDE_OUTPUT_COST_PER_M
+        ) / 1_000_000
+        timings['llm_cost'] = llm_cost
         logger.info(f"LLM response generated")
-        self._log_benchmark('llm', timings['llm'])
+        self._log_benchmark('llm', timings['llm'], cost=llm_cost)
 
         # Step 3: Text-to-Speech
         start = time.time()
@@ -259,22 +268,12 @@ class Orchestrator:
             logger.error(f"Command '{name}' failed: {e}")
             return f"Error: {e}"
 
-    def _log_benchmark(self, stage: str, duration: float, transcription: Optional[str] = None, word_count: Optional[int] = None):
-        """
-        Log performance benchmark to CSV.
-
-        Args:
-            stage: 'stt', 'llm', or 'tts'
-            duration: Duration in seconds
-            transcription: For STT, the transcribed text (for word count)
-            word_count: For TTS, number of words spoken
-        """
+    def _log_benchmark(self, stage: str, duration: float, transcription: Optional[str] = None, word_count: Optional[int] = None, cost: Optional[float] = None):
+        """Log performance benchmark to CSV."""
         try:
-            # Calculate word count if not provided
             if transcription and not word_count:
                 word_count = len(transcription.split())
 
-            # Determine model name based on stage
             if stage == 'stt':
                 model = self.transcriber.model_name
             elif stage == 'llm':
@@ -284,33 +283,26 @@ class Orchestrator:
             else:
                 model = 'unknown'
 
-            # Calculate per-word duration for STT/TTS
-            per_word = None
-            if word_count and word_count > 0:
-                per_word = duration / word_count
+            per_word = (duration / word_count) if word_count and word_count > 0 else None
 
-            # Append to CSV
             from datetime import datetime
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
             BENCHMARK_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-            # Create file with header if it doesn't exist
             if not BENCHMARK_FILE.exists():
                 with open(BENCHMARK_FILE, 'w', newline='') as f:
                     writer = csv.writer(f)
-                    writer.writerow(['timestamp', 'stage', 'model', 'duration_s', 'word_count', 'per_word_s'])
+                    writer.writerow(['timestamp', 'stage', 'model', 'duration_s', 'word_count', 'per_word_s', 'cost_usd'])
 
-            # Append data
             with open(BENCHMARK_FILE, 'a', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([
-                    timestamp,
-                    stage,
-                    model,
+                    timestamp, stage, model,
                     f"{duration:.3f}",
                     word_count if word_count else '',
-                    f"{per_word:.3f}" if per_word else ''
+                    f"{per_word:.3f}" if per_word else '',
+                    f"{cost:.6f}" if cost is not None else '',
                 ])
 
         except Exception as e:
@@ -348,40 +340,58 @@ class Orchestrator:
         stt_time = timings['stt']
         llm_time = timings['llm']
         tts_time = timings['tts']
+        llm_cost = timings.get('llm_cost', 0.0)
 
-        # Calculate word counts
         stt_words = len(transcription.split()) if transcription else 0
         tts_words = len(response_text.split()) if response_text else 0
+        stt_per_word = stt_time / stt_words if stt_words > 0 else None
+        tts_per_word = tts_time / tts_words if tts_words > 0 else None
 
-        # Calculate per-word metrics
-        stt_per_word = stt_time / stt_words if stt_words > 0 else 0
-        tts_per_word = tts_time / tts_words if tts_words > 0 else 0
-
-        # Load historical averages
         stt_stats = self._load_benchmark_stats('stt')
         llm_stats = self._load_benchmark_stats('llm')
         tts_stats = self._load_benchmark_stats('tts')
 
-        # Compare to averages
-        def compare(current, avg):
+        def cmp(current, avg) -> str:
+            """Return fixed-width 8-char comparison string."""
             if avg == 0:
-                return ""
+                return "        "
             pct = ((current - avg) / avg) * 100
             if pct < -5:
-                return f" \u2193{abs(pct):.0f}%"  # ↓ faster
+                return f"\u2193{min(abs(pct), 999):.0f}%".rjust(8)
             elif pct > 5:
-                return f" \u2191{pct:.0f}%"  # ↑ slower
-            return " ~"  # similar
+                return f"\u2191{min(pct, 999):.0f}%".rjust(8)
+            return "       ~"
 
-        # Format log message
-        logger.info(f"Interaction complete in {total:.2f}s")
-        logger.info(f"┌─────┬──────┬───────┬────────┬───────┐")
-        logger.info(f"│Stage│ Time │vs. Avg│Per Word│vs. Avg│")
-        logger.info(f"├─────┼──────┼───────┼────────┼───────┤")
-        logger.info(f"│ STT │{stt_time:5.2f}s│  {compare(stt_time, stt_stats['avg_duration']):>4s} │ {stt_per_word:5.3f}s │  {compare(stt_per_word, stt_stats['avg_per_word']):>4s} │")
-        logger.info(f"│ LLM │{llm_time:5.2f}s│  {compare(llm_time, llm_stats['avg_duration']):>4s} │  {'N/A':>5s} │  {'N/A':>4s} │")
-        logger.info(f"│ TTS │{tts_time:5.2f}s│  {compare(tts_time, tts_stats['avg_duration']):>4s} │ {tts_per_word:5.3f}s │  {compare(tts_per_word, tts_stats['avg_per_word']):>4s} │")
-        logger.info(f"└─────┴──────┴───────┴────────┴───────┘")
+        def fmt_time(t: float) -> str:
+            return f"{t:6.2f}s"
+
+        def fmt_pw(pw) -> str:
+            return f"{pw:.3f}s" if pw is not None else "   —  "
+
+        # ┌───────┬─────────┬────────┬──────────┬────────┐
+        # │ Stage │  Time   │vs. Avg │ Per Word │vs. Avg │
+        W = "┌───────┬─────────┬────────┬──────────┬────────┐"
+        H = "│ Stage │  Time   │vs. Avg │ Per Word │vs. Avg │"
+        S = "├───────┼─────────┼────────┼──────────┼────────┤"
+        B = "└───────┴─────────┴────────┴──────────┴────────┘"
+
+        def data_row(stage, t, avg_t, pw, avg_pw) -> str:
+            return (
+                f"│ {stage:<5s} │{fmt_time(t)}│{cmp(t, avg_t)}│{fmt_pw(pw):^10s}│"
+                f"{cmp(pw, avg_pw) if pw is not None else '        '}│"
+            )
+
+        cost_row = f"│ Cost  │ ${llm_cost:.5f} │        │          │        │"
+
+        logger.info(f"Interaction complete in {total:.2f}s | cost ${llm_cost:.5f}")
+        logger.info(W)
+        logger.info(H)
+        logger.info(S)
+        logger.info(data_row("STT", stt_time, stt_stats['avg_duration'], stt_per_word, stt_stats['avg_per_word']))
+        logger.info(data_row("LLM", llm_time, llm_stats['avg_duration'], None, None))
+        logger.info(data_row("TTS", tts_time, tts_stats['avg_duration'], tts_per_word, tts_stats['avg_per_word']))
+        logger.info(cost_row)
+        logger.info(B)
 
     def get_conversation_history(self) -> List[Dict]:
         """Get current conversation history from LLM."""

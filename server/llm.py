@@ -19,6 +19,7 @@ class LLM:
         self.model = model
         self.max_history = max_history
         self.conversation_history: List[Dict] = []
+        self.last_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
         logger.info(f"LLM initialized: Claude API ({model})")
 
     def _get_system_prompt(self, persistent_memory: str = "", speaker: str = None) -> str:
@@ -103,17 +104,23 @@ class LLM:
 
         system_prompt = self._get_system_prompt(persistent_memory, speaker)
 
+        # Reset usage tracking for this interaction
+        self.last_usage = {"input_tokens": 0, "output_tokens": 0}
+
         # First LLM call
         try:
             log_text = user_text[:50] + "..." if len(user_text) > 50 else user_text
             logger.debug(f"Sending message to LLM: '{log_text}'")
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=1024,
+                max_tokens=300,
+                timeout=30.0,
                 system=system_prompt,
                 tools=tools,
                 messages=self.conversation_history,
             )
+            self.last_usage["input_tokens"] += response.usage.input_tokens
+            self.last_usage["output_tokens"] += response.usage.output_tokens
         except anthropic.APIStatusError as e:
             logger.error(f"LLM request failed ({e.status_code}): {e.message}")
             return None
@@ -165,11 +172,14 @@ class LLM:
                 logger.debug("Sending follow-up message to LLM with tool results")
                 response = self.client.messages.create(
                     model=self.model,
-                    max_tokens=1024,
+                    max_tokens=300,
+                    timeout=30.0,
                     system=system_prompt,
                     tools=tools,
                     messages=self.conversation_history,
                 )
+                self.last_usage["input_tokens"] += response.usage.input_tokens
+                self.last_usage["output_tokens"] += response.usage.output_tokens
             except Exception as e:
                 logger.error(f"LLM follow-up failed: {e}")
                 return None
