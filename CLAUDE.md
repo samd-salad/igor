@@ -57,7 +57,12 @@ smart_assistant/
 │       ├── time_cmd.py
 │       ├── weather_cmd.py
 │       ├── network_cmd.py
-│       └── system_cmd.py  # set_volume / get_volume (RPC → Pi)
+│       ├── system_cmd.py  # set_volume / adjust_volume / get_volume (RPC → Pi)
+│       ├── lifx_cmd.py   # LIFX bulb control (local LAN, lifxlan)
+│       ├── sonos_cmd.py  # Sonos volume control (local LAN, soco)
+│       ├── tv_cmd.py     # Google TV power/nav (androidtvremote2)
+│       ├── adb_cmd.py    # Google TV app launch/playback/search (adb-shell)
+│       └── _utils.py     # Shared: parse_amount, parse_direction_updown, parse_volume_word
 ├── shared/
 │   ├── models.py    # Pydantic request/response models
 │   ├── protocol.py  # Endpoint path constants
@@ -104,7 +109,13 @@ class MyCommand(Command):
 |---------|----------------|
 | `get_time` | "What time is it?" |
 | `calculate` | "15% tip on $47" |
-| `set_volume` / `get_volume` | "Set volume to 75" / "What's the volume?" (RPC → Pi) |
+| `set_volume` / `adjust_volume` / `get_volume` | "Your volume to 75" / "Turn yourself up" (RPC → Pi) |
+| `set_sonos_volume` / `adjust_sonos_volume` / `sonos_mute` | "TV volume to 50" / "Turn the music up a bit" (Sonos) |
+| `set_light` / `set_brightness` / `set_color` / `set_color_temp` | "Turn off the lights" / "Make the lights blue" (LIFX) |
+| `adjust_brightness` / `adjust_color_temp` / `shift_hue` | "Slightly brighter" / "A lot warmer" (LIFX relative) |
+| `tv_power` | "Turn the TV on/off" (androidtvremote2) |
+| `tv_key` | "Go home" / "Mute the TV" (androidtvremote2 nav keys) |
+| `tv_launch` / `tv_playback` / `tv_skip` / `tv_search_youtube` | "Open YouTube" / "Pause" / "Skip 30 seconds" (ADB) |
 | `save_memory` / `forget_memory` | "Remember I prefer dark roast" |
 | `set_timer` / `cancel_timer` / `list_timers` | "5 minute timer" |
 | `get_weather` | "What's the weather?" |
@@ -153,7 +164,8 @@ Environment variables required:
 - [ ] Web dashboard for monitoring
 - [ ] Multiple Pi support
 - [ ] "stop" wake word interrupt — detected in client, needs playback interruption logic
-- [ ] Smart lights, TV control, calendar, shopping list
+- [ ] Calendar, shopping list
+- [ ] Puramax2 litterbox control
 - [ ] commas and quotes not reading right in TTS
 - [ ] Multi-user voice interpretation
 

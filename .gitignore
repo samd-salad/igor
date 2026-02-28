@@ -26,6 +26,18 @@ wakeword_samples/negative/*.wav
 # Speaker embeddings (biometric voice data)
 data/speaker_embeddings.json
 
+# Google TV pairing certs (private key material)
+data/google_tv_cert.pem
+data/google_tv_key.pem
+
+# ADB RSA key pair (grants shell access to TV)
+data/adbkey
+data/adbkey.pub
+
+# TTS voice models (large binaries, downloaded by setup script)
+voices/*.onnx
+voices/*.onnx.json
+
 # IDE
 .vscode/
 .idea/

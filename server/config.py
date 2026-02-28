@@ -41,3 +41,17 @@ DATA_DIR.mkdir(exist_ok=True)
 
 # Request timeouts
 REQUEST_TIMEOUT = 5.0  # Timeout for HTTP requests to Pi
+
+# Sonos soundbar/speaker settings (local LAN, no API key)
+SONOS_DISCOVERY_CACHE_TTL = 300  # seconds before forced re-discovery (5 min)
+SONOS_DEFAULT_ZONE = "Living Room"  # Default zone for TV/soundbar/music requests
+
+# LIFX smart bulb settings (local LAN UDP, no API key)
+LIFX_DISCOVERY_CACHE_TTL = 300  # seconds before forced re-discovery (5 min)
+
+# Google TV remote settings
+GOOGLE_TV_HOST = "192.168.0.20"
+GOOGLE_TV_CERT_FILE = str(DATA_DIR / "google_tv_cert.pem")
+GOOGLE_TV_KEY_FILE  = str(DATA_DIR / "google_tv_key.pem")
+GOOGLE_TV_CLIENT_NAME = "DrButts"
+ADB_KEY_FILE = str(DATA_DIR / "adbkey")
