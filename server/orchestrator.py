@@ -11,6 +11,8 @@ from server.pi_callback import PiCallbackClient
 from server.config import (
     BENCHMARK_FILE, SPEAKER_EMBEDDINGS_FILE, SPEAKER_SIMILARITY_THRESHOLD,
     CLAUDE_INPUT_COST_PER_M, CLAUDE_OUTPUT_COST_PER_M,
+    SONOS_TTS_OUTPUT, SONOS_DEFAULT_ZONE, SONOS_DISCOVERY_CACHE_TTL,
+    SERVER_EXTERNAL_HOST, SERVER_PORT, DATA_DIR,
 )
 from server.commands.memory_cmd import load_persistent_memory
 import server.commands as commands
@@ -58,9 +60,13 @@ class Orchestrator:
             except Exception as e:
                 logger.warning(f"Failed to initialize speaker identification: {e}")
 
+        # Sonos device cache for TTS output routing
+        self._sonos_device = None
+        self._sonos_cache_time = 0.0
+
         logger.info("Orchestrator initialized")
 
-    def process_interaction(self, audio_bytes: bytes, wake_word: str) -> Dict:
+    def process_interaction(self, audio_bytes: bytes, wake_word: str, prefer_sonos: bool = False) -> Dict:
         """
         Process a complete voice interaction.
 
@@ -210,9 +216,14 @@ class Orchestrator:
         word_count = len(response_text.split())
         self._log_benchmark('tts', timings['tts'], word_count=word_count)
 
-        # Convert audio to base64 for transmission
+        # Route TTS to Sonos if client requested it and server allows it
+        tts_routed = False
+        if prefer_sonos and SONOS_TTS_OUTPUT:
+            tts_routed = self._route_tts_to_sonos(audio_data)
+
+        # Convert audio to base64 for transmission (empty if Sonos handled it)
         from shared.utils import encode_audio_base64
-        audio_base64 = encode_audio_base64(audio_data)
+        audio_base64 = "" if tts_routed else encode_audio_base64(audio_data)
 
         # Calculate total time
         timings['total'] = sum(timings.values())
@@ -227,6 +238,7 @@ class Orchestrator:
             'timings': timings,
             'speaker': speaker_name,
             'await_followup': await_followup,
+            'tts_routed': tts_routed,
             'error': None
         }
 
@@ -248,6 +260,41 @@ class Orchestrator:
         except Exception as e:
             logger.warning(f"Failed to convert audio bytes to numpy: {e}")
             return None
+
+    def _route_tts_to_sonos(self, audio_data: bytes) -> bool:
+        """Save TTS audio and trigger Sonos playback. Returns True if successful."""
+        try:
+            import soco
+
+            # Refresh device cache if stale
+            now = time.time()
+            if self._sonos_device is None or now - self._sonos_cache_time > SONOS_DISCOVERY_CACHE_TTL:
+                devices = list(soco.discover(timeout=2) or [])
+                self._sonos_device = None
+                for d in devices:
+                    if d.player_name == SONOS_DEFAULT_ZONE:
+                        self._sonos_device = d
+                        break
+                if self._sonos_device is None and devices:
+                    self._sonos_device = devices[0]
+                self._sonos_cache_time = now
+
+            if not self._sonos_device:
+                logger.warning("No Sonos devices found for TTS output")
+                return False
+
+            # Save audio to a known path the HTTP endpoint can serve
+            tts_path = DATA_DIR / "tts_latest.wav"
+            tts_path.write_bytes(audio_data)
+
+            uri = f"http://{SERVER_EXTERNAL_HOST}:{SERVER_PORT}/audio/tts_latest"
+            self._sonos_device.play_uri(uri, title="Dr. Butts")
+            logger.info(f"TTS routed to Sonos '{self._sonos_device.player_name}'")
+            return True
+
+        except Exception as e:
+            logger.warning(f"Sonos TTS routing failed: {e}")
+            return False
 
     def _execute_command(self, name: str, **kwargs) -> str:
         """

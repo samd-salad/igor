@@ -39,6 +39,7 @@ class ProcessInteractionRequest(BaseModel):
     audio_base64: str = Field(..., max_length=10_000_000, description="Base64-encoded WAV audio file (max ~7MB)")
     wake_word: str = Field(..., max_length=50, description="Wake word that was detected")
     timestamp: float = Field(..., ge=0, description="Unix timestamp when interaction started")
+    prefer_sonos_output: bool = Field(False, description="If true, client wants TTS routed to Sonos instead of returned as audio")
 
     @field_validator('audio_base64')
     @classmethod
@@ -65,6 +66,7 @@ class ProcessInteractionResponse(BaseModel):
     timings: Dict[str, float] = Field(default_factory=dict, description="Performance timings for each stage")
     speaker: Optional[str] = Field(None, max_length=100, description="Identified speaker name, if recognized")
     await_followup: bool = Field(False, description="If true, bot is expecting a follow-up response (no wake word needed)")
+    tts_routed: bool = Field(False, description="If true, TTS was sent to Sonos; client should not play audio locally")
     error: Optional[str] = Field(None, max_length=1000, description="Error message if processing failed")
 
 

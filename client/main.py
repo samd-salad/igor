@@ -25,7 +25,8 @@ from client.config import (
     WAKE_SAMPLES_DIR,
     TEMP_WAV,
     REQUEST_TIMEOUT,
-    FOLLOWUP_TIMEOUT
+    FOLLOWUP_TIMEOUT,
+    USE_SONOS_OUTPUT,
 )
 from client.audio import Audio
 from client.wakeword import WakeWordDetector
@@ -224,7 +225,8 @@ class PiClient:
                 request = ProcessInteractionRequest(
                     audio_base64=audio_b64,
                     wake_word=wake_word,
-                    timestamp=get_timestamp()
+                    timestamp=get_timestamp(),
+                    prefer_sonos_output=USE_SONOS_OUTPUT,
                 )
 
                 audio_size_kb = len(audio_bytes) / 1024
@@ -251,7 +253,22 @@ class PiClient:
                     self.audio.beep_error()
                     return
 
-                if result.get('audio_base64'):
+                if result.get('tts_routed'):
+                    # TTS playing on Sonos — no local audio playback
+                    logger.info("TTS routed to Sonos")
+                    if result.get('await_followup') and depth < self.MAX_FOLLOWUP_DEPTH:
+                        logger.info("Bot is awaiting follow-up response (Sonos routed)")
+                        time.sleep(3.0)  # Approximate wait for Sonos playback to finish
+                        self.audio.beep_start()
+                        time.sleep(0.1)
+                        depth += 1
+                        is_followup = True
+                        continue
+                    else:
+                        self.audio.beep_done()
+                        logger.info("Interaction complete")
+                        return
+                elif result.get('audio_base64'):
                     response_audio = decode_audio_base64(result['audio_base64'])
                     if not self.audio.play_audio_bytes(response_audio):
                         logger.error("Failed to play response audio")

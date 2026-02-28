@@ -5,7 +5,7 @@ from collections import deque
 from threading import Lock
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import ValidationError
 
 from shared.models import (
@@ -101,7 +101,10 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
                 logger.error(f"Failed to decode audio: {e}")
                 raise HTTPException(status_code=400, detail="Invalid audio encoding")
 
-            result = orchestrator.process_interaction(audio_bytes, request.wake_word)
+            result = orchestrator.process_interaction(
+                audio_bytes, request.wake_word,
+                prefer_sonos=request.prefer_sonos_output,
+            )
 
             response = ProcessInteractionResponse(
                 transcription=result['transcription'],
@@ -110,6 +113,7 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
                 commands_executed=result['commands_executed'],
                 timings=result['timings'],
                 await_followup=result.get('await_followup', False),
+                tts_routed=result.get('tts_routed', False),
                 speaker=result.get('speaker'),
                 error=result.get('error')
             )
@@ -126,6 +130,15 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
         except Exception as e:
             logger.error(f"Error processing interaction: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Processing failed")
+
+    @app.get("/audio/tts_latest")
+    async def get_tts_audio():
+        """Serve the most recent TTS audio file (fetched by Sonos for playback)."""
+        from server.config import DATA_DIR
+        tts_path = DATA_DIR / "tts_latest.wav"
+        if not tts_path.exists():
+            raise HTTPException(status_code=404, detail="No TTS audio available")
+        return FileResponse(str(tts_path), media_type="audio/wav")
 
     @app.get("/api/health", response_model=HealthCheckResponse)
     async def health_check():

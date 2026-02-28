@@ -43,5 +43,8 @@ MAX_RECORDING = 15
 # Follow-up mode settings
 FOLLOWUP_TIMEOUT = 5.0
 
+# Audio output routing
+USE_SONOS_OUTPUT = False  # Set True to route TTS through Sonos instead of Pi speaker
+
 # Request timeouts
 REQUEST_TIMEOUT = 60.0

@@ -47,6 +47,8 @@ REQUEST_TIMEOUT = 5.0  # Timeout for HTTP requests to Pi
 # Sonos soundbar/speaker settings (local LAN, no API key)
 SONOS_DISCOVERY_CACHE_TTL = 300  # seconds before forced re-discovery (5 min)
 SONOS_DEFAULT_ZONE = "Living Room"  # Default zone for TV/soundbar/music requests
+SONOS_TTS_OUTPUT = True   # Allow clients to route TTS through Sonos (per-client opt-in via prefer_sonos_output)
+SERVER_EXTERNAL_HOST = "192.168.0.4"  # PC's LAN IP (Sonos fetches TTS audio from here)
 
 # LIFX smart bulb settings (local LAN UDP, no API key)
 LIFX_DISCOVERY_CACHE_TTL = 300  # seconds before forced re-discovery (5 min)
