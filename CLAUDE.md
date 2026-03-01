@@ -2,6 +2,17 @@
 
 Guidance for Claude Code when working in this repository.
 
+## Dev Session Workflow
+
+At the start of every session, check `data/feedback.json` for open change requests and proactively offer to fix them. Example: "You have 2 open items: response verbosity after light commands, and Sonos reconnect on stale cache. Want me to work through them?"
+
+Read the file with:
+```python
+import json; print(json.dumps(json.loads(open('data/feedback.json').read()), indent=2))
+```
+
+After fixing an item, update its status to `"resolved"` directly in the JSON, or remind the user to say "resolve feedback #N" to Dr. Butts.
+
 ## Project Overview
 
 Dr. Butts is a local voice assistant. A **Raspberry Pi** handles audio I/O; a **PC** handles compute (STT, LLM, TTS).
@@ -62,6 +73,7 @@ smart_assistant/
 │       ├── sonos_cmd.py  # Sonos volume control (local LAN, soco)
 │       ├── tv_cmd.py     # Google TV power/nav (androidtvremote2)
 │       ├── adb_cmd.py    # Google TV app launch/playback/search (adb-shell)
+│       ├── feedback_cmd.py  # Change-request logging: log_feedback, list_feedback, resolve_feedback
 │       └── _utils.py     # Shared: parse_amount, parse_direction_updown, parse_volume_word
 ├── shared/
 │   ├── models.py    # Pydantic request/response models
@@ -117,6 +129,7 @@ class MyCommand(Command):
 | `tv_key` | "Go home" / "Mute the TV" (androidtvremote2 nav keys) |
 | `tv_launch` / `tv_playback` / `tv_skip` / `tv_search_youtube` | "Open YouTube" / "Pause" / "Skip 30 seconds" (ADB) |
 | `save_memory` / `forget_memory` | "Remember I prefer dark roast" |
+| `log_feedback` / `list_feedback` / `resolve_feedback` | "Log that" / "I didn't like that response" / "Show my change requests" |
 | `set_timer` / `cancel_timer` / `list_timers` | "5 minute timer" |
 | `get_weather` | "What's the weather?" |
 | Network commands | "Scan for new devices" |
@@ -129,6 +142,8 @@ class MyCommand(Command):
 
 Environment variables required:
 - `ANTHROPIC_API_KEY` — server only
+
+No other API keys needed. Weather uses Open-Meteo (free, no account). Smart home uses local LAN only.
 
 ## Security Rules
 
