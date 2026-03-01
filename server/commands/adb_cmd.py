@@ -45,9 +45,9 @@ APP_PACKAGES = {
 }
 
 PLAYBACK_KEYS = {
-    "play":          85,   # KEYCODE_MEDIA_PLAY_PAUSE (also works as play)
-    "pause":         85,   # KEYCODE_MEDIA_PLAY_PAUSE
-    "play_pause":    85,
+    "play":          126,  # KEYCODE_MEDIA_PLAY (discrete — does not toggle)
+    "pause":         127,  # KEYCODE_MEDIA_PAUSE (discrete — does not toggle)
+    "play_pause":    85,   # KEYCODE_MEDIA_PLAY_PAUSE (toggle)
     "stop":          86,   # KEYCODE_MEDIA_STOP
     "next":          87,   # KEYCODE_MEDIA_NEXT
     "previous":      88,   # KEYCODE_MEDIA_PREVIOUS
@@ -98,6 +98,27 @@ def _tv_adb_available() -> str | None:
     if not GOOGLE_TV_HOST or "0.X" in GOOGLE_TV_HOST:
         return "GOOGLE_TV_HOST not configured in server/config.py"
     return None
+
+
+def _get_tv_playback_state() -> str:
+    """Query ADB for current media playback state.
+
+    Returns 'playing', 'paused', 'stopped', or 'unknown'.
+    'unknown' on any error — callers should treat unknown as non-playing.
+    """
+    if not _ADB_AVAILABLE or not GOOGLE_TV_HOST or "0.X" in GOOGLE_TV_HOST:
+        return "unknown"
+    out, err = _adb_shell("dumpsys media_session", cmd_timeout=3.0)
+    if err or not out:
+        return "unknown"
+    # STATE_PLAYING=3, STATE_PAUSED=2, STATE_STOPPED=1
+    if "state=PlaybackState {state=3" in out:
+        return "playing"
+    if "state=PlaybackState {state=2" in out:
+        return "paused"
+    if "state=PlaybackState {state=1" in out:
+        return "stopped"
+    return "unknown"
 
 
 
