@@ -17,8 +17,17 @@ from shared.models import (
 )
 from shared.utils import decode_audio_base64
 from server.orchestrator import Orchestrator
+from server.config import ALLOWED_CLIENT_IPS
 
 logger = logging.getLogger(__name__)
+
+
+def _require_allowed_ip(req: Request):
+    """Raise 403 if request is not from an allowed client IP."""
+    client_ip = req.client.host
+    if client_ip not in ALLOWED_CLIENT_IPS:
+        logger.warning(f"Blocked request from unauthorized IP: {client_ip}")
+        raise HTTPException(status_code=403, detail="Forbidden")
 
 
 class _RateLimiter:
@@ -86,6 +95,7 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
 
     @app.post("/api/process_interaction", response_model=ProcessInteractionResponse)
     async def process_interaction(request: ProcessInteractionRequest, req: Request):
+        _require_allowed_ip(req)
         client_ip = req.client.host
 
         if not _rate_limiter.is_allowed(client_ip):
@@ -93,7 +103,9 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
             raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
         try:
-            logger.info(f"Received interaction request (wake word: {request.wake_word})")
+            # Sanitize wake_word before logging to prevent log injection
+            safe_wake_word = request.wake_word.replace('\n', '').replace('\r', '')
+            logger.info(f"Received interaction request (wake word: {safe_wake_word})")
 
             try:
                 audio_bytes = decode_audio_base64(request.audio_base64)
@@ -138,7 +150,7 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
         tts_path = DATA_DIR / "tts_latest.wav"
         if not tts_path.exists():
             raise HTTPException(status_code=404, detail="No TTS audio available")
-        return FileResponse(str(tts_path), media_type="audio/wav")
+        return FileResponse(str(tts_path), media_type="audio/x-wav")
 
     @app.get("/api/health", response_model=HealthCheckResponse)
     async def health_check():
@@ -169,11 +181,13 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
             )
 
     @app.get("/api/conversation/history")
-    async def get_conversation_history():
+    async def get_conversation_history(req: Request):
+        _require_allowed_ip(req)
         return {"history": orchestrator.get_conversation_history()}
 
     @app.post("/api/conversation/clear")
-    async def clear_conversation_history():
+    async def clear_conversation_history(req: Request):
+        _require_allowed_ip(req)
         orchestrator.clear_conversation_history()
         return {"status": "success", "message": "Conversation history cleared"}
 

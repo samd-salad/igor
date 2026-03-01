@@ -221,7 +221,11 @@ class TvSkipCommand(Command):
         else:
             return f"Unknown direction '{direction}'. Use 'forward' or 'back'."
 
-        presses = max(1, min(120, round(int(seconds) / 5)))  # cap at 120 (~10 min)
+        try:
+            seconds = int(seconds)
+        except (ValueError, TypeError):
+            return f"Invalid seconds value '{seconds}'. Use a number."
+        presses = max(1, min(120, round(seconds / 5)))  # cap at 120 (~10 min)
         cmd = " && ".join(f"input keyevent {keycode}" for _ in range(presses))
         out, err = _adb_shell(cmd)
         if err:

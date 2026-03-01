@@ -75,7 +75,10 @@ class SpeakerIdentifier:
 
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         """Calculate cosine similarity between two vectors."""
-        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+        norm = np.linalg.norm(a) * np.linalg.norm(b)
+        if norm == 0:
+            return 0.0
+        return float(np.clip(np.dot(a, b) / norm, 0.0, 1.0))
 
     def enroll_speaker(self, name: str, audio_samples: list[np.ndarray], sample_rate: int = 16000) -> bool:
         """

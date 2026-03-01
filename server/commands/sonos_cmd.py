@@ -5,6 +5,7 @@ or room speakers. Use Pi system volume commands only when the user says
 'your volume' or 'assistant volume'.
 """
 import logging
+import threading
 import time
 
 from .base import Command
@@ -22,6 +23,7 @@ except ImportError:
 
 _cache: list = []
 _cache_time: float = 0.0
+_cache_lock = threading.Lock()
 
 _VOL_S, _VOL_M, _VOL_L = 5, 15, 30
 
@@ -29,17 +31,18 @@ _VOL_S, _VOL_M, _VOL_L = 5, 15, 30
 def _get_devices(force: bool = False) -> list:
     global _cache, _cache_time
     now = time.monotonic()
-    if not force and _cache and (now - _cache_time) < SONOS_DISCOVERY_CACHE_TTL:
-        return _cache
-    try:
-        _cache = list(soco.discover() or [])
-        _cache_time = now
-        logger.debug(f"Sonos discovered {len(_cache)} device(s)")
-    except Exception as e:
-        logger.warning(f"Sonos discovery failed: {e}")
-        _cache = []
-        _cache_time = now
-    return _cache
+    with _cache_lock:
+        if not force and _cache and (now - _cache_time) < SONOS_DISCOVERY_CACHE_TTL:
+            return list(_cache)
+        try:
+            _cache = list(soco.discover() or [])
+            _cache_time = now
+            logger.debug(f"Sonos discovered {len(_cache)} device(s)")
+        except Exception as e:
+            logger.warning(f"Sonos discovery failed: {e}")
+            _cache = []
+            _cache_time = now
+        return list(_cache)
 
 
 def _resolve_target(zone: str) -> list:

@@ -225,8 +225,8 @@ class Orchestrator:
         from shared.utils import encode_audio_base64
         audio_base64 = "" if tts_routed else encode_audio_base64(audio_data)
 
-        # Calculate total time
-        timings['total'] = sum(timings.values())
+        # Calculate total time (exclude non-time fields like llm_cost)
+        timings['total'] = timings.get('stt', 0) + timings.get('llm', 0) + timings.get('tts', 0)
         # Log with detailed statistics
         self._log_interaction_stats(timings, transcription, response_text)
 
@@ -261,8 +261,40 @@ class Orchestrator:
             logger.warning(f"Failed to convert audio bytes to numpy: {e}")
             return None
 
+    @staticmethod
+    def _resample_wav_44100(audio_data: bytes) -> bytes:
+        """Resample WAV to 44100 Hz for Sonos compatibility (Sonos rejects 22050 Hz)."""
+        import io
+        import wave
+        import numpy as np
+
+        with io.BytesIO(audio_data) as buf:
+            with wave.open(buf, 'rb') as wf:
+                n_channels = wf.getnchannels()
+                sampwidth = wf.getsampwidth()
+                framerate = wf.getframerate()
+                frames = wf.readframes(wf.getnframes())
+
+        if framerate == 44100:
+            return audio_data
+
+        samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32)
+        ratio = 44100 / framerate
+        n_out = int(len(samples) * ratio)
+        x_old = np.arange(len(samples))
+        x_new = np.linspace(0, len(samples) - 1, n_out)
+        resampled = np.interp(x_new, x_old, samples).astype(np.int16)
+
+        out = io.BytesIO()
+        with wave.open(out, 'wb') as wf:
+            wf.setnchannels(n_channels)
+            wf.setsampwidth(sampwidth)
+            wf.setframerate(44100)
+            wf.writeframes(resampled.tobytes())
+        return out.getvalue()
+
     def _route_tts_to_sonos(self, audio_data: bytes) -> bool:
-        """Save TTS audio and trigger Sonos playback. Returns True if successful."""
+        """Resample TTS audio, save it, and trigger Sonos playback. Returns True if successful."""
         try:
             import soco
 
@@ -283,9 +315,10 @@ class Orchestrator:
                 logger.warning("No Sonos devices found for TTS output")
                 return False
 
-            # Save audio to a known path the HTTP endpoint can serve
+            # Sonos requires 44100 Hz; Piper outputs 22050 Hz
+            wav_44k = self._resample_wav_44100(audio_data)
             tts_path = DATA_DIR / "tts_latest.wav"
-            tts_path.write_bytes(audio_data)
+            tts_path.write_bytes(wav_44k)
 
             uri = f"http://{SERVER_EXTERNAL_HOST}:{SERVER_PORT}/audio/tts_latest"
             self._sonos_device.play_uri(uri, title="Dr. Butts")
