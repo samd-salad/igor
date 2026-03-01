@@ -138,9 +138,19 @@ class PiClient:
         threading.Thread(target=_send, daemon=True).start()
 
     def _beep(self, beep_type: str):
-        """Play beep locally or via Sonos depending on output mode."""
+        """Play beep locally or via Sonos depending on output mode.
+
+        Only 'start' and 'error' go through Sonos — these announce state to
+        everyone in the room and don't race with TTS.  'end' and 'done' play
+        locally on the Pi so they never block the server event loop or
+        interrupt the Sonos TTS response.
+        """
         if USE_SONOS_OUTPUT:
-            self._sonos_beep(beep_type)
+            if beep_type in ("start", "error", "alert"):
+                self._sonos_beep(beep_type)
+            else:
+                # 'end' / 'done' — play locally; they'd race with Sonos TTS
+                getattr(self.audio, f"beep_{beep_type}")()
         else:
             getattr(self.audio, f"beep_{beep_type}")()
 

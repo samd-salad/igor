@@ -145,13 +145,20 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
 
     @app.get("/audio/beep/{beep_type}")
     async def get_beep_audio(beep_type: str):
-        """Serve pre-generated beep WAV files (fetched by Sonos)."""
-        from server.beeps import get_beep_wav
-        wav = get_beep_wav(beep_type)
-        if wav is None:
+        """Serve pre-generated beep WAV files (fetched by Sonos).
+
+        Uses FileResponse so Sonos range requests (Range: bytes=0-) are
+        handled correctly — in-memory Response silently rejects range seeks.
+        """
+        from server.config import DATA_DIR
+        from server.beeps import get_beep_wav, _DEFS
+        if beep_type not in _DEFS:
             raise HTTPException(status_code=404, detail="Unknown beep type")
-        from fastapi.responses import Response
-        return Response(content=wav, media_type="audio/wav")
+        beep_path = DATA_DIR / f"beep_{beep_type}.wav"
+        if not beep_path.exists():
+            # Write on demand if missing
+            beep_path.write_bytes(get_beep_wav(beep_type))
+        return FileResponse(str(beep_path), media_type="audio/wav")
 
     class _SonosBeepRequest(BaseModel):
         beep_type: str
@@ -160,26 +167,32 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
 
     @app.post("/api/sonos_beep")
     async def sonos_beep(request: _SonosBeepRequest, req: Request):
-        """Trigger a beep on Sonos (called by Pi client when USE_SONOS_OUTPUT=True)."""
+        """Trigger a beep on Sonos (called by Pi client when USE_SONOS_OUTPUT=True).
+
+        Runs play_sonos_beep in a background thread so the blocking soco
+        play_uri call never stalls the FastAPI event loop.
+        """
         _require_allowed_ip(req)
         if request.beep_type not in _VALID_BEEP_TYPES:
             raise HTTPException(status_code=400, detail="Invalid beep type")
-        app.state.orchestrator.play_sonos_beep(request.beep_type)
+        import asyncio
+        asyncio.get_event_loop().run_in_executor(
+            None, app.state.orchestrator.play_sonos_beep, request.beep_type
+        )
         return {"status": "ok"}
 
     @app.get("/audio/tts_latest")
     async def get_tts_audio():
         """Serve the most recent TTS audio file (fetched by Sonos for playback).
 
-        Uses Response (in-memory) instead of FileResponse to guarantee an
-        accurate Content-Length header — Sonos requires it.
+        Uses FileResponse so Sonos range requests (Range: bytes=0-) are
+        handled correctly — in-memory Response silently rejects range seeks.
         """
         from server.config import DATA_DIR
-        from fastapi.responses import Response
         tts_path = DATA_DIR / "tts_latest.wav"
         if not tts_path.exists():
             raise HTTPException(status_code=404, detail="No TTS audio available")
-        return Response(content=tts_path.read_bytes(), media_type="audio/wav")
+        return FileResponse(str(tts_path), media_type="audio/wav")
 
     @app.get("/api/health", response_model=HealthCheckResponse)
     async def health_check():
