@@ -102,9 +102,12 @@ class WeatherCommand(Command):
             description = _WMO.get(cw.get("weathercode", 0), "unknown conditions")
 
             daily = data.get("daily", {})
-            high = round(daily["temperature_2m_max"][0]) if daily.get("temperature_2m_max") else None
-            low  = round(daily["temperature_2m_min"][0]) if daily.get("temperature_2m_min") else None
-            precip = daily["precipitation_probability_max"][0] if daily.get("precipitation_probability_max") else None
+            highs = daily.get("temperature_2m_max") or []
+            lows  = daily.get("temperature_2m_min") or []
+            precips = daily.get("precipitation_probability_max") or []
+            high   = round(highs[0])   if highs   else None
+            low    = round(lows[0])    if lows    else None
+            precip = precips[0]        if precips else None
 
             result = f"{display_name}: {temp}°F, {description}, wind {wind} mph."
             if high is not None and low is not None:

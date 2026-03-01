@@ -1,6 +1,7 @@
 """Feedback / change-request logging commands."""
 import json
 import logging
+import threading
 from datetime import datetime
 
 from server.commands.base import Command
@@ -9,6 +10,7 @@ from server.config import DATA_DIR
 logger = logging.getLogger(__name__)
 
 FEEDBACK_FILE = DATA_DIR / "feedback.json"
+_lock = threading.Lock()
 
 
 def _load() -> list:
@@ -21,7 +23,10 @@ def _load() -> list:
 
 
 def _save(items: list):
-    FEEDBACK_FILE.write_text(json.dumps(items, indent=2))
+    FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = FEEDBACK_FILE.with_suffix('.tmp')
+    tmp.write_text(json.dumps(items, indent=2))
+    tmp.replace(FEEDBACK_FILE)
 
 
 class LogFeedbackCommand(Command):
@@ -54,17 +59,18 @@ class LogFeedbackCommand(Command):
         return ["issue"]
 
     def execute(self, issue: str, suggestion: str = "", context: str = "") -> str:
-        items = _load()
-        new_id = max((i["id"] for i in items), default=0) + 1
-        items.append({
-            "id": new_id,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "status": "open",
-            "issue": issue,
-            "suggestion": suggestion,
-            "context": context,
-        })
-        _save(items)
+        with _lock:
+            items = _load()
+            new_id = max((i["id"] for i in items), default=0) + 1
+            items.append({
+                "id": new_id,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "status": "open",
+                "issue": issue,
+                "suggestion": suggestion,
+                "context": context,
+            })
+            _save(items)
         logger.info(f"Feedback logged #{new_id}: {issue}")
         return f"Logged as #{new_id}."
 
@@ -116,10 +122,11 @@ class ResolveFeedbackCommand(Command):
         }
 
     def execute(self, id: int, **_) -> str:
-        items = _load()
-        for item in items:
-            if item["id"] == id:
-                item["status"] = "resolved"
-                _save(items)
-                return f"#{id} resolved."
+        with _lock:
+            items = _load()
+            for item in items:
+                if item["id"] == id:
+                    item["status"] = "resolved"
+                    _save(items)
+                    return f"#{id} resolved."
         return f"No feedback item with ID {id}."

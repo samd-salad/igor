@@ -1,10 +1,13 @@
 import json
 import logging
 import re
+import threading
+import time
 from .base import Command
 from server.config import MEMORY_FILE
 
 logger = logging.getLogger(__name__)
+_lock = threading.Lock()
 
 
 def _sanitize(text: str, max_len: int = 500) -> str:
@@ -28,7 +31,7 @@ def _load_memories() -> dict:
         try:
             return json.loads(MEMORY_JSON_FILE.read_text())
         except json.JSONDecodeError:
-            backup = MEMORY_JSON_FILE.with_suffix('.bak')
+            backup = MEMORY_JSON_FILE.with_name(f"memory.bak.{int(time.time())}.json")
             MEMORY_JSON_FILE.rename(backup)
             logger.warning(f"Memory file corrupted — backed up to {backup.name}, starting fresh")
             return {}
@@ -42,9 +45,11 @@ def _load_memories() -> dict:
 
 
 def _save_memories(memories: dict):
-    """Save memories to JSON file."""
+    """Save memories to JSON file atomically."""
     MEMORY_JSON_FILE.parent.mkdir(parents=True, exist_ok=True)
-    MEMORY_JSON_FILE.write_text(json.dumps(memories, indent=2))
+    tmp = MEMORY_JSON_FILE.with_suffix('.tmp')
+    tmp.write_text(json.dumps(memories, indent=2))
+    tmp.replace(MEMORY_JSON_FILE)
 
 
 class SaveMemoryCommand(Command):
@@ -69,22 +74,18 @@ class SaveMemoryCommand(Command):
         }
 
     def execute(self, category: str, key: str, value: str) -> str:
-        memories = _load_memories()
-
         # Normalize and sanitize — values are injected into the system prompt
         category = _sanitize(category, max_len=50).lower().strip()
         key = _sanitize(key, max_len=50).lower().strip().replace(" ", "_")
         value = _sanitize(value, max_len=500)
 
-        # Check if updating existing
-        is_update = category in memories and key in memories.get(category, {})
-
-        # Save
-        if category not in memories:
-            memories[category] = {}
-        memories[category][key] = value
-
-        _save_memories(memories)
+        with _lock:
+            memories = _load_memories()
+            is_update = category in memories and key in memories.get(category, {})
+            if category not in memories:
+                memories[category] = {}
+            memories[category][key] = value
+            _save_memories(memories)
 
         action = "Updated" if is_update else "Saved"
         logger.info(f"Memory {action.lower()}: [{category}][{key}] = {value}")
@@ -109,21 +110,19 @@ class ForgetMemoryCommand(Command):
         }
 
     def execute(self, category: str, key: str) -> str:
-        memories = _load_memories()
-
         category = category.lower().strip()
         key = key.lower().strip().replace(" ", "_")
 
-        if category in memories and key in memories[category]:
-            del memories[category][key]
-            # Clean up empty categories
-            if not memories[category]:
-                del memories[category]
-            _save_memories(memories)
-            logger.info(f"Memory removed: [{category}][{key}]")
-            return f"Forgot: {key}"
-        else:
-            return f"No memory found for {category}/{key}"
+        with _lock:
+            memories = _load_memories()
+            if category in memories and key in memories[category]:
+                del memories[category][key]
+                if not memories[category]:
+                    del memories[category]
+                _save_memories(memories)
+                logger.info(f"Memory removed: [{category}][{key}]")
+                return f"Forgot: {key}"
+        return f"No memory found for {category}/{key}"
 
 
 def load_persistent_memory() -> str:
