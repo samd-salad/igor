@@ -150,7 +150,7 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
         tts_path = DATA_DIR / "tts_latest.wav"
         if not tts_path.exists():
             raise HTTPException(status_code=404, detail="No TTS audio available")
-        return FileResponse(str(tts_path), media_type="audio/x-wav")
+        return FileResponse(str(tts_path), media_type="audio/wav")
 
     @app.get("/api/health", response_model=HealthCheckResponse)
     async def health_check():

@@ -82,7 +82,13 @@ def _adb_shell(command: str, auth_timeout: float = 1.0, cmd_timeout: float = 10.
     try:
         signer = _get_signer()
         device = AdbDeviceTcp(GOOGLE_TV_HOST, ADB_PORT)
-        device.connect(rsa_keys=[signer], auth_timeout_s=auth_timeout, read_timeout_s=cmd_timeout)
+        # transport_timeout_s gates the TCP socket connect; without it the call can block indefinitely
+        device.connect(
+            rsa_keys=[signer],
+            auth_timeout_s=auth_timeout,
+            read_timeout_s=cmd_timeout,
+            transport_timeout_s=auth_timeout,
+        )
         try:
             result = device.shell(command, read_timeout_s=cmd_timeout)
             return result or "", None

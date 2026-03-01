@@ -8,6 +8,7 @@ from server.transcription import Transcriber
 from server.llm import LLM
 from server.synthesis import Synthesizer
 from server.pi_callback import PiCallbackClient
+from server.commands.adb_cmd import _get_tv_playback_state
 from server.config import (
     BENCHMARK_FILE, SPEAKER_EMBEDDINGS_FILE, SPEAKER_SIMILARITY_THRESHOLD,
     CLAUDE_INPUT_COST_PER_M, CLAUDE_OUTPUT_COST_PER_M,
@@ -222,7 +223,6 @@ class Orchestrator:
             if self._is_critical_response(response_text, commands_executed, await_followup):
                 tts_routed = self._route_tts_to_sonos(audio_data)
             else:
-                from server.commands.adb_cmd import _get_tv_playback_state
                 tv_state = _get_tv_playback_state()
                 if tv_state == "playing":
                     logger.info("TV is playing — suppressing non-critical Sonos TTS")
@@ -346,10 +346,18 @@ class Orchestrator:
             # Sonos requires 44100 Hz; Piper outputs 22050 Hz
             wav_44k = self._resample_wav_44100(audio_data)
             tts_path = DATA_DIR / "tts_latest.wav"
-            tts_path.write_bytes(wav_44k)
+            tmp_path = DATA_DIR / "tts_latest.tmp"
+            tmp_path.write_bytes(wav_44k)
+            tmp_path.replace(tts_path)
 
             uri = f"http://{SERVER_EXTERNAL_HOST}:{SERVER_PORT}/audio/tts_latest"
-            self._sonos_device.play_uri(uri, title="Dr. Butts")
+            # Build DIDL metadata via soco's data structures so Sonos doesn't probe
+            # the URI for MIME type (avoids UPnP error 714 "illegal MIME-type").
+            from soco.data_structures import DidlItem, DidlResource, to_didl_string
+            res = DidlResource(uri=uri, protocol_info="http-get:*:audio/wav:*")
+            item = DidlItem(title="Dr. Butts", parent_id="S:", item_id="S:TTS", resources=[res])
+            meta = to_didl_string(item)
+            self._sonos_device.play_uri(uri, meta=meta)
             logger.info(f"TTS routed to Sonos '{self._sonos_device.player_name}'")
             return True
 
