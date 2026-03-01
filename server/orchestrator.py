@@ -342,19 +342,17 @@ class Orchestrator:
             return None
 
     def _sonos_play_uri(self, uri: str, title: str) -> bool:
-        """Play a URI on the Sonos group coordinator.
-
-        Must use group.coordinator — calling play_uri on a non-coordinator
-        device (e.g. a stereo pair slave) silently succeeds at the UPnP layer
-        but produces no audio.
-        """
+        """Play a URI on the cached Sonos device with DIDL metadata."""
         device = self._get_sonos_device()
         if not device:
             logger.warning("No Sonos device available")
             return False
-        coordinator = device.group.coordinator
-        coordinator.play_uri(uri, title=title)
-        logger.debug(f"play_uri dispatched to coordinator '{coordinator.player_name}'")
+        from soco.data_structures import DidlItem, DidlResource, to_didl_string
+        res = DidlResource(uri=uri, protocol_info="http-get:*:audio/wav:*")
+        item = DidlItem(title=title, parent_id="S:", item_id="S:TTS", resources=[res])
+        meta = to_didl_string(item)
+        device.play_uri(uri, meta=meta)
+        logger.debug(f"play_uri dispatched to '{device.player_name}'")
         return True
 
     def play_sonos_beep(self, beep_type: str) -> bool:
@@ -383,7 +381,8 @@ class Orchestrator:
             tmp_path.replace(tts_path)
 
             uri = f"http://{SERVER_EXTERNAL_HOST}:{SERVER_PORT}/audio/tts_latest"
-            self._sonos_play_uri(uri, "Dr. Butts")
+            if not self._sonos_play_uri(uri, "Dr. Butts"):
+                return False
             logger.info(f"TTS routed to Sonos '{self._sonos_device.player_name}'")
             return True
 
