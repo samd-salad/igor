@@ -342,12 +342,19 @@ class Orchestrator:
             return None
 
     def _sonos_play_uri(self, uri: str, title: str) -> bool:
-        """Play a URI on the cached Sonos device."""
+        """Play a URI on the Sonos group coordinator.
+
+        Must use group.coordinator — calling play_uri on a non-coordinator
+        device (e.g. a stereo pair slave) silently succeeds at the UPnP layer
+        but produces no audio.
+        """
         device = self._get_sonos_device()
         if not device:
             logger.warning("No Sonos device available")
             return False
-        device.play_uri(uri, title=title)
+        coordinator = device.group.coordinator
+        coordinator.play_uri(uri, title=title)
+        logger.debug(f"play_uri dispatched to coordinator '{coordinator.player_name}'")
         return True
 
     def play_sonos_beep(self, beep_type: str) -> bool:

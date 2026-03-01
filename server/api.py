@@ -169,12 +169,17 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
 
     @app.get("/audio/tts_latest")
     async def get_tts_audio():
-        """Serve the most recent TTS audio file (fetched by Sonos for playback)."""
+        """Serve the most recent TTS audio file (fetched by Sonos for playback).
+
+        Uses Response (in-memory) instead of FileResponse to guarantee an
+        accurate Content-Length header — Sonos requires it.
+        """
         from server.config import DATA_DIR
+        from fastapi.responses import Response
         tts_path = DATA_DIR / "tts_latest.wav"
         if not tts_path.exists():
             raise HTTPException(status_code=404, detail="No TTS audio available")
-        return FileResponse(str(tts_path), media_type="audio/wav")
+        return Response(content=tts_path.read_bytes(), media_type="audio/wav")
 
     @app.get("/api/health", response_model=HealthCheckResponse)
     async def health_check():
