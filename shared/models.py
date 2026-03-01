@@ -76,6 +76,7 @@ class ProcessInteractionResponse(BaseModel):
     speaker: Optional[str] = Field(None, max_length=100, description="Identified speaker name, if recognized")
     await_followup: bool = Field(False, description="If true, bot is expecting a follow-up response (no wake word needed)")
     tts_routed: bool = Field(False, description="If true, TTS was sent to Sonos; client should not play audio locally")
+    tts_duration_seconds: Optional[float] = Field(None, ge=0, description="Duration of TTS audio in seconds (used by client to wait before follow-up)")
     error: Optional[str] = Field(None, max_length=1000, description="Error message if processing failed")
 
 

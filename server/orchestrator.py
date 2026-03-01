@@ -226,6 +226,7 @@ class Orchestrator:
 
         # Route TTS to Sonos if client requested it and server allows it
         tts_routed = False
+        tts_duration_seconds = None
         if prefer_sonos and SONOS_TTS_OUTPUT:
             if self._is_critical_response(response_text, commands_executed, await_followup):
                 tts_routed = self._route_tts_to_sonos(audio_data)
@@ -236,6 +237,8 @@ class Orchestrator:
                     tts_routed = True  # tell client to skip local playback too
                 else:
                     tts_routed = self._route_tts_to_sonos(audio_data)
+            if tts_routed and self.tts_audio:
+                tts_duration_seconds = self._wav_duration(self.tts_audio)
 
         # Convert audio to base64 for transmission (empty if Sonos handled it)
         from shared.utils import encode_audio_base64
@@ -255,6 +258,7 @@ class Orchestrator:
             'speaker': speaker_name,
             'await_followup': await_followup,
             'tts_routed': tts_routed,
+            'tts_duration_seconds': tts_duration_seconds,
             'error': None
         }
 
@@ -341,6 +345,14 @@ class Orchestrator:
             wf.setframerate(framerate)
             wf.writeframes(frames + silence)
         return out.getvalue()
+
+    @staticmethod
+    def _wav_duration(wav_data: bytes) -> float:
+        """Return duration of a WAV in seconds."""
+        import io, wave
+        with io.BytesIO(wav_data) as buf:
+            with wave.open(buf, 'rb') as wf:
+                return wf.getnframes() / wf.getframerate()
 
     @staticmethod
     def _is_critical_response(response_text: str, commands_executed: list, await_followup: bool) -> bool:
@@ -577,13 +589,13 @@ class Orchestrator:
                 return "        "
             pct = ((current - avg) / avg) * 100
             if pct < -5:
-                return f"\u2193{min(abs(pct), 999):.0f}%".rjust(8)
+                return f"\u2193{min(abs(pct), 999):.0f}%".rjust(6)
             elif pct > 5:
-                return f"\u2191{min(pct, 999):.0f}%".rjust(8)
+                return f"\u2191{min(pct, 999):.0f}%".rjust(6)
             return "       ~"
 
         def fmt_time(t: float) -> str:
-            return f"{t:9.2f}s"
+            return f"{t:7.2f}s"
 
         def fmt_pw(pw) -> str:
             return f"{pw:.3f}s" if pw is not None else "   —  "
@@ -599,7 +611,7 @@ class Orchestrator:
             return f"│ {stage:<5s} │{fmt_time(t)}│{cmp(t, avg_t)}│{fmt_pw(pw):^10s}│"
 
         llm_cost_str = f"${llm_cost:.3f}"
-        llm_row = f"│ {'LLM':<5s} │{fmt_time(llm_time)}│{cmp(llm_time, llm_stats['avg_duration'])}│{llm_cost_str:^10s}│"
+        llm_row = f"│ {'LLM':<5s} │{fmt_time(llm_time)}  │{cmp(llm_time, llm_stats['avg_duration'])}  │{llm_cost_str:^10s}│"
 
         logger.info(f"Interaction complete in {total:.2f}s | cost ${llm_cost:.3f}")
         logger.info(W)

@@ -126,6 +126,7 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
                 timings=result['timings'],
                 await_followup=result.get('await_followup', False),
                 tts_routed=result.get('tts_routed', False),
+                tts_duration_seconds=result.get('tts_duration_seconds'),
                 speaker=result.get('speaker'),
                 error=result.get('error')
             )

@@ -146,10 +146,13 @@ class PiClient:
         interrupt the Sonos TTS response.
         """
         if USE_SONOS_OUTPUT:
-            if beep_type in ("start", "error", "alert"):
+            if beep_type in ("start", "end", "error", "alert"):
+                # Route to Sonos — Pi has no local speaker
+                # 'end' is safe: server takes 4+ seconds to process, well past
+                # the 2.1s beep before TTS's play_uri is called
                 self._sonos_beep(beep_type)
             else:
-                # 'end' / 'done' — play locally; they'd race with Sonos TTS
+                # 'done' plays locally — done chime is embedded in TTS WAV anyway
                 getattr(self.audio, f"beep_{beep_type}")()
         else:
             getattr(self.audio, f"beep_{beep_type}")()
@@ -289,7 +292,8 @@ class PiClient:
                     logger.info("TTS routed to Sonos")
                     if result.get('await_followup') and depth < self.MAX_FOLLOWUP_DEPTH:
                         logger.info("Bot is awaiting follow-up response (Sonos routed)")
-                        time.sleep(3.0)  # Approximate wait for Sonos playback to finish
+                        tts_dur = result.get('tts_duration_seconds') or 5.0
+                        time.sleep(tts_dur + 0.5)  # Wait for Sonos to finish, plus margin
                         self._beep("start")
                         time.sleep(0.1)
                         depth += 1
