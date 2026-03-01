@@ -1,80 +1,119 @@
-"""Weather command using OpenWeatherMap API."""
-import os
-import requests
-from .base import Command
+"""Weather command using Open-Meteo (free, no API key required).
 
-API_KEY = os.environ.get("OPENWEATHERMAP_API_KEY", "")
-DEFAULT_LOCATION = os.environ.get("DEFAULT_LOCATION", "")
+Uses Open-Meteo geocoding API to resolve city names, then fetches
+current conditions and today's high/low forecast.
+https://open-meteo.com/
+"""
+import requests
+from typing import Optional, Tuple
+
+from .base import Command
+from server.config import DEFAULT_LOCATION
+
+# WMO weather interpretation codes → human-readable description
+_WMO = {
+    0:  "clear sky",
+    1:  "mainly clear", 2: "partly cloudy", 3: "overcast",
+    45: "foggy",        48: "icy fog",
+    51: "light drizzle", 53: "drizzle",     55: "heavy drizzle",
+    61: "light rain",   63: "rain",          65: "heavy rain",
+    71: "light snow",   73: "snow",          75: "heavy snow",
+    77: "snow grains",
+    80: "rain showers", 81: "showers",       82: "heavy showers",
+    85: "snow showers", 86: "heavy snow showers",
+    95: "thunderstorm",
+    96: "thunderstorm with hail", 99: "thunderstorm with heavy hail",
+}
+
+
+def _geocode(location: str) -> Optional[Tuple[float, float, str]]:
+    """Return (lat, lon, display_name) for a location string, or None if not found."""
+    resp = requests.get(
+        "https://geocoding-api.open-meteo.com/v1/search",
+        params={"name": location, "count": 1, "language": "en", "format": "json"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results")
+    if not results:
+        return None
+    r = results[0]
+    name = r.get("name", location)
+    admin = r.get("admin1", "")
+    country = r.get("country_code", "")
+    display = f"{name}, {admin}" if admin else f"{name}, {country}"
+    return r["latitude"], r["longitude"], display
 
 
 class WeatherCommand(Command):
     name = "get_weather"
-    description = "Get current weather conditions and forecast for a location"
+    description = (
+        "Get current weather conditions and today's forecast for a location. "
+        "No API key required."
+    )
 
     @property
     def parameters(self) -> dict:
         return {
             "location": {
                 "type": "string",
-                "description": f"City name (e.g., 'Seattle' or 'London, UK'). Defaults to '{DEFAULT_LOCATION}' if not specified."
+                "description": (
+                    f"City name (e.g. 'Seattle' or 'London, UK'). "
+                    f"Omit to use default ({DEFAULT_LOCATION or 'not configured'})."
+                ),
             }
         }
 
-    def execute(self, location: str = "") -> str:
+    @property
+    def required_parameters(self) -> list:
+        return []
+
+    def execute(self, location: str = "", **_) -> str:
         location = location.strip() or DEFAULT_LOCATION
-
-        if not API_KEY:
-            return "Weather unavailable: OPENWEATHERMAP_API_KEY not set"
-
         if not location:
-            return "No location specified and no default location configured"
+            return "No location specified and DEFAULT_LOCATION not set in config"
 
         try:
-            # Get current weather
-            current_url = "https://api.openweathermap.org/data/2.5/weather"
-            current_resp = requests.get(current_url, params={
-                "q": location,
-                "appid": API_KEY,
-                "units": "imperial"
-            }, timeout=10)
-
-            if current_resp.status_code == 401:
-                return "Weather unavailable: Invalid API key"
-            if current_resp.status_code == 404:
+            geo = _geocode(location)
+            if not geo:
                 return f"Location '{location}' not found"
-            current_resp.raise_for_status()
+            lat, lon, display_name = geo
 
-            current = current_resp.json()
+            resp = requests.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "current_weather": True,
+                    "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+                    "temperature_unit": "fahrenheit",
+                    "windspeed_unit": "mph",
+                    "timezone": "auto",
+                    "forecast_days": 1,
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
 
-            # Extract current conditions
-            temp = round(current["main"]["temp"])
-            feels_like = round(current["main"]["feels_like"])
-            humidity = current["main"]["humidity"]
-            description = current["weather"][0]["description"]
-            city_name = current["name"]
+            cw = data["current_weather"]
+            temp = round(cw["temperature"])
+            wind = round(cw["windspeed"])
+            description = _WMO.get(cw.get("weathercode", 0), "unknown conditions")
 
-            # Get forecast
-            forecast_url = "https://api.openweathermap.org/data/2.5/forecast"
-            forecast_resp = requests.get(forecast_url, params={
-                "q": location,
-                "appid": API_KEY,
-                "units": "imperial",
-                "cnt": 8  # Next 24 hours (3-hour intervals)
-            }, timeout=10)
+            daily = data.get("daily", {})
+            high = round(daily["temperature_2m_max"][0]) if daily.get("temperature_2m_max") else None
+            low  = round(daily["temperature_2m_min"][0]) if daily.get("temperature_2m_min") else None
+            precip = daily["precipitation_probability_max"][0] if daily.get("precipitation_probability_max") else None
 
-            forecast_summary = ""
-            if forecast_resp.status_code == 200:
-                forecast = forecast_resp.json()
-                # Get high/low for next 24 hours
-                temps = [item["main"]["temp"] for item in forecast["list"]]
-                high = round(max(temps))
-                low = round(min(temps))
-                forecast_summary = f" High {high}F, low {low}F today."
-
-            result = f"{city_name}: {temp}F (feels like {feels_like}F), {description}, {humidity}% humidity.{forecast_summary}"
+            result = f"{display_name}: {temp}°F, {description}, wind {wind} mph."
+            if high is not None and low is not None:
+                result += f" High {high}, low {low}."
+            if precip is not None and precip > 20:
+                result += f" {precip}% chance of precipitation."
             return result
 
         except requests.Timeout:
-            return "Weather unavailable: Request timed out"
+            return "Weather unavailable: request timed out"
         except requests.RequestException as e:
             return f"Weather unavailable: {e}"
