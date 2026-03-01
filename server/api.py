@@ -6,7 +6,7 @@ from threading import Lock
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from shared.models import (
     ProcessInteractionRequest,
@@ -142,6 +142,30 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
         except Exception as e:
             logger.error(f"Error processing interaction: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Processing failed")
+
+    @app.get("/audio/beep/{beep_type}")
+    async def get_beep_audio(beep_type: str):
+        """Serve pre-generated beep WAV files (fetched by Sonos)."""
+        from server.beeps import get_beep_wav
+        wav = get_beep_wav(beep_type)
+        if wav is None:
+            raise HTTPException(status_code=404, detail="Unknown beep type")
+        from fastapi.responses import Response
+        return Response(content=wav, media_type="audio/wav")
+
+    class _SonosBeepRequest(BaseModel):
+        beep_type: str
+
+    _VALID_BEEP_TYPES = {"start", "end", "done", "error", "alert"}
+
+    @app.post("/api/sonos_beep")
+    async def sonos_beep(request: _SonosBeepRequest, req: Request):
+        """Trigger a beep on Sonos (called by Pi client when USE_SONOS_OUTPUT=True)."""
+        _require_allowed_ip(req)
+        if request.beep_type not in _VALID_BEEP_TYPES:
+            raise HTTPException(status_code=400, detail="Invalid beep type")
+        app.state.orchestrator.play_sonos_beep(request.beep_type)
+        return {"status": "ok"}
 
     @app.get("/audio/tts_latest")
     async def get_tts_audio():

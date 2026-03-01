@@ -17,6 +17,7 @@ from server.orchestrator import Orchestrator
 from server.api import create_app
 from server.event_loop import initialize_event_loop
 import server.commands as commands
+from server.beeps import write_beep_files
 from server.config import (
     SERVER_HOST,
     SERVER_PORT,
@@ -79,6 +80,9 @@ def initialize_services():
         synthesizer=synthesizer,
         pi_client=pi_client
     )
+
+    # Pre-generate beep WAV files for Sonos output
+    write_beep_files()
 
     logger.info("All services initialized successfully")
     return orchestrator

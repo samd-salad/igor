@@ -31,7 +31,7 @@ from client.config import (
 from client.audio import Audio
 from client.wakeword import WakeWordDetector
 from client.pi_server import run_pi_server
-from shared.protocol import PROCESS_INTERACTION_ENDPOINT
+from shared.protocol import PROCESS_INTERACTION_ENDPOINT, SONOS_BEEP_ENDPOINT
 from shared.models import ProcessInteractionRequest
 from shared.utils import setup_logging, read_wav_file, encode_audio_base64, decode_audio_base64, get_timestamp
 
@@ -123,6 +123,27 @@ class PiClient:
             if self.wakeword_detector:
                 self.wakeword_detector.delete()
 
+    def _sonos_beep(self, beep_type: str):
+        """Fire-and-forget beep via server Sonos endpoint (non-blocking)."""
+        import threading
+        def _send():
+            try:
+                requests.post(
+                    f"{self.server_url}{SONOS_BEEP_ENDPOINT}",
+                    json={"beep_type": beep_type},
+                    timeout=3,
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_send, daemon=True).start()
+
+    def _beep(self, beep_type: str):
+        """Play beep locally or via Sonos depending on output mode."""
+        if USE_SONOS_OUTPUT:
+            self._sonos_beep(beep_type)
+        else:
+            getattr(self.audio, f"beep_{beep_type}")()
+
     def _handle_interaction(self):
         """Handle a single voice interaction (may include follow-ups)."""
         logger.debug("Listening for wake word...")
@@ -178,7 +199,7 @@ class PiClient:
         time.sleep(0.2)
 
         try:
-            self.audio.beep_start()
+            self._beep("start")
         except Exception as e:
             logger.warning(f"Start beep failed: {e}")
 
@@ -209,13 +230,13 @@ class PiClient:
             if not self.audio.record(TEMP_WAV, timeout=FOLLOWUP_TIMEOUT if is_followup else None):
                 if is_followup:
                     logger.info("Follow-up timed out, ending conversation")
-                    self.audio.beep_done()
+                    self._beep("done")
                     return
                 logger.error("Recording failed")
-                self.audio.beep_error()
+                self._beep("error")
                 return
 
-            self.audio.beep_end()
+            self._beep("end")
             logger.info("Recording complete")
 
             try:
@@ -259,37 +280,37 @@ class PiClient:
                     if result.get('await_followup') and depth < self.MAX_FOLLOWUP_DEPTH:
                         logger.info("Bot is awaiting follow-up response (Sonos routed)")
                         time.sleep(3.0)  # Approximate wait for Sonos playback to finish
-                        self.audio.beep_start()
+                        self._beep("start")
                         time.sleep(0.1)
                         depth += 1
                         is_followup = True
                         continue
                     else:
-                        self.audio.beep_done()
+                        self._beep("done")
                         logger.info("Interaction complete")
                         return
                 elif result.get('audio_base64'):
                     response_audio = decode_audio_base64(result['audio_base64'])
                     if not self.audio.play_audio_bytes(response_audio):
                         logger.error("Failed to play response audio")
-                        self.audio.beep_error()
+                        self._beep("error")
                         return
 
                     if result.get('await_followup') and depth < self.MAX_FOLLOWUP_DEPTH:
                         logger.info("Bot is awaiting follow-up response")
                         time.sleep(0.3)
-                        self.audio.beep_start()
+                        self._beep("start")
                         time.sleep(0.1)
                         depth += 1
                         is_followup = True
                         continue
                     else:
-                        self.audio.beep_done()
+                        self._beep("done")
                         logger.info("Interaction complete")
                         return
                 else:
                     logger.warning("No audio in response")
-                    self.audio.beep_error()
+                    self._beep("error")
                     return
 
             except requests.Timeout:

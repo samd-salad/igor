@@ -3,6 +3,7 @@
 # Server (PC) endpoints
 PROCESS_INTERACTION_ENDPOINT = "/api/process_interaction"
 SERVER_HEALTH_ENDPOINT = "/api/health"
+SONOS_BEEP_ENDPOINT = "/api/sonos_beep"
 
 # Client (Pi) endpoints
 PLAY_AUDIO_ENDPOINT = "/api/play_audio"

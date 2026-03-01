@@ -321,12 +321,10 @@ class Orchestrator:
         }
         return any(cmd in CRITICAL_COMMANDS for cmd in commands_executed)
 
-    def _route_tts_to_sonos(self, audio_data: bytes) -> bool:
-        """Resample TTS audio, save it, and trigger Sonos playback. Returns True if successful."""
+    def _get_sonos_device(self):
+        """Return cached Sonos device, rediscovering if stale. Returns None if unavailable."""
         try:
             import soco
-
-            # Refresh device cache if stale
             now = time.time()
             if self._sonos_device is None or now - self._sonos_cache_time > SONOS_DISCOVERY_CACHE_TTL:
                 devices = list(soco.discover(timeout=2) or [])
@@ -338,8 +336,38 @@ class Orchestrator:
                 if self._sonos_device is None and devices:
                     self._sonos_device = devices[0]
                 self._sonos_cache_time = now
+            return self._sonos_device
+        except Exception as e:
+            logger.warning(f"Sonos discovery failed: {e}")
+            return None
 
-            if not self._sonos_device:
+    def _sonos_play_uri(self, uri: str, title: str) -> bool:
+        """Play a URI on the cached Sonos device with proper DIDL metadata."""
+        device = self._get_sonos_device()
+        if not device:
+            logger.warning("No Sonos device available")
+            return False
+        from soco.data_structures import DidlItem, DidlResource, to_didl_string
+        res = DidlResource(uri=uri, protocol_info="http-get:*:audio/wav:*")
+        item = DidlItem(title=title, parent_id="S:", item_id=f"S:{title}", resources=[res])
+        device.play_uri(uri, meta=to_didl_string(item))
+        return True
+
+    def play_sonos_beep(self, beep_type: str) -> bool:
+        """Play a beep through Sonos. Fire-and-forget; returns True if dispatched."""
+        if not SONOS_TTS_OUTPUT:
+            return False
+        try:
+            uri = f"http://{SERVER_EXTERNAL_HOST}:{SERVER_PORT}/audio/beep/{beep_type}"
+            return self._sonos_play_uri(uri, f"beep_{beep_type}")
+        except Exception as e:
+            logger.warning(f"Sonos beep '{beep_type}' failed: {e}")
+            return False
+
+    def _route_tts_to_sonos(self, audio_data: bytes) -> bool:
+        """Resample TTS audio, save it, and trigger Sonos playback. Returns True if successful."""
+        try:
+            if not self._get_sonos_device():
                 logger.warning("No Sonos devices found for TTS output")
                 return False
 
@@ -351,13 +379,7 @@ class Orchestrator:
             tmp_path.replace(tts_path)
 
             uri = f"http://{SERVER_EXTERNAL_HOST}:{SERVER_PORT}/audio/tts_latest"
-            # Build DIDL metadata via soco's data structures so Sonos doesn't probe
-            # the URI for MIME type (avoids UPnP error 714 "illegal MIME-type").
-            from soco.data_structures import DidlItem, DidlResource, to_didl_string
-            res = DidlResource(uri=uri, protocol_info="http-get:*:audio/wav:*")
-            item = DidlItem(title="Dr. Butts", parent_id="S:", item_id="S:TTS", resources=[res])
-            meta = to_didl_string(item)
-            self._sonos_device.play_uri(uri, meta=meta)
+            self._sonos_play_uri(uri, "Dr. Butts")
             logger.info(f"TTS routed to Sonos '{self._sonos_device.player_name}'")
             return True
 
