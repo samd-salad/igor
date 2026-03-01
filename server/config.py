@@ -10,6 +10,9 @@ SERVER_PORT = 8000
 PI_HOST = "192.168.0.3"
 PI_PORT = 8080
 
+# IP allowlist for sensitive server endpoints — add more Pi IPs here when scaling
+ALLOWED_CLIENT_IPS: set = {PI_HOST}
+
 # LLM configuration - Claude API
 CLAUDE_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
@@ -29,7 +32,7 @@ DATA_DIR = BASE_DIR / "data"
 # Piper TTS model
 PIPER_VOICE = str(BASE_DIR / "voices" / "en_US-arctic-medium.onnx")
 PIPER_SAMPLE_RATE = 22050
-MEMORY_FILE = DATA_DIR / "memory.txt"
+MEMORY_FILE = DATA_DIR / "memory.txt"  # Legacy path; memory_cmd.py uses memory.json (derived via .with_suffix)
 KNOWN_DEVICES_FILE = DATA_DIR / "known_devices.json"
 BENCHMARK_FILE = DATA_DIR / "benchmark.csv"
 CONVERSATION_STATE_FILE = DATA_DIR / "conversation_state.json"
@@ -40,6 +43,9 @@ SPEAKER_SIMILARITY_THRESHOLD = 0.75  # 0-1, higher = stricter matching
 
 # Ensure data directory exists
 DATA_DIR.mkdir(exist_ok=True)
+
+# Weather
+DEFAULT_LOCATION = "Arlington, VA"  # Default city for get_weather when no location specified
 
 # Request timeouts
 REQUEST_TIMEOUT = 5.0  # Timeout for HTTP requests to Pi

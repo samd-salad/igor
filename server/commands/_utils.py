@@ -1,4 +1,5 @@
 """Shared parsing utilities for command parameters."""
+from typing import Optional
 
 
 def parse_amount(amount: str, slightly: int, medium: int, a_lot: int) -> int:
@@ -25,7 +26,7 @@ def parse_amount(amount: str, slightly: int, medium: int, a_lot: int) -> int:
     return medium
 
 
-def parse_direction_updown(direction: str) -> str | None:
+def parse_direction_updown(direction: str) -> Optional[str]:
     """Return 'up', 'down', or None if unrecognised."""
     d = direction.lower().strip()
     if d in ("up", "higher", "more", "increase", "louder", "brighter", "raise", "boost"):
@@ -36,7 +37,7 @@ def parse_direction_updown(direction: str) -> str | None:
     return None
 
 
-def parse_volume_word(level: str) -> int | None:
+def parse_volume_word(level: str) -> Optional[int]:
     """Map a volume word to 0-100. Returns None if not a known word."""
     return {
         "mute": 0, "silent": 0, "off": 0,

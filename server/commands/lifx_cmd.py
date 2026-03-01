@@ -1,6 +1,7 @@
 """LIFX smart bulb commands via lifxlan (local LAN UDP, no API key)."""
 import colorsys
 import logging
+import threading
 import time
 
 from .base import Command
@@ -20,6 +21,7 @@ except ImportError:
 _lan = None
 _cache: list = []
 _cache_time: float = 0.0
+_cache_lock = threading.Lock()
 
 NAMED_COLORS = {
     "red":    [0,      65535, 65535, 3500],
@@ -51,19 +53,20 @@ _COLOR_HUES = {k: v[0] for k, v in NAMED_COLORS.items() if v[1] > 0}  # exclude 
 def _get_lights(force: bool = False) -> list:
     global _lan, _cache, _cache_time
     now = time.monotonic()
-    if not force and _cache and (now - _cache_time) < LIFX_DISCOVERY_CACHE_TTL:
-        return _cache
-    try:
-        if _lan is None:
-            _lan = LifxLAN()
-        _cache = _lan.get_lights()
-        _cache_time = now
-        logger.debug(f"LIFX discovered {len(_cache)} light(s)")
-    except Exception as e:
-        logger.warning(f"LIFX discovery failed: {e}")
-        _cache = []
-        _cache_time = now
-    return _cache
+    with _cache_lock:
+        if not force and _cache and (now - _cache_time) < LIFX_DISCOVERY_CACHE_TTL:
+            return list(_cache)
+        try:
+            if _lan is None:
+                _lan = LifxLAN()
+            _cache = _lan.get_lights()
+            _cache_time = now
+            logger.debug(f"LIFX discovered {len(_cache)} light(s)")
+        except Exception as e:
+            logger.warning(f"LIFX discovery failed: {e}")
+            _cache = []
+            _cache_time = now
+        return list(_cache)
 
 
 def _resolve_target(label: str) -> list:

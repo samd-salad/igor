@@ -1,10 +1,11 @@
 """Timer command for setting named timers."""
 import re
+from typing import Optional
 from .base import Command
 from server.event_loop import get_event_loop
 
 
-def parse_duration(duration_str: str) -> float | None:
+def parse_duration(duration_str: str) -> Optional[float]:
     """Parse a duration string into seconds.
 
     Supports formats like:
@@ -18,7 +19,10 @@ def parse_duration(duration_str: str) -> float | None:
 
     # Try to parse as just a number (assume seconds)
     try:
-        return float(duration_str)
+        val = float(duration_str)
+        if not (0 < val < float('inf')):
+            return None
+        return val
     except ValueError:
         pass
 
@@ -70,6 +74,8 @@ class SetTimerCommand(Command):
         seconds = parse_duration(duration)
         if seconds is None or seconds <= 0:
             return f"Could not parse duration: '{duration}'"
+        if seconds > 86400:  # 24 hours max
+            return "Maximum timer duration is 24 hours"
 
         event_loop = get_event_loop()
 

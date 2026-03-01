@@ -1,9 +1,22 @@
 import json
 import logging
+import re
 from .base import Command
 from server.config import MEMORY_FILE
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize(text: str, max_len: int = 500) -> str:
+    """Strip control characters and XML-like tags; limit length.
+
+    Prevents prompt injection via persistent memory: stored values are
+    injected verbatim into the system prompt, so we must treat them as
+    untrusted even though they come through the LLM.
+    """
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)  # strip control chars (keep \t \n \r)
+    text = re.sub(r'<[^>]{0,100}>', '', text)   # strip XML/HTML-like tags
+    return text[:max_len].strip()
 
 # Use JSON file for structured memory
 MEMORY_JSON_FILE = MEMORY_FILE.with_suffix('.json')
@@ -15,7 +28,9 @@ def _load_memories() -> dict:
         try:
             return json.loads(MEMORY_JSON_FILE.read_text())
         except json.JSONDecodeError:
-            logger.warning("Memory file corrupted, starting fresh")
+            backup = MEMORY_JSON_FILE.with_suffix('.bak')
+            MEMORY_JSON_FILE.rename(backup)
+            logger.warning(f"Memory file corrupted — backed up to {backup.name}, starting fresh")
             return {}
     # Migrate from old text format if it exists
     if MEMORY_FILE.exists():
@@ -56,9 +71,10 @@ class SaveMemoryCommand(Command):
     def execute(self, category: str, key: str, value: str) -> str:
         memories = _load_memories()
 
-        # Normalize category
-        category = category.lower().strip()
-        key = key.lower().strip().replace(" ", "_")
+        # Normalize and sanitize — values are injected into the system prompt
+        category = _sanitize(category, max_len=50).lower().strip()
+        key = _sanitize(key, max_len=50).lower().strip().replace(" ", "_")
+        value = _sanitize(value, max_len=500)
 
         # Check if updating existing
         is_update = category in memories and key in memories.get(category, {})

@@ -41,6 +41,15 @@ class ProcessInteractionRequest(BaseModel):
     timestamp: float = Field(..., ge=0, description="Unix timestamp when interaction started")
     prefer_sonos_output: bool = Field(False, description="If true, client wants TTS routed to Sonos instead of returned as audio")
 
+    @field_validator('wake_word')
+    @classmethod
+    def validate_wake_word(cls, v: str) -> str:
+        """Allow only word characters, spaces, and hyphens — no control chars or injection sequences."""
+        import re
+        if not re.match(r'^[\w\s\-]+$', v):
+            raise ValueError("wake_word contains invalid characters")
+        return v
+
     @field_validator('audio_base64')
     @classmethod
     def validate_base64(cls, v: str) -> str:

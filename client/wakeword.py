@@ -3,6 +3,7 @@
 Place trained .onnx files in oww_models/ (produced by train_wakeword.py).
 Base models (melspectrogram + embedding) are downloaded automatically on first run.
 """
+from typing import Dict, List, Union
 import numpy as np
 from pathlib import Path
 
@@ -10,7 +11,7 @@ from openwakeword.model import Model
 
 
 class WakeWordDetector:
-    def __init__(self, model_paths: list[str], threshold: float = 0.5):
+    def __init__(self, model_paths: List[str], threshold: float = 0.5):
         """
         Args:
             model_paths: Paths to trained .onnx wakeword model files.
@@ -25,7 +26,7 @@ class WakeWordDetector:
         # Friendly names: model stem with underscores → spaces
         self._stems = {Path(p).stem: Path(p).stem.replace("_", " ") for p in model_paths}
 
-    def predict(self, audio: bytes | np.ndarray) -> dict[str, float]:
+    def predict(self, audio: Union[bytes, np.ndarray]) -> Dict[str, float]:
         """Feed one audio chunk (1280 samples / 80 ms); return {keyword: score} for each model."""
         if isinstance(audio, (bytes, bytearray)):
             audio = np.frombuffer(audio, dtype=np.int16)
