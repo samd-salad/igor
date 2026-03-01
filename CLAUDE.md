@@ -177,13 +177,18 @@ No other API keys needed. Weather uses Open-Meteo (free, no account). Smart home
 ## Todo
 
 - [ ] Web dashboard for monitoring
-- [ ] Multiple Pi support
+- [ ] multiple client support
+- [ ] add bedroom sonos as output for 2nd client?
 - [ ] "stop" wake word interrupt — detected in client, needs playback interruption logic
 - [ ] Spotify control (spotipy, needs free developer app registration)
 - [ ] Calendar, shopping list
 - [ ] Puramax2 litterbox control
 - [ ] commas and quotes not reading right in TTS
 - [ ] Multi-user voice interpretation
+- [ ] better network scanning/testing
+- [ ] reminder capability
+- [ ] todo list capability - integrated with phone and reminders?
+- [ ] test tv speaking meaning no word response
 
 ## Quick Reference
 
