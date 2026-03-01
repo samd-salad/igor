@@ -59,7 +59,7 @@ Samples are saved to `wakeword_samples/positive/`.
 
 ```bash
 # On PC:
-rsync -av pi@<PI_IP>:~/smart_assistant/wakeword_samples/ wakeword_samples/
+rsync -av user@<PI_IP>:~/smart_assistant/wakeword_samples/ wakeword_samples/
 ```
 
 ### Step 3 — Train the model (on PC)
