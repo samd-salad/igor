@@ -345,14 +345,15 @@ class Orchestrator:
         """Play a URI on the cached Sonos device with DIDL metadata."""
         device = self._get_sonos_device()
         if not device:
-            logger.warning("No Sonos device available")
+            logger.warning("Sonos: no device available for play_uri")
             return False
         from soco.data_structures import DidlItem, DidlResource, to_didl_string
         res = DidlResource(uri=uri, protocol_info="http-get:*:audio/wav:*")
         item = DidlItem(title=title, parent_id="S:", item_id="S:TTS", resources=[res])
         meta = to_didl_string(item)
+        logger.info(f"Sonos: play_uri → '{device.player_name}' title='{title}' uri={uri}")
         device.play_uri(uri, meta=meta)
-        logger.debug(f"play_uri dispatched to '{device.player_name}'")
+        logger.info(f"Sonos: play_uri dispatched OK")
         return True
 
     def play_sonos_beep(self, beep_type: str) -> bool:
