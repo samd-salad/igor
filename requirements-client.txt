@@ -3,6 +3,7 @@ pyaudio
 numpy>=1.24.0
 requests>=2.32.0
 flask>=3.0.0
+waitress>=3.0.0
 # openwakeword installed via setup_client.sh with --no-deps to skip tflite-runtime
 # (tflite has no Python 3.13 build; we use inference_framework="onnx" so it's unneeded)
 onnxruntime>=1.10.0

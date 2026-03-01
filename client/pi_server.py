@@ -154,4 +154,5 @@ def run_pi_server(audio_system, host: str = '0.0.0.0', port: int = 8080):
     start_time = time.time()
     app = create_pi_app(audio_system, start_time)
     logger.info(f"Starting Pi server on {host}:{port}")
-    app.run(host=host, port=port, debug=False, threaded=True)
+    from waitress import serve
+    serve(app, host=host, port=port, threads=4)
