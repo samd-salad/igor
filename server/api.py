@@ -182,17 +182,42 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/audio/tts_latest")
-    async def get_tts_audio():
-        """Serve the most recent TTS audio file (fetched by Sonos for playback).
+    async def get_tts_audio(req: Request):
+        """Serve the most recent TTS audio from memory (Sonos pull endpoint).
 
-        Uses FileResponse so Sonos range requests (Range: bytes=0-) are
-        handled correctly — in-memory Response silently rejects range seeks.
+        Handles Range requests so Sonos can seek/buffer correctly.
+        No audio is written to disk.
         """
-        from server.config import DATA_DIR
-        tts_path = DATA_DIR / "tts_latest.wav"
-        if not tts_path.exists():
+        audio = app.state.orchestrator.tts_audio
+        if not audio:
             raise HTTPException(status_code=404, detail="No TTS audio available")
-        return FileResponse(str(tts_path), media_type="audio/wav")
+
+        size = len(audio)
+        range_header = req.headers.get("range")
+        if range_header and range_header.startswith("bytes="):
+            parts = range_header[6:].split("-")
+            start = int(parts[0]) if parts[0] else 0
+            end = int(parts[1]) if len(parts) > 1 and parts[1] else size - 1
+            end = min(end, size - 1)
+            chunk = audio[start:end + 1]
+            from fastapi.responses import Response
+            return Response(
+                content=chunk,
+                status_code=206,
+                headers={
+                    "Content-Range": f"bytes {start}-{end}/{size}",
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": str(len(chunk)),
+                    "Content-Type": "audio/wav",
+                },
+            )
+
+        from fastapi.responses import Response
+        return Response(
+            content=audio,
+            media_type="audio/wav",
+            headers={"Accept-Ranges": "bytes", "Content-Length": str(size)},
+        )
 
     @app.get("/api/health", response_model=HealthCheckResponse)
     async def health_check():

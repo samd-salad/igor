@@ -53,18 +53,22 @@ def _to_wav(samples: list) -> bytes:
     return buf.getvalue()
 
 
+# Sonos Ray requires ~1s minimum audio to exit TRANSITIONING and reach PLAYING.
+# All beeps include 2s trailing silence so Sonos reliably starts playback.
+_PAD = _gap(2.0)
+
 # Mirror of client/audio.py beep definitions
 _DEFS: dict[str, callable] = {
-    'start': lambda: _to_wav(_sweep(500, 900, 0.12, 0.30)),
-    'end':   lambda: _to_wav(_sweep(700, 400, 0.12, 0.25)),
+    'start': lambda: _to_wav(_sweep(500, 900, 0.12, 0.30) + _PAD),
+    'end':   lambda: _to_wav(_sweep(700, 400, 0.12, 0.25) + _PAD),
     'done':  lambda: _to_wav(
-        _tone(1200, 0.06, 0.20) + _gap(0.04) + _tone(1200, 0.06, 0.20)
+        _tone(1200, 0.06, 0.20) + _gap(0.04) + _tone(1200, 0.06, 0.20) + _PAD
     ),
-    'error': lambda: _to_wav(_tone(200, 0.30, 0.25)),
+    'error': lambda: _to_wav(_tone(200, 0.30, 0.25) + _PAD),
     'alert': lambda: _to_wav(
         _tone(660,  0.10, 0.35) + _gap(0.08) +
         _tone(880,  0.10, 0.35) + _gap(0.08) +
-        _tone(1100, 0.15, 0.40)
+        _tone(1100, 0.15, 0.40) + _PAD
     ),
 }
 

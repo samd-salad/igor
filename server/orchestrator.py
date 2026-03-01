@@ -13,7 +13,7 @@ from server.config import (
     BENCHMARK_FILE, SPEAKER_EMBEDDINGS_FILE, SPEAKER_SIMILARITY_THRESHOLD,
     CLAUDE_INPUT_COST_PER_M, CLAUDE_OUTPUT_COST_PER_M,
     SONOS_TTS_OUTPUT, SONOS_DEFAULT_ZONE, SONOS_DISCOVERY_CACHE_TTL,
-    SERVER_EXTERNAL_HOST, SERVER_PORT, DATA_DIR,
+    SERVER_EXTERNAL_HOST, SERVER_PORT,
 )
 from server.commands.memory_cmd import load_persistent_memory
 import server.commands as commands
@@ -64,6 +64,8 @@ class Orchestrator:
         # Sonos device cache for TTS output routing
         self._sonos_device = None
         self._sonos_cache_time = 0.0
+        # In-memory TTS audio buffer — served at /audio/tts_latest (no disk write)
+        self.tts_audio: bytes = b""
 
         logger.info("Orchestrator initialized")
 
@@ -303,6 +305,39 @@ class Orchestrator:
         return out.getvalue()
 
     @staticmethod
+    def _pad_wav_for_sonos(audio_data: bytes, pad_seconds: float = 2.0) -> bytes:
+        """Append silence so the clip is long enough for Sonos to exit TRANSITIONING.
+
+        Sonos Ray requires ~1+ seconds of audio to buffer before reaching
+        PLAYING state. Short clips (< ~1s) silently fail: TRANSITIONING → STOPPED.
+        Trailing silence is inaudible but gives Sonos enough data to start.
+        """
+        import io
+        import wave
+
+        with io.BytesIO(audio_data) as buf:
+            with wave.open(buf, 'rb') as wf:
+                n_channels = wf.getnchannels()
+                sampwidth = wf.getsampwidth()
+                framerate = wf.getframerate()
+                frames = wf.readframes(wf.getnframes())
+                duration = wf.getnframes() / framerate
+
+        if duration >= pad_seconds:
+            return audio_data  # already long enough
+
+        silence_frames = int((pad_seconds - duration) * framerate) * n_channels
+        silence = b'\x00' * (silence_frames * sampwidth)
+
+        out = io.BytesIO()
+        with wave.open(out, 'wb') as wf:
+            wf.setnchannels(n_channels)
+            wf.setsampwidth(sampwidth)
+            wf.setframerate(framerate)
+            wf.writeframes(frames + silence)
+        return out.getvalue()
+
+    @staticmethod
     def _is_critical_response(response_text: str, commands_executed: list, await_followup: bool) -> bool:
         """Return True if TTS must play regardless of TV state.
 
@@ -367,6 +402,41 @@ class Orchestrator:
             logger.warning(f"Sonos beep '{beep_type}' failed: {e}")
             return False
 
+    @staticmethod
+    def _append_done_chime(wav_data: bytes) -> bytes:
+        """Append a short done-chime tone after TTS speech (before silence pad).
+
+        Embeds the 'done' signal into the TTS WAV so Sonos plays it at exactly
+        the right time — no client-side timing guesswork needed.
+        """
+        import io
+        import math
+        import struct
+        import wave
+
+        with io.BytesIO(wav_data) as buf:
+            with wave.open(buf, 'rb') as wf:
+                channels = wf.getnchannels()
+                sampwidth = wf.getsampwidth()
+                framerate = wf.getframerate()
+                frames = wf.readframes(wf.getnframes())
+
+        def _tone(freq, dur, vol=0.20):
+            n = int(framerate * dur)
+            return [int(vol * 32767 * math.sin(2 * math.pi * freq * i / framerate)) for i in range(n)]
+
+        gap = b'\x00' * int(framerate * 0.12) * sampwidth * channels
+        chime_samples = _tone(1200, 0.06) + [0] * int(framerate * 0.04) + _tone(1200, 0.06)
+        chime_bytes = struct.pack(f'<{len(chime_samples)}h', *chime_samples)
+
+        out = io.BytesIO()
+        with wave.open(out, 'wb') as wf:
+            wf.setnchannels(channels)
+            wf.setsampwidth(sampwidth)
+            wf.setframerate(framerate)
+            wf.writeframes(frames + gap + chime_bytes)
+        return out.getvalue()
+
     def _route_tts_to_sonos(self, audio_data: bytes) -> bool:
         """Resample TTS audio, save it, and trigger Sonos playback. Returns True if successful."""
         try:
@@ -376,10 +446,12 @@ class Orchestrator:
 
             # Sonos requires 44100 Hz; Piper outputs 22050 Hz
             wav_44k = self._resample_wav_44100(audio_data)
-            tts_path = DATA_DIR / "tts_latest.wav"
-            tmp_path = DATA_DIR / "tts_latest.tmp"
-            tmp_path.write_bytes(wav_44k)
-            tmp_path.replace(tts_path)
+            # Append done chime after speech, then pad to minimum duration
+            wav_44k = self._append_done_chime(wav_44k)
+            # Pad to minimum duration so Sonos exits TRANSITIONING → PLAYING
+            wav_44k = self._pad_wav_for_sonos(wav_44k, pad_seconds=2.0)
+            # Store in memory — /audio/tts_latest serves from here (no disk write)
+            self.tts_audio = wav_44k
 
             uri = f"http://{SERVER_EXTERNAL_HOST}:{SERVER_PORT}/audio/tts_latest"
             if not self._sonos_play_uri(uri, "Dr. Butts"):
