@@ -109,8 +109,7 @@ class LLM:
 
         # First LLM call
         try:
-            log_text = user_text[:50] + "..." if len(user_text) > 50 else user_text
-            logger.debug(f"Sending message to LLM: '{log_text}'")
+            logger.debug(f"Sending message to LLM: '{user_text}'")
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=300,
@@ -196,8 +195,7 @@ class LLM:
         if await_followup:
             logger.info("LLM is awaiting follow-up response")
 
-        log_reply = reply[:100] + "..." if len(reply) > 100 else reply
-        logger.info(f"LLM replied: '{log_reply}'")
+        logger.info(f"LLM replied: '{reply}'")
 
         # Store final assistant turn
         self.conversation_history.append({"role": "assistant", "content": reply})

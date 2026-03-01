@@ -246,7 +246,7 @@ class PiClient:
                     return
 
                 transcription = result.get('transcription', '')
-                logger.info(f"Transcription: '{transcription[:100]}...'" if len(transcription) > 100 else f"Transcription: '{transcription}'")
+                logger.info(f"Transcription: '{transcription}'")
 
                 if result.get('error'):
                     logger.error(f"Server reported error: {result['error']}")

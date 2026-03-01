@@ -127,7 +127,7 @@ class Orchestrator:
             transcription = transcription[:10_000]  # Truncate
             logger.warning("Transcription truncated to 10k chars")
 
-        logger.info(f"Transcribed: '{transcription[:100]}{'...' if len(transcription) > 100 else ''}'")  # Log first 100 chars only
+        logger.info(f"Transcribed: '{transcription}'")
         self._log_benchmark('stt', timings['stt'], transcription)
 
         # Step 1b: Speaker Identification (optional, runs in parallel with STT conceptually)
@@ -219,7 +219,16 @@ class Orchestrator:
         # Route TTS to Sonos if client requested it and server allows it
         tts_routed = False
         if prefer_sonos and SONOS_TTS_OUTPUT:
-            tts_routed = self._route_tts_to_sonos(audio_data)
+            if self._is_critical_response(response_text, commands_executed, await_followup):
+                tts_routed = self._route_tts_to_sonos(audio_data)
+            else:
+                from server.commands.adb_cmd import _get_tv_playback_state
+                tv_state = _get_tv_playback_state()
+                if tv_state == "playing":
+                    logger.info("TV is playing — suppressing non-critical Sonos TTS")
+                    tts_routed = True  # tell client to skip local playback too
+                else:
+                    tts_routed = self._route_tts_to_sonos(audio_data)
 
         # Convert audio to base64 for transmission (empty if Sonos handled it)
         from shared.utils import encode_audio_base64
@@ -292,6 +301,25 @@ class Orchestrator:
             wf.setframerate(44100)
             wf.writeframes(resampled.tobytes())
         return out.getvalue()
+
+    @staticmethod
+    def _is_critical_response(response_text: str, commands_executed: list, await_followup: bool) -> bool:
+        """Return True if TTS must play regardless of TV state.
+
+        Critical: timer actions, informational queries, follow-up prompts, questions.
+        Non-critical: pure action acknowledgments (lights, volume, launch, playback).
+        """
+        if await_followup:
+            return True
+        if '?' in response_text:
+            return True
+        CRITICAL_COMMANDS = {
+            'set_timer', 'cancel_timer', 'list_timers',
+            'get_weather', 'get_time', 'calculate',
+            'list_feedback', 'list_sonos', 'list_lights',
+            'get_volume', 'save_memory', 'forget_memory',
+        }
+        return any(cmd in CRITICAL_COMMANDS for cmd in commands_executed)
 
     def _route_tts_to_sonos(self, audio_data: bytes) -> bool:
         """Resample TTS audio, save it, and trigger Sonos playback. Returns True if successful."""
@@ -443,33 +471,32 @@ class Orchestrator:
             return "       ~"
 
         def fmt_time(t: float) -> str:
-            return f"{t:6.2f}s"
+            return f"{t:8.2f}s"
 
         def fmt_pw(pw) -> str:
             return f"{pw:.3f}s" if pw is not None else "   —  "
 
-        # ┌───────┬─────────┬────────┬──────────┬────────┐
-        # │ Stage │  Time   │vs. Avg │ Per Word │vs. Avg │
-        W = "┌───────┬─────────┬────────┬──────────┬────────┐"
-        H = "│ Stage │  Time   │vs. Avg │ Per Word │vs. Avg │"
-        S = "├───────┼─────────┼────────┼──────────┼────────┤"
-        B = "└───────┴─────────┴────────┴──────────┴────────┘"
+        # ┌───────┬──────────┬────────┬──────────┐
+        # │ Stage │   Time   │vs. Avg │ Per Word │
+        W = "┌───────┬──────────┬────────┬──────────┐"
+        H = "│ Stage │   Time   │vs. Avg │ Per Word │"
+        S = "├───────┼──────────┼────────┼──────────┤"
+        B = "└───────┴──────────┴────────┴──────────┘"
 
-        def data_row(stage, t, avg_t, pw, avg_pw) -> str:
+        def data_row(stage, t, avg_t, pw) -> str:
             return (
                 f"│ {stage:<5s} │{fmt_time(t)}│{cmp(t, avg_t)}│{fmt_pw(pw):^10s}│"
-                f"{cmp(pw, avg_pw) if pw is not None else '        '}│"
             )
 
-        cost_row = f"│ Cost  │ ${llm_cost:.5f} │        │          │        │"
+        cost_row = f"│ Cost  │ ${llm_cost:.5f}│        │          │"
 
         logger.info(f"Interaction complete in {total:.2f}s | cost ${llm_cost:.5f}")
         logger.info(W)
         logger.info(H)
         logger.info(S)
-        logger.info(data_row("STT", stt_time, stt_stats['avg_duration'], stt_per_word, stt_stats['avg_per_word']))
-        logger.info(data_row("LLM", llm_time, llm_stats['avg_duration'], None, None))
-        logger.info(data_row("TTS", tts_time, tts_stats['avg_duration'], tts_per_word, tts_stats['avg_per_word']))
+        logger.info(data_row("STT", stt_time, stt_stats['avg_duration'], stt_per_word))
+        logger.info(data_row("LLM", llm_time, llm_stats['avg_duration'], None))
+        logger.info(data_row("TTS", tts_time, tts_stats['avg_duration'], tts_per_word))
         logger.info(cost_row)
         logger.info(B)
 
