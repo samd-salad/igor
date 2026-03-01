@@ -479,7 +479,7 @@ class Orchestrator:
             return "       ~"
 
         def fmt_time(t: float) -> str:
-            return f"{t:8.2f}s"
+            return f"{t:9.2f}s"
 
         def fmt_pw(pw) -> str:
             return f"{pw:.3f}s" if pw is not None else "   —  "
@@ -496,7 +496,7 @@ class Orchestrator:
                 f"│ {stage:<5s} │{fmt_time(t)}│{cmp(t, avg_t)}│{fmt_pw(pw):^10s}│"
             )
 
-        cost_row = f"│ Cost  │ ${llm_cost:.5f}│        │          │"
+        cost_row = f"│ Cost  │ ${llm_cost:.5f} │        │          │"
 
         logger.info(f"Interaction complete in {total:.2f}s | cost ${llm_cost:.5f}")
         logger.info(W)
