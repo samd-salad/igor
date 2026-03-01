@@ -349,7 +349,8 @@ class Orchestrator:
             return False
         from soco.data_structures import DidlItem, DidlResource, to_didl_string
         res = DidlResource(uri=uri, protocol_info="http-get:*:audio/wav:*")
-        item = DidlItem(title=title, parent_id="S:", item_id=f"S:{title}", resources=[res])
+        item = DidlItem(title=title, parent_id="S:", item_id="S:TTS")
+        item.resources.append(res)  # resources is not a constructor kwarg — must append
         device.play_uri(uri, meta=to_didl_string(item))
         return True
 
