@@ -217,6 +217,11 @@ class Orchestrator:
 
         logger.info(f"TTS synthesis complete")
         word_count = len(response_text.split())
+        # Load historical stats BEFORE logging current run so comparison is
+        # "current vs past" (not "current vs including-current"), and avoids
+        # a Windows file-cache race where the freshly-appended row isn't
+        # visible to an immediate re-open.
+        _tts_stats_pre = self._load_benchmark_stats('tts')
         self._log_benchmark('tts', timings['tts'], word_count=word_count)
 
         # Route TTS to Sonos if client requested it and server allows it
@@ -238,8 +243,8 @@ class Orchestrator:
 
         # Calculate total time (exclude non-time fields like llm_cost)
         timings['total'] = timings.get('stt', 0) + timings.get('llm', 0) + timings.get('tts', 0)
-        # Log with detailed statistics
-        self._log_interaction_stats(timings, transcription, response_text)
+        # Log with detailed statistics (pass pre-logged TTS stats to avoid race)
+        self._log_interaction_stats(timings, transcription, response_text, _tts_stats_pre)
 
         return {
             'transcription': transcription,
@@ -548,7 +553,7 @@ class Orchestrator:
             logger.debug(f"Failed to load stats for {stage}: {e}")
             return {'avg_duration': 0, 'avg_per_word': 0}
 
-    def _log_interaction_stats(self, timings: Dict[str, float], transcription: str, response_text: str):
+    def _log_interaction_stats(self, timings: Dict[str, float], transcription: str, response_text: str, tts_stats: Dict = None):
         """Log interaction summary with performance comparison to historical averages."""
         total = timings['total']
         stt_time = timings['stt']
@@ -563,7 +568,8 @@ class Orchestrator:
 
         stt_stats = self._load_benchmark_stats('stt')
         llm_stats = self._load_benchmark_stats('llm')
-        tts_stats = self._load_benchmark_stats('tts')
+        if tts_stats is None:
+            tts_stats = self._load_benchmark_stats('tts')
 
         def cmp(current, avg) -> str:
             """Return fixed-width 8-char comparison string."""
@@ -590,20 +596,18 @@ class Orchestrator:
         B = "└───────┴──────────┴────────┴──────────┘"
 
         def data_row(stage, t, avg_t, pw) -> str:
-            return (
-                f"│ {stage:<5s} │{fmt_time(t)}│{cmp(t, avg_t)}│{fmt_pw(pw):^10s}│"
-            )
+            return f"│ {stage:<5s} │{fmt_time(t)}│{cmp(t, avg_t)}│{fmt_pw(pw):^10s}│"
 
-        cost_row = f"│ Cost  │ ${llm_cost:.5f} │        │          │"
+        llm_cost_str = f"${llm_cost:.3f}"
+        llm_row = f"│ {'LLM':<5s} │{fmt_time(llm_time)}│{cmp(llm_time, llm_stats['avg_duration'])}│{llm_cost_str:^10s}│"
 
-        logger.info(f"Interaction complete in {total:.2f}s | cost ${llm_cost:.5f}")
+        logger.info(f"Interaction complete in {total:.2f}s | cost ${llm_cost:.3f}")
         logger.info(W)
         logger.info(H)
         logger.info(S)
         logger.info(data_row("STT", stt_time, stt_stats['avg_duration'], stt_per_word))
-        logger.info(data_row("LLM", llm_time, llm_stats['avg_duration'], None))
+        logger.info(llm_row)
         logger.info(data_row("TTS", tts_time, tts_stats['avg_duration'], tts_per_word))
-        logger.info(cost_row)
         logger.info(B)
 
     def get_conversation_history(self) -> List[Dict]:
