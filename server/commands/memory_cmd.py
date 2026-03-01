@@ -35,12 +35,14 @@ def _load_memories() -> dict:
             MEMORY_JSON_FILE.rename(backup)
             logger.warning(f"Memory file corrupted — backed up to {backup.name}, starting fresh")
             return {}
-    # Migrate from old text format if it exists
+    # Migrate from old text format if it exists (one-time; save immediately so this never repeats)
     if MEMORY_FILE.exists():
         old_content = MEMORY_FILE.read_text().strip()
         if old_content:
             logger.info("Migrating old memory format to JSON")
-            return {"migrated": {"old_memories": old_content}}
+            memories = {"migrated": {"old_memories": old_content}}
+            _save_memories(memories)
+            return memories
     return {}
 
 
