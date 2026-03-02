@@ -57,9 +57,9 @@ Samples are saved to `wakeword_samples/positive/`.
 
 ### Step 2 — Transfer samples to PC
 
-```bash
-# On PC:
-rsync -av user@<PI_IP>:~/smart_assistant/wakeword_samples/ wakeword_samples/
+```powershell
+# On PC (PowerShell):
+scp -r user@<PI_IP>:~/smart_assistant/wakeword_samples/ wakeword_samples/
 ```
 
 ### Step 3 — Train the model (on PC)
