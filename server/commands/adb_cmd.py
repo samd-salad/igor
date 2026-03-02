@@ -79,6 +79,7 @@ def _adb_shell(command: str, auth_timeout: float = 1.0, cmd_timeout: float = 10.
     """Run a shell command on the TV via ADB. Returns (output, error_str)."""
     if not _ADB_AVAILABLE:
         return "", "adb-shell not installed. Run: pip install adb-shell"
+    device = None
     try:
         signer = _get_signer()
         device = AdbDeviceTcp(GOOGLE_TV_HOST, ADB_PORT)
@@ -89,13 +90,16 @@ def _adb_shell(command: str, auth_timeout: float = 1.0, cmd_timeout: float = 10.
             read_timeout_s=cmd_timeout,
             transport_timeout_s=auth_timeout,
         )
-        try:
-            result = device.shell(command, read_timeout_s=cmd_timeout)
-            return result or "", None
-        finally:
-            device.close()
+        result = device.shell(command, read_timeout_s=cmd_timeout)
+        return result or "", None
     except Exception as e:
         return "", f"ADB error: {e}"
+    finally:
+        if device is not None:
+            try:
+                device.close()
+            except Exception:
+                pass
 
 
 def _tv_adb_available() -> str | None:

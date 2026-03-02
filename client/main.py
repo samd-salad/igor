@@ -127,7 +127,6 @@ class PiClient:
 
     def _sonos_beep(self, beep_type: str):
         """Fire-and-forget beep via server Sonos endpoint (non-blocking)."""
-        import threading
         def _send():
             try:
                 requests.post(

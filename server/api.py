@@ -95,6 +95,8 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
 
     @app.exception_handler(Exception)
     async def generic_exception_handler(request: Request, exc: Exception):
+        if isinstance(exc, HTTPException):
+            raise exc
         logger.error(f"Unhandled exception: {exc}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": "Internal server error"})
 
@@ -205,8 +207,13 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
         range_header = req.headers.get("range")
         if range_header and range_header.startswith("bytes="):
             parts = range_header[6:].split("-")
-            start = int(parts[0]) if parts[0] else 0
-            end = int(parts[1]) if len(parts) > 1 and parts[1] else size - 1
+            try:
+                start = int(parts[0]) if parts[0] else 0
+                end = int(parts[1]) if len(parts) > 1 and parts[1] else size - 1
+                if start < 0 or end < 0 or start > end:
+                    raise ValueError("Invalid range bounds")
+            except (ValueError, IndexError):
+                start, end = 0, size - 1
             end = min(end, size - 1)
             chunk = audio[start:end + 1]
             from fastapi.responses import Response

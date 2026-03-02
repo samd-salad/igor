@@ -72,6 +72,8 @@ class WeatherCommand(Command):
         location = location.strip() or DEFAULT_LOCATION
         if not location:
             return "No location specified and DEFAULT_LOCATION not set in config"
+        if len(location) > 200:
+            return "Location name too long"
 
         try:
             geo = _geocode(location)

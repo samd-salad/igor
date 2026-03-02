@@ -7,14 +7,16 @@ SERVER_HOST = "0.0.0.0"  # Listen on all interfaces
 SERVER_PORT = 8000
 
 # Pi client settings (for callbacks)
-PI_HOST = "192.168.0.3"
-PI_PORT = 8080
+PI_HOST = os.getenv("PI_HOST", "192.168.0.3")
+PI_PORT = int(os.getenv("PI_PORT", "8080"))
 
 # IP allowlist for sensitive server endpoints — add more Pi IPs here when scaling
 ALLOWED_CLIENT_IPS: set = {PI_HOST}
 
 # LLM configuration - Claude API
-CLAUDE_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+CLAUDE_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+if not CLAUDE_API_KEY:
+    raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set")
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 CLAUDE_INPUT_COST_PER_M  = 0.80   # USD per million input tokens
 CLAUDE_OUTPUT_COST_PER_M = 4.00   # USD per million output tokens
@@ -36,6 +38,7 @@ MEMORY_FILE = DATA_DIR / "memory.txt"  # Legacy path; memory_cmd.py uses memory.
 KNOWN_DEVICES_FILE = DATA_DIR / "known_devices.json"
 BENCHMARK_FILE = DATA_DIR / "benchmark.csv"
 CONVERSATION_STATE_FILE = DATA_DIR / "conversation_state.json"
+ROUTINES_FILE = DATA_DIR / "routines.json"
 
 # Speaker identification
 SPEAKER_EMBEDDINGS_FILE = DATA_DIR / "speaker_embeddings.json"
@@ -45,7 +48,7 @@ SPEAKER_SIMILARITY_THRESHOLD = 0.75  # 0-1, higher = stricter matching
 DATA_DIR.mkdir(exist_ok=True)
 
 # Weather
-DEFAULT_LOCATION = "Arlington, VA"  # Default city for get_weather when no location specified
+DEFAULT_LOCATION = os.getenv("DEFAULT_LOCATION", "Arlington, VA")  # Default city for get_weather
 
 # Request timeouts
 REQUEST_TIMEOUT = 5.0  # Timeout for HTTP requests to Pi
@@ -54,7 +57,7 @@ REQUEST_TIMEOUT = 5.0  # Timeout for HTTP requests to Pi
 SONOS_DISCOVERY_CACHE_TTL = 300  # seconds before forced re-discovery (5 min)
 SONOS_DEFAULT_ZONE = "Living Room"  # Default zone for TV/soundbar/music requests
 SONOS_TTS_OUTPUT = True   # Allow clients to route TTS through Sonos (per-client opt-in via prefer_sonos_output)
-SERVER_EXTERNAL_HOST = "192.168.0.4"  # PC's LAN IP (Sonos fetches TTS audio from here)
+SERVER_EXTERNAL_HOST = os.getenv("SERVER_EXTERNAL_HOST", "192.168.0.4")  # PC's LAN IP (Sonos fetches TTS audio)
 
 # LIFX smart bulb settings (local LAN UDP, no API key)
 LIFX_DISCOVERY_CACHE_TTL = 300  # seconds before forced re-discovery (5 min)
@@ -95,7 +98,7 @@ LIGHT_SCENES: dict = {
 }
 
 # Google TV remote settings
-GOOGLE_TV_HOST = "192.168.0.20"
+GOOGLE_TV_HOST = os.getenv("GOOGLE_TV_HOST", "192.168.0.20")
 GOOGLE_TV_CERT_FILE = str(DATA_DIR / "google_tv_cert.pem")
 GOOGLE_TV_KEY_FILE  = str(DATA_DIR / "google_tv_key.pem")
 GOOGLE_TV_CLIENT_NAME = "DrButts"

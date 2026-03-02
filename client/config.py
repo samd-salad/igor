@@ -3,8 +3,8 @@ import os
 from pathlib import Path
 
 # Server (PC) settings
-SERVER_HOST = "192.168.0.4"
-SERVER_PORT = 8000
+SERVER_HOST = os.getenv("SERVER_HOST", "192.168.0.4")
+SERVER_PORT = int(os.getenv("SERVER_PORT", "8000"))
 SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 
 # Pi server settings (for callbacks from PC)
