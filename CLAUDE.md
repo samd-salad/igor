@@ -19,7 +19,7 @@ Dr. Butts is a local voice assistant. A **Raspberry Pi** handles audio I/O; a **
 
 - **STT**: Faster Whisper (`small` model, CPU)
 - **LLM**: Claude API (`claude-haiku-4-5-20251001`)
-- **TTS**: Piper (`en_US-arctic-medium`)
+- **TTS**: Kokoro ONNX (`am_onyx` voice, 24 kHz) — model files in `kokoro/`
 - **Wake Word**: OpenWakeWord custom binary classifier (trained on recorded samples, no account)
 - **Server**: FastAPI · **Client callbacks**: Flask
 
@@ -84,7 +84,7 @@ smart_assistant/
 │   └── positive/      # WAV files recorded via record_samples.py
 ├── onnx_models/wakeword_creation/train_wakeword.py  # PC training script
 ├── record_samples.py  # Pi recording script (run on Pi before training)
-├── voices/            # Piper .onnx models (PC only)
+├── kokoro/            # Kokoro ONNX model files (PC only): kokoro-v1.0.onnx, voices-v1.0.bin
 ├── data/              # Persistent data: memory.json, benchmark.csv
 ├── setup_client.sh    # Pi setup script (deps + OWW base model download)
 ├── setup_server.sh    # PC setup script (deps + voice download)
@@ -178,7 +178,7 @@ No other API keys needed. Weather uses Open-Meteo (free, no account). Smart home
 
 - [ ] Web dashboard for monitoring
 - [ ] multiple client support
-- [ ] add bedroom sonos as output for 2nd client?
+- [ ] add bedroom sonos as output for 2nd client
 - [ ] "stop" wake word interrupt — detected in client, needs playback interruption logic
 - [ ] Spotify control (spotipy, needs free developer app registration)
 - [ ] Calendar, shopping list
@@ -187,7 +187,7 @@ No other API keys needed. Weather uses Open-Meteo (free, no account). Smart home
 - [ ] Multi-user voice interpretation
 - [ ] better network scanning/testing
 - [ ] reminder capability
-- [ ] todo list capability - integrated with phone and reminders?
+- [ ] todo list capability - integrated with phone and reminder capability?
 - [ ] test tv speaking meaning no word response
 
 ## Quick Reference
