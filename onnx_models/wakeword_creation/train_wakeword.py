@@ -39,9 +39,9 @@ MODEL_NAME  = "doctor_butts"   # becomes the key in model.predict() results
 
 SAMPLE_RATE  = 16000
 CLIP_SAMPLES = SAMPLE_RATE * 3  # 3-second clips (pad/trim all audio to this)
-N_EPOCHS     = 150
+N_EPOCHS     = 300
 BATCH_SIZE   = 64
-LAYER_DIM    = 32
+LAYER_DIM    = 64   # increased from 32 — more capacity to discriminate real-world audio
 
 
 # ---------------------------------------------------------------------------
@@ -250,17 +250,24 @@ def main():
         nn.Flatten(),                               # → (batch, 1536)
         nn.Linear(16 * 96, LAYER_DIM),
         nn.LayerNorm(LAYER_DIM), nn.ReLU(),
+        nn.Dropout(0.2),
         nn.Linear(LAYER_DIM, LAYER_DIM),
         nn.LayerNorm(LAYER_DIM), nn.ReLU(),
+        nn.Dropout(0.2),
         nn.Linear(LAYER_DIM, 1),
-        nn.Sigmoid()
+        # No Sigmoid here — BCEWithLogitsLoss takes raw logits
     )
+    # Inference model wraps with Sigmoid for ONNX export (expects 0-1 output)
+    inference_model = nn.Sequential(model, nn.Sigmoid())
 
     # ------------------------------------------------------------------
     # Train
     # ------------------------------------------------------------------
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    loss_fn   = nn.BCELoss()
+    # Compensate for class imbalance: weight positive examples proportionally
+    # so the model doesn't just learn to always predict negative.
+    pos_weight = torch.tensor([len(neg_wins) / max(len(pos_wins), 1)])
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     print(f"\nTraining ({N_EPOCHS} epochs, {len(X)} samples)...")
     for epoch in range(N_EPOCHS):
@@ -282,9 +289,9 @@ def main():
     # ------------------------------------------------------------------
     # Evaluate on training set
     # ------------------------------------------------------------------
-    model.eval()
+    inference_model.eval()
     with torch.no_grad():
-        all_preds = model(X_t).squeeze().numpy()
+        all_preds = inference_model(X_t).squeeze().numpy()
 
     pos_scores = all_preds[y == 1.0]
     neg_scores = all_preds[y == 0.0]
@@ -305,7 +312,7 @@ def main():
     dummy_input = torch.rand(1, 16, 96)
 
     torch.onnx.export(
-        model,
+        inference_model,
         dummy_input,
         str(output_path),
         opset_version=18,
