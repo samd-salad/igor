@@ -10,7 +10,18 @@ from prompt import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
-_LLM_CALL_TIMEOUT = 45.0  # hard wall-clock timeout per API call (seconds)
+_LLM_CALL_TIMEOUT = 15.0  # hard wall-clock timeout per API call (seconds)
+
+_ERROR_FRAGMENTS = (
+    'not found', 'not available', 'not connected', 'not installed',
+    'not configured', 'unavailable', 'failed', 'adb error', 'error:',
+    'pi not connected', 'no sonos', 'timed out',
+)
+
+def _is_tool_error(result: str) -> bool:
+    """Return True if a tool result string indicates a failure."""
+    r = result.lower()
+    return any(frag in r for frag in _ERROR_FRAGMENTS)
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="llm_api")
 
 # Respond tool — LLM must always call this to deliver its final message.
@@ -142,7 +153,7 @@ class LLM:
                 self.client.messages.create,
                 model=self.model,
                 max_tokens=1024,
-                timeout=30.0,
+                timeout=12.0,
                 system=system_prompt,
                 tools=tools,
                 tool_choice={"type": "any"},
@@ -229,14 +240,18 @@ class LLM:
                 self.conversation_history.append({"role": "assistant", "content": serialized})
 
                 tool_results = []
+                any_tool_error = False
                 for call in command_calls:
                     logger.info(f"Executing tool: {call.name}({call.input})")
                     try:
                         result = tool_executor(call.name, **call.input)
                         logger.info(f"Tool '{call.name}' returned: {result}")
+                        if _is_tool_error(result):
+                            any_tool_error = True
                     except Exception as e:
                         logger.error(f"Tool '{call.name}' failed: {e}")
                         result = f"Error: {e}"
+                        any_tool_error = True
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": call.id,
@@ -244,6 +259,12 @@ class LLM:
                     })
 
                 self.conversation_history.append({"role": "user", "content": tool_results})
+
+                # Short-circuit: if tools failed and there's no respond in this turn,
+                # skip the next LLM API call and surface the error immediately.
+                if any_tool_error and not respond_call:
+                    logger.warning("Tool error detected — skipping LLM response, surfacing error immediately")
+                    return None
 
                 if respond_call:
                     # Commands + respond in same turn — take the respond result

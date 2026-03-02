@@ -10,6 +10,22 @@ from typing import Optional, Tuple
 from .base import Command
 from server.config import DEFAULT_LOCATION
 
+_US_STATES = {
+    'al': 'alabama', 'ak': 'alaska', 'az': 'arizona', 'ar': 'arkansas',
+    'ca': 'california', 'co': 'colorado', 'ct': 'connecticut', 'de': 'delaware',
+    'fl': 'florida', 'ga': 'georgia', 'hi': 'hawaii', 'id': 'idaho',
+    'il': 'illinois', 'in': 'indiana', 'ia': 'iowa', 'ks': 'kansas',
+    'ky': 'kentucky', 'la': 'louisiana', 'me': 'maine', 'md': 'maryland',
+    'ma': 'massachusetts', 'mi': 'michigan', 'mn': 'minnesota', 'ms': 'mississippi',
+    'mo': 'missouri', 'mt': 'montana', 'ne': 'nebraska', 'nv': 'nevada',
+    'nh': 'new hampshire', 'nj': 'new jersey', 'nm': 'new mexico', 'ny': 'new york',
+    'nc': 'north carolina', 'nd': 'north dakota', 'oh': 'ohio', 'ok': 'oklahoma',
+    'or': 'oregon', 'pa': 'pennsylvania', 'ri': 'rhode island', 'sc': 'south carolina',
+    'sd': 'south dakota', 'tn': 'tennessee', 'tx': 'texas', 'ut': 'utah',
+    'vt': 'vermont', 'va': 'virginia', 'wa': 'washington', 'wv': 'west virginia',
+    'wi': 'wisconsin', 'wy': 'wyoming', 'dc': 'district of columbia',
+}
+
 # WMO weather interpretation codes → human-readable description
 _WMO = {
     0:  "clear sky",
@@ -27,18 +43,39 @@ _WMO = {
 
 
 def _geocode(location: str) -> Optional[Tuple[float, float, str]]:
-    """Return (lat, lon, display_name) for a location string, or None if not found."""
+    """Return (lat, lon, display_name) for a location string, or None if not found.
+
+    Handles "City, State" format by searching on city name with count=5 and
+    post-filtering by state hint, since the API rejects comma-separated input.
+    """
+    parts = [p.strip() for p in location.split(',', 1)]
+    city = parts[0]
+    state_hint = parts[1].lower() if len(parts) > 1 else ""
+
     resp = requests.get(
         "https://geocoding-api.open-meteo.com/v1/search",
-        params={"name": location, "count": 1, "language": "en", "format": "json"},
+        params={"name": city, "count": 5, "language": "en", "format": "json"},
         timeout=10,
     )
     resp.raise_for_status()
     results = resp.json().get("results")
     if not results:
         return None
+
+    # If a state/region hint was given, prefer matching results.
+    # Expand 2-letter US abbreviations (e.g. "va" → "virginia") before matching.
+    if state_hint:
+        expanded = _US_STATES.get(state_hint, state_hint)
+        filtered = [
+            r for r in results
+            if expanded in r.get("admin1", "").lower()
+            or expanded in r.get("admin2", "").lower()
+        ]
+        if filtered:
+            results = filtered
+
     r = results[0]
-    name = r.get("name", location)
+    name = r.get("name", city)
     admin = r.get("admin1", "")
     country = r.get("country_code", "")
     display = f"{name}, {admin}" if admin else f"{name}, {country}"

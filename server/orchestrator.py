@@ -157,9 +157,8 @@ class Orchestrator:
 
         # Validate transcription length
         if len(transcription) > 10_000:  # Max 10k characters
-            logger.error(f"Transcription too long: {len(transcription)} chars")
-            transcription = transcription[:10_000]  # Truncate
-            logger.warning("Transcription truncated to 10k chars")
+            logger.warning(f"Transcription too long ({len(transcription)} chars), truncating")
+            transcription = transcription[:10_000] + " [truncated]"
 
         logger.info(f"Transcribed: '{transcription[:100]}{'...' if len(transcription) > 100 else ''}'")
         self._log_benchmark('stt', timings['stt'], transcription)
@@ -193,7 +192,7 @@ class Orchestrator:
         def tool_executor(name: str, **kwargs) -> str:
             """Execute command and track it."""
             commands_executed.append(name)
-            return self._execute_command(name, **kwargs)
+            return self._execute_command(name, prefer_sonos=prefer_sonos, **kwargs)
 
         llm_result = self.llm.chat(
             user_text=transcription,
@@ -269,14 +268,14 @@ class Orchestrator:
         tts_routed = False
         if prefer_sonos and SONOS_TTS_OUTPUT:
             if self._is_critical_response(response_text, commands_executed, await_followup):
-                tts_routed = self._route_tts_to_sonos(audio_data)
+                tts_routed = self._route_tts_to_sonos(audio_data, await_followup=await_followup)
             else:
                 # Use cached TV state from background poller (avoids blocking ADB call in hot path)
                 if self._last_tv_state == "playing":
                     logger.info("TV is playing — suppressing non-critical Sonos TTS")
                     tts_routed = True  # tell client to skip local playback too
                 else:
-                    tts_routed = self._route_tts_to_sonos(audio_data)
+                    tts_routed = self._route_tts_to_sonos(audio_data, await_followup=await_followup)
 
         # Convert audio to base64 for transmission (empty if Sonos handled it)
         from shared.utils import encode_audio_base64
@@ -448,7 +447,17 @@ class Orchestrator:
         item = DidlItem(title=title, parent_id="S:", item_id="S:TTS", resources=[res])
         meta = to_didl_string(item)
         logger.info(f"Sonos: play_uri → '{device.player_name}' title='{title}' uri={uri}")
-        device.play_uri(uri, meta=meta)
+        try:
+            device.play_uri(uri, meta=meta)
+        except Exception as e:
+            logger.warning(f"Sonos: play_uri failed ({e}), forcing rediscovery and retrying")
+            with self._sonos_lock:
+                self._sonos_device = None
+                self._sonos_cache_time = 0.0
+            device = self._get_sonos_device()
+            if not device:
+                return False
+            device.play_uri(uri, meta=meta)
         logger.info(f"Sonos: play_uri dispatched OK")
         return True
 
@@ -548,17 +557,17 @@ class Orchestrator:
             wf.writeframes(frames + gap + chime_bytes)
         return out.getvalue()
 
-    def _route_tts_to_sonos(self, audio_data: bytes) -> bool:
+    def _route_tts_to_sonos(self, audio_data: bytes, await_followup: bool = False) -> bool:
         """Resample TTS audio, save it, and trigger Sonos playback. Returns True if successful."""
         try:
             if not self._get_sonos_device():
                 logger.warning("No Sonos devices found for TTS output")
                 return False
 
-            # Sonos requires 44100 Hz; Piper outputs 22050 Hz
             wav_44k = self._resample_wav_44100(audio_data)
-            # Append done chime after speech, then pad to minimum duration
-            wav_44k = self._append_done_chime(wav_44k)
+            # Chime only when expecting a follow-up — signals "your turn to speak"
+            if await_followup:
+                wav_44k = self._append_done_chime(wav_44k)
             # Pad to minimum duration so Sonos exits TRANSITIONING → PLAYING
             wav_44k = self._pad_wav_for_sonos(wav_44k, pad_seconds=2.0)
             # Store in memory — /audio/tts_latest serves from here (no disk write)
@@ -610,12 +619,21 @@ class Orchestrator:
         except Exception as e:
             logger.debug(f"Session summarizer failed (non-critical): {e}")
 
-    def _execute_command(self, name: str, **kwargs) -> str:
+    _SONOS_VOLUME_REDIRECT = {
+        'set_volume': 'set_sonos_volume',
+        'adjust_volume': 'adjust_sonos_volume',
+    }
+
+    def _execute_command(self, name: str, prefer_sonos: bool = False, **kwargs) -> str:
         """
         Execute a command with Pi callback support.
 
         Special handling for hardware commands that need to run on Pi.
         """
+        # When Sonos is the active output, redirect Pi volume commands to Sonos
+        if prefer_sonos and name in self._SONOS_VOLUME_REDIRECT:
+            name = self._SONOS_VOLUME_REDIRECT[name]
+
         # Hardware commands get routed to Pi via RPC
         if name in ('set_volume', 'get_volume'):
             logger.info(f"Routing hardware command '{name}' to Pi")

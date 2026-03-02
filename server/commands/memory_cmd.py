@@ -17,8 +17,9 @@ def _sanitize(text: str, max_len: int = 500) -> str:
     injected verbatim into the system prompt, so we must treat them as
     untrusted even though they come through the LLM.
     """
-    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)  # strip control chars (keep \t \n \r)
-    text = re.sub(r'<[^>]*>', '', text)   # strip XML/HTML-like tags (no length limit — tags can have long attributes)
+    text = re.sub(r'[\x00-\x1f\x7f]', ' ', text)  # strip/replace all control chars including \n \r \t
+    text = re.sub(r'<[^>]*>', '', text)   # strip XML/HTML-like tags
+    text = re.sub(r' +', ' ', text)       # collapse multiple spaces left by replacements
     return text[:max_len].strip()
 
 # Use JSON file for structured memory

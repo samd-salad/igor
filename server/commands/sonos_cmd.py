@@ -190,14 +190,30 @@ class SonosMuteCommand(Command):
         if state_lower not in ("on", "off", "toggle"):
             return f"Unknown mute state '{state}'. Use: on, off, or toggle."
 
-        def action(device):
-            if state_lower == "toggle":
-                device.mute = not device.mute
-            else:
-                device.mute = (state_lower == "on")
+        final_state: list = []
 
-        label = {"on": "Muted", "off": "Unmuted", "toggle": "Toggled mute on"}[state_lower]
-        return _apply_to_targets(zone, action, f"{label} Sonos")
+        def action(device):
+            new_mute = (not device.mute) if state_lower == "toggle" else (state_lower == "on")
+            device.mute = new_mute
+            final_state.append(device.mute)
+
+        targets = _resolve_target(zone)
+        if not targets:
+            effective = zone.strip() if zone.strip() else SONOS_DEFAULT_ZONE
+            return f"No Sonos devices found for zone '{effective}'"
+
+        errors = []
+        for device in targets:
+            try:
+                action(device)
+            except Exception as e:
+                errors.append(str(e))
+
+        if errors:
+            return f"Mute command failed: {errors[0]}"
+
+        actual = final_state[0] if final_state else (state_lower == "on")
+        return "Muted" if actual else "Unmuted"
 
 
 class ListSonosCommand(Command):
