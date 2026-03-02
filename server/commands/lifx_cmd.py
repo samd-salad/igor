@@ -69,6 +69,13 @@ def _get_lights(force: bool = False) -> list:
         return list(_cache)
 
 
+def _safe_label(light) -> str:
+    try:
+        return light.get_label().lower()
+    except Exception:
+        return ""
+
+
 def _resolve_target(label: str) -> list:
     lights = _get_lights()
     if not lights:
@@ -76,10 +83,27 @@ def _resolve_target(label: str) -> list:
     if not label:
         return lights
     label_lower = label.lower().strip()
-    try:
-        return [light for light in lights if light.get_label().lower() == label_lower]
-    except Exception:
-        return []
+    labeled = [(l, _safe_label(l)) for l in lights]
+
+    # 1. Configured room group (exact)
+    from server.config import LIGHT_GROUPS
+    if label_lower in LIGHT_GROUPS:
+        group_set = {g.lower() for g in LIGHT_GROUPS[label_lower]}
+        return [l for l, lbl in labeled if lbl in group_set]
+
+    # 2. Group name embedded in label ("lights in the living room")
+    for group_name, members in LIGHT_GROUPS.items():
+        if group_name in label_lower:
+            group_set = {g.lower() for g in members}
+            return [l for l, lbl in labeled if lbl in group_set]
+
+    # 3. Exact label match
+    exact = [l for l, lbl in labeled if lbl == label_lower]
+    if exact:
+        return exact
+
+    # 4. Substring match ("office" → "office lamp")
+    return [l for l, lbl in labeled if label_lower in lbl or lbl in label_lower]
 
 
 def _hex_to_hsbk(hex_str: str, kelvin: int = 3500) -> list | None:
@@ -102,7 +126,7 @@ def _apply_to_targets(label: str, action, action_desc: str) -> str:
         return "LIFX unavailable: lifxlan not installed"
     targets = _resolve_target(label)
     if not targets:
-        desc = f"bulb '{label}'" if label else "any LIFX bulbs"
+        desc = f"'{label}'" if label else "any LIFX bulbs"
         return f"No lights found for {desc}"
     errors = []
     for light in targets:
@@ -129,7 +153,7 @@ class SetLightCommand(Command):
             },
             "label": {
                 "type": "string",
-                "description": "Bulb name/label. Omit to affect all bulbs."
+                "description": "Light label, room group ('living room', 'office'), or omit for all lights."
             }
         }
 
@@ -157,7 +181,7 @@ class SetBrightnessCommand(Command):
             },
             "label": {
                 "type": "string",
-                "description": "Bulb name/label. Omit to affect all bulbs."
+                "description": "Light label, room group ('living room', 'office'), or omit for all lights."
             }
         }
 
@@ -193,7 +217,7 @@ class SetColorCommand(Command):
             },
             "label": {
                 "type": "string",
-                "description": "Bulb name/label. Omit to affect all bulbs."
+                "description": "Light label, room group ('living room', 'office'), or omit for all lights."
             }
         }
 
@@ -236,7 +260,7 @@ class AdjustBrightnessCommand(Command):
             },
             "label": {
                 "type": "string",
-                "description": "Bulb name/label. Omit to affect all bulbs."
+                "description": "Light label, room group ('living room', 'office'), or omit for all lights."
             }
         }
 
@@ -281,7 +305,7 @@ class AdjustColorTempCommand(Command):
             },
             "label": {
                 "type": "string",
-                "description": "Bulb name/label. Omit to affect all bulbs."
+                "description": "Light label, room group ('living room', 'office'), or omit for all lights."
             }
         }
 
@@ -327,7 +351,7 @@ class ShiftHueCommand(Command):
             },
             "label": {
                 "type": "string",
-                "description": "Bulb name/label. Omit to affect all bulbs."
+                "description": "Light label, room group ('living room', 'office'), or omit for all lights."
             }
         }
 
@@ -384,7 +408,12 @@ class ListLightsCommand(Command):
                 lines.append(f"- '{label}' ({ip})")
             except Exception as e:
                 lines.append(f"- (unreadable: {e})")
-        return "Found bulbs:\n" + "\n".join(lines)
+        result = "Found bulbs:\n" + "\n".join(lines)
+        from server.config import LIGHT_GROUPS
+        if LIGHT_GROUPS:
+            groups = "; ".join(f"{k}: {', '.join(v)}" for k, v in LIGHT_GROUPS.items())
+            result += f"\nGroups: {groups}"
+        return result
 
 
 class SetColorTempCommand(Command):
@@ -400,7 +429,7 @@ class SetColorTempCommand(Command):
             },
             "label": {
                 "type": "string",
-                "description": "Bulb name/label. Omit to affect all bulbs."
+                "description": "Light label, room group ('living room', 'office'), or omit for all lights."
             }
         }
 
@@ -422,3 +451,84 @@ class SetColorTempCommand(Command):
             light.set_color(hsbk)
 
         return _apply_to_targets(label, action, f"Set color temp to {temperature} ({kelvin}K) on")
+
+
+class SetSceneCommand(Command):
+    name = "set_scene"
+    description = (
+        "Apply a named lighting scene that sets multiple lights at once. "
+        "Available scenes: warm mix, bright, evening, movie, focus. "
+        "Use this when the user asks for a scene or preset by name."
+    )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "scene": {
+                "type": "string",
+                "description": "Scene name (e.g. 'warm mix', 'movie', 'bright', 'evening', 'focus')"
+            }
+        }
+
+    def execute(self, scene: str) -> str:
+        from server.config import LIGHT_SCENES
+        scene_lower = scene.lower().strip()
+
+        scene_config = LIGHT_SCENES.get(scene_lower)
+        matched_name = scene_lower
+        if not scene_config:
+            for name, cfg in LIGHT_SCENES.items():
+                if scene_lower in name or name in scene_lower:
+                    scene_config = cfg
+                    matched_name = name
+                    break
+
+        if not scene_config:
+            available = ", ".join(LIGHT_SCENES.keys())
+            return f"Scene '{scene}' not found. Available: {available}"
+
+        lights = _get_lights()
+        if not lights:
+            return "No lights found"
+
+        applied = []
+        for light in lights:
+            label = _safe_label(light)
+            settings = scene_config.get(label) or scene_config.get("*")
+            if settings is None:
+                continue
+            try:
+                if settings.get("power") is False:
+                    light.set_power(0, duration=500, rapid=False)
+                    applied.append(f"{label} off")
+                    continue
+                light.set_power(65535, duration=0, rapid=True)
+                if "kelvin" in settings or "brightness" in settings:
+                    hsbk = [0, 0, 65535, 3500]
+                    if "brightness" in settings:
+                        hsbk[2] = int(settings["brightness"] * 65535)
+                    if "kelvin" in settings:
+                        hsbk[3] = settings["kelvin"]
+                    light.set_color(hsbk, duration=1000)
+                applied.append(label)
+            except Exception as e:
+                logger.warning(f"Scene '{matched_name}' failed on {label}: {e}")
+
+        if not applied:
+            return f"No lights matched scene '{matched_name}'"
+        return f"Applied scene '{matched_name}': {', '.join(applied)}"
+
+
+class ListScenesCommand(Command):
+    name = "list_scenes"
+    description = "List all available named lighting scenes"
+
+    @property
+    def parameters(self) -> dict:
+        return {}
+
+    def execute(self, **_) -> str:
+        from server.config import LIGHT_SCENES
+        if not LIGHT_SCENES:
+            return "No scenes configured"
+        return "Available scenes: " + ", ".join(LIGHT_SCENES.keys())

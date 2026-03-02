@@ -1,5 +1,6 @@
 """Main orchestrator for processing voice interactions."""
 import logging
+import threading
 import time
 import csv
 from typing import Optional, Dict, List
@@ -66,6 +67,10 @@ class Orchestrator:
         self._sonos_cache_time = 0.0
         # In-memory TTS audio buffer — served at /audio/tts_latest (no disk write)
         self.tts_audio: bytes = b""
+        # Last known TV playback state — kept fresh by background poller
+        self._last_tv_state: str = "unknown"
+        self._tv_poll_thread = threading.Thread(target=self._poll_tv_state, daemon=True, name="TVStatePoll")
+        self._tv_poll_thread.start()
 
         logger.info("Orchestrator initialized")
 
@@ -396,16 +401,66 @@ class Orchestrator:
         logger.info(f"Sonos: play_uri dispatched OK")
         return True
 
-    def play_sonos_beep(self, beep_type: str) -> bool:
-        """Play a beep through Sonos. Fire-and-forget; returns True if dispatched."""
+    def play_sonos_beep(self, beep_type: str, indicator_light: str = None) -> bool:
+        """Play a beep through Sonos, or flash a LIFX light if TV is playing."""
         if not SONOS_TTS_OUTPUT:
             return False
         try:
+            if indicator_light and self._last_tv_state == "playing":
+                threading.Thread(
+                    target=self._flash_light_indicator,
+                    args=(beep_type, indicator_light),
+                    daemon=True
+                ).start()
+                return True
             uri = f"http://{SERVER_EXTERNAL_HOST}:{SERVER_PORT}/audio/beep/{beep_type}"
             return self._sonos_play_uri(uri, f"beep_{beep_type}")
         except Exception as e:
             logger.warning(f"Sonos beep '{beep_type}' failed: {e}")
             return False
+
+    def _poll_tv_state(self):
+        """Background thread: polls TV playback state every 5s to keep _last_tv_state fresh."""
+        while True:
+            try:
+                self._last_tv_state = _get_tv_playback_state()
+            except Exception:
+                pass
+            time.sleep(5)
+
+    def _flash_light_indicator(self, beep_type: str, light_name: str):
+        """Flash a LIFX light as a silent visual indicator (runs in background thread).
+
+        Saves current light state, flashes to an indicator color for ~400ms, then restores.
+        Used instead of Sonos beep when TV audio is active to avoid interrupting playback.
+        """
+        _COLORS = {
+            'start': [43690, 65535, 65535, 6500],  # blue: "listening"
+            'end':   [21845, 52428, 65535, 4000],  # green: "got it"
+            'error': [0,     65535, 65535, 3500],  # red: "error"
+            'alert': [10923, 65535, 65535, 3500],  # orange: "alert"
+        }
+        color = _COLORS.get(beep_type)
+        if color is None:
+            return
+        try:
+            from server.commands.lifx_cmd import _resolve_target
+            lights = _resolve_target(light_name)
+            if not lights:
+                logger.debug(f"Indicator light '{light_name}' not found")
+                return
+            light = lights[0]
+            orig_color = light.get_color()
+            orig_power = light.get_power()
+            light.set_power(65535, duration=0, rapid=True)
+            light.set_color(color, duration=100, rapid=True)
+            time.sleep(0.4)
+            light.set_color(orig_color, duration=150, rapid=True)
+            if orig_power < 1000:
+                time.sleep(0.15)
+                light.set_power(0, duration=0, rapid=True)
+        except Exception as e:
+            logger.debug(f"Light indicator flash failed for '{beep_type}': {e}")
 
     @staticmethod
     def _append_done_chime(wav_data: bytes) -> bytes:
@@ -577,13 +632,13 @@ class Orchestrator:
                 return "        "
             pct = ((current - avg) / avg) * 100
             if pct < -5:
-                return f"\u2193{min(abs(pct), 999):.0f}%".rjust(8)
+                return f"\u2193{min(abs(pct), 999):.0f}%".rjust(6)
             elif pct > 5:
-                return f"\u2191{min(pct, 999):.0f}%".rjust(8)
+                return f"\u2191{min(pct, 999):.0f}%".rjust(6)
             return "       ~"
 
         def fmt_time(t: float) -> str:
-            return f"{t:9.2f}s"
+            return f"{t:7.2f}s"
 
         def fmt_pw(pw) -> str:
             return f"{pw:.3f}s" if pw is not None else "   —  "
@@ -596,12 +651,12 @@ class Orchestrator:
         B = "└───────┴──────────┴────────┴──────────┘"
 
         def data_row(stage, t, avg_t, pw) -> str:
-            return f"│ {stage:<5s} │{fmt_time(t)}│{cmp(t, avg_t)}│{fmt_pw(pw):^10s}│"
+            return f"│ {stage:<5s} │{fmt_time(t)}  │{cmp(t, avg_t)}  │{fmt_pw(pw):^10s}│"
 
         llm_cost_str = f"${llm_cost:.3f}"
-        llm_row = f"│ {'LLM':<5s} │{fmt_time(llm_time)}│{cmp(llm_time, llm_stats['avg_duration'])}│{llm_cost_str:^10s}│"
+        llm_row = f"│ {'LLM':<5s} │{fmt_time(llm_time)}  │{cmp(llm_time, llm_stats['avg_duration'])}  │{llm_cost_str:^10s}│"
 
-        logger.info(f"Interaction complete in {total:.2f}s | cost ${llm_cost:.3f}")
+        logger.info(f"Interaction complete in {total:.2f}s")
         logger.info(W)
         logger.info(H)
         logger.info(S)

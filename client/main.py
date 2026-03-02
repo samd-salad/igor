@@ -27,6 +27,7 @@ from client.config import (
     REQUEST_TIMEOUT,
     FOLLOWUP_TIMEOUT,
     USE_SONOS_OUTPUT,
+    INDICATOR_LIGHT,
 )
 from client.audio import Audio
 from client.wakeword import WakeWordDetector
@@ -130,7 +131,7 @@ class PiClient:
             try:
                 requests.post(
                     f"{self.server_url}{SONOS_BEEP_ENDPOINT}",
-                    json={"beep_type": beep_type},
+                    json={"beep_type": beep_type, "indicator_light": INDICATOR_LIGHT},
                     timeout=3,
                 )
             except Exception:

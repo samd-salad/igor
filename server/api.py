@@ -94,7 +94,7 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
         return JSONResponse(status_code=500, content={"error": "Internal server error"})
 
     @app.post("/api/process_interaction", response_model=ProcessInteractionResponse)
-    async def process_interaction(request: ProcessInteractionRequest, req: Request):
+    def process_interaction(request: ProcessInteractionRequest, req: Request):
         _require_allowed_ip(req)
         client_ip = req.client.host
 
@@ -163,6 +163,7 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
 
     class _SonosBeepRequest(BaseModel):
         beep_type: str
+        indicator_light: str | None = Field(None, max_length=100)
 
     _VALID_BEEP_TYPES = {"start", "end", "done", "error", "alert"}
 
@@ -178,7 +179,9 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid beep type")
         import asyncio
         asyncio.get_event_loop().run_in_executor(
-            None, app.state.orchestrator.play_sonos_beep, request.beep_type
+            None, lambda: app.state.orchestrator.play_sonos_beep(
+                request.beep_type, request.indicator_light
+            )
         )
         return {"status": "ok"}
 

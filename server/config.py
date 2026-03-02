@@ -59,6 +59,41 @@ SERVER_EXTERNAL_HOST = "192.168.0.4"  # PC's LAN IP (Sonos fetches TTS audio fro
 # LIFX smart bulb settings (local LAN UDP, no API key)
 LIFX_DISCOVERY_CACHE_TTL = 300  # seconds before forced re-discovery (5 min)
 
+# Room groups — map room names to lists of light labels for natural language targeting
+LIGHT_GROUPS: dict = {
+    "living room": ["corner lamp", "table lamp", "tall lamp"],
+    "office":      ["office lamp"],
+}
+
+# Named lighting scenes — each entry maps light labels (or "*" for all) to settings dicts.
+# Settings keys: brightness (0-1 float), kelvin (int), power (bool, default True)
+LIGHT_SCENES: dict = {
+    "warm mix": {
+        "corner lamp": {"brightness": 0.70, "kelvin": 2700},
+        "table lamp":  {"brightness": 0.50, "kelvin": 2700},
+        "tall lamp":   {"brightness": 0.60, "kelvin": 2700},
+        "office lamp": {"brightness": 0.40, "kelvin": 2700},
+    },
+    "bright": {
+        "*": {"brightness": 1.0, "kelvin": 5000},
+    },
+    "evening": {
+        "*": {"brightness": 0.45, "kelvin": 2700},
+    },
+    "movie": {
+        "corner lamp": {"brightness": 0.25, "kelvin": 2200},
+        "table lamp":  {"brightness": 0.20, "kelvin": 2200},
+        "tall lamp":   {"power": False},
+        "office lamp": {"power": False},
+    },
+    "focus": {
+        "office lamp": {"brightness": 1.0, "kelvin": 5000},
+        "corner lamp": {"power": False},
+        "table lamp":  {"power": False},
+        "tall lamp":   {"power": False},
+    },
+}
+
 # Google TV remote settings
 GOOGLE_TV_HOST = "192.168.0.20"
 GOOGLE_TV_CERT_FILE = str(DATA_DIR / "google_tv_cert.pem")

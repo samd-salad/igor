@@ -45,6 +45,7 @@ FOLLOWUP_TIMEOUT = 5.0
 
 # Audio output routing
 USE_SONOS_OUTPUT = False  # Set True to route TTS through Sonos instead of Pi speaker
+INDICATOR_LIGHT = None    # LIFX light label to flash as listening indicator when TV is playing (e.g. "corner lamp")
 
 # Request timeouts
 REQUEST_TIMEOUT = 60.0
