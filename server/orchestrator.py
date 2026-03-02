@@ -17,6 +17,7 @@ from server.config import (
     SERVER_EXTERNAL_HOST, SERVER_PORT,
 )
 from server.commands.memory_cmd import load_persistent_memory
+from server.routines import log_command, get_patterns
 import server.commands as commands
 
 logger = logging.getLogger(__name__)
@@ -78,13 +79,26 @@ class Orchestrator:
         self._sonos_cache_time = 0.0
         self._sonos_lock = threading.Lock()
         # In-memory TTS audio buffer — served at /audio/tts_latest (no disk write)
-        self.tts_audio: bytes = b""
+        self._tts_audio: bytes = b""
+        self._tts_audio_lock = threading.Lock()
+        self._benchmark_lock = threading.Lock()
         # Last known TV playback state — kept fresh by background poller
         self._last_tv_state: str = "unknown"
         self._tv_poll_thread = threading.Thread(target=self._poll_tv_state, daemon=True, name="TVStatePoll")
         self._tv_poll_thread.start()
 
         logger.info("Orchestrator initialized")
+
+    @property
+    def tts_audio(self) -> bytes:
+        """Thread-safe read of the in-memory TTS buffer."""
+        with self._tts_audio_lock:
+            return self._tts_audio
+
+    def get_tts_audio(self) -> bytes:
+        """Thread-safe read of the in-memory TTS buffer (explicit method form)."""
+        with self._tts_audio_lock:
+            return self._tts_audio
 
     def process_interaction(self, audio_bytes: bytes, wake_word: str, prefer_sonos: bool = False) -> Dict:
         """
@@ -147,7 +161,7 @@ class Orchestrator:
             transcription = transcription[:10_000]  # Truncate
             logger.warning("Transcription truncated to 10k chars")
 
-        logger.info(f"Transcribed: '{transcription}'")
+        logger.info(f"Transcribed: '{transcription[:100]}{'...' if len(transcription) > 100 else ''}'")
         self._log_benchmark('stt', timings['stt'], transcription)
 
         # Step 1b: Speaker Identification (optional, runs in parallel with STT conceptually)
@@ -186,7 +200,8 @@ class Orchestrator:
             tools=tools,
             tool_executor=tool_executor,
             persistent_memory=persistent_memory,
-            speaker=speaker_name
+            speaker=speaker_name,
+            patterns=get_patterns(),
         )
         timings['llm'] = time.time() - start
 
@@ -266,7 +281,7 @@ class Orchestrator:
         # Convert audio to base64 for transmission (empty if Sonos handled it)
         from shared.utils import encode_audio_base64
         audio_base64 = "" if tts_routed else encode_audio_base64(audio_data)
-        tts_duration_seconds = self._wav_duration(self.tts_audio) if tts_routed else self._wav_duration(audio_data)
+        tts_duration_seconds = self._wav_duration(self.get_tts_audio()) if tts_routed else self._wav_duration(audio_data)
 
         # Calculate total time (exclude non-time fields like llm_cost)
         timings['total'] = timings.get('stt', 0) + timings.get('llm', 0) + timings.get('tts', 0)
@@ -547,7 +562,8 @@ class Orchestrator:
             # Pad to minimum duration so Sonos exits TRANSITIONING → PLAYING
             wav_44k = self._pad_wav_for_sonos(wav_44k, pad_seconds=2.0)
             # Store in memory — /audio/tts_latest serves from here (no disk write)
-            self.tts_audio = wav_44k
+            with self._tts_audio_lock:
+                self._tts_audio = wav_44k
 
             uri = f"http://{SERVER_EXTERNAL_HOST}:{SERVER_PORT}/audio/tts_latest"
             if not self._sonos_play_uri(uri, "Dr. Butts"):
@@ -604,11 +620,14 @@ class Orchestrator:
         if name in ('set_volume', 'get_volume'):
             logger.info(f"Routing hardware command '{name}' to Pi")
             result = self.pi_client.hardware_control(name, kwargs)
+            log_command(name)
             return result if result else f"Failed to execute {name} on Pi"
 
         # All other commands execute locally
         try:
-            return commands.execute(name, **kwargs)
+            result = commands.execute(name, **kwargs)
+            log_command(name)
+            return result
         except Exception as e:
             logger.error(f"Command '{name}' failed: {e}")
             return f"Error: {e}"
@@ -635,20 +654,21 @@ class Orchestrator:
 
             BENCHMARK_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-            if not BENCHMARK_FILE.exists():
-                with open(BENCHMARK_FILE, 'w', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(['timestamp', 'stage', 'model', 'duration_s', 'word_count', 'per_word_s', 'cost_usd'])
+            with self._benchmark_lock:
+                if not BENCHMARK_FILE.exists():
+                    with open(BENCHMARK_FILE, 'w', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerow(['timestamp', 'stage', 'model', 'duration_s', 'word_count', 'per_word_s', 'cost_usd'])
 
-            with open(BENCHMARK_FILE, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    timestamp, stage, model,
-                    f"{duration:.3f}",
-                    word_count if word_count else '',
-                    f"{per_word:.3f}" if per_word else '',
-                    f"{cost:.6f}" if cost is not None else '',
-                ])
+                with open(BENCHMARK_FILE, 'a', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        timestamp, stage, model,
+                        f"{duration:.3f}",
+                        word_count if word_count else '',
+                        f"{per_word:.3f}" if per_word else '',
+                        f"{cost:.6f}" if cost is not None else '',
+                    ])
 
         except Exception as e:
             logger.error(f"Failed to log benchmark: {e}")

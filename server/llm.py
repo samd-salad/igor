@@ -49,9 +49,43 @@ class LLM:
         self.max_history = max_history
         self.conversation_history: List[Dict] = []
         self.last_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        self._history_summary: str = ""
         logger.info(f"LLM initialized: Claude API ({model})")
 
-    def _get_system_prompt(self, persistent_memory: str = "", speaker: str = None) -> str:
+    def _compress_dropped_messages(self, messages: list):
+        """Summarize messages being dropped from history into _history_summary.
+        Fires synchronously but only when history overflows (~every 10+ exchanges).
+        """
+        lines = []
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                tag = "User" if msg.get("role") == "user" else "Assistant"
+                lines.append(f"{tag}: {content.strip()}")
+        if not lines:
+            return
+
+        prior = f"Prior summary:\n{self._history_summary}\n\n" if self._history_summary else ""
+        transcript = "\n".join(lines)
+        try:
+            future = _executor.submit(
+                self.client.messages.create,
+                model=self.model,
+                max_tokens=150,
+                timeout=15.0,
+                system="Summarize the key facts and context from this conversation excerpt in 2-3 sentences. Focus on what matters for continuing the conversation naturally.",
+                messages=[{"role": "user", "content": f"{prior}Conversation:\n{transcript}"}],
+            )
+            response = future.result(timeout=20.0)
+            for block in response.content:
+                if block.type == "text":
+                    self._history_summary = block.text.strip()
+                    logger.debug(f"History compressed: {self._history_summary[:80]}...")
+                    break
+        except Exception as e:
+            logger.debug(f"History compression failed: {e}")
+
+    def _get_system_prompt(self, persistent_memory: str = "", speaker: str = None, patterns: str = "") -> str:
         """Build system prompt with current context injected."""
         now = datetime.now()
         time_context = f"Current: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
@@ -59,6 +93,10 @@ class LLM:
             time_context += f" | Speaking: {speaker}"
         prompt = SYSTEM_PROMPT.format(persistent_memory=persistent_memory)
         prompt += f"\n<current_context>\n{time_context}\n</current_context>"
+        if self._history_summary:
+            prompt += f"\n<prior_context>\n{self._history_summary}\n</prior_context>"
+        if patterns:
+            prompt += f"\n<observed_patterns>\n{patterns}\n</observed_patterns>"
         return prompt
 
     @staticmethod
@@ -82,11 +120,15 @@ class LLM:
     def _trim_history(self):
         """Trim history and ensure it starts with a plain-text user message.
 
-        tool_result user messages without a preceding tool_use cause Claude API
-        validation errors, so we walk past any such orphaned messages.
+        When messages are dropped, compresses them into _history_summary so
+        context isn't lost. tool_result orphans are still dropped to prevent
+        Claude API role validation errors.
         """
         if len(self.conversation_history) > self.max_history:
+            to_drop = self.conversation_history[:-self.max_history]
             self.conversation_history = self.conversation_history[-self.max_history:]
+            if to_drop:
+                self._compress_dropped_messages(to_drop)
         while self.conversation_history:
             first = self.conversation_history[0]
             if first["role"] == "user" and isinstance(first["content"], str):
@@ -129,7 +171,8 @@ class LLM:
         tools: List[Dict],
         tool_executor,
         persistent_memory: str = "",
-        speaker: str = None
+        speaker: str = None,
+        patterns: str = "",
     ) -> Optional[Tuple[str, bool]]:
         """
         Send message to LLM and get response.
@@ -143,7 +186,7 @@ class LLM:
         self.conversation_history.append({"role": "user", "content": user_text})
         self._trim_history()
 
-        system_prompt = self._get_system_prompt(persistent_memory, speaker)
+        system_prompt = self._get_system_prompt(persistent_memory, speaker, patterns)
         self.last_usage = {"input_tokens": 0, "output_tokens": 0}
 
         all_tools = tools + [_RESPOND_TOOL]
