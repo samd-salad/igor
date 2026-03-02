@@ -141,20 +141,12 @@ class PiClient:
     def _beep(self, beep_type: str):
         """Play beep locally or via Sonos depending on output mode.
 
-        Only 'start' and 'error' go through Sonos — these announce state to
-        everyone in the room and don't race with TTS.  'end' and 'done' play
-        locally on the Pi so they never block the server event loop or
-        interrupt the Sonos TTS response.
+        'start' = listening indicator; 'end' = recording stopped, processing;
+        'error' = something failed. No 'done' beep — the done chime is
+        embedded in the TTS WAV and plays naturally at end of speech.
         """
         if USE_SONOS_OUTPUT:
-            if beep_type in ("start", "end", "error", "alert"):
-                # Route to Sonos — Pi has no local speaker
-                # 'end' is safe: server takes 4+ seconds to process, well past
-                # the 2.1s beep before TTS's play_uri is called
-                self._sonos_beep(beep_type)
-            else:
-                # 'done' plays locally — done chime is embedded in TTS WAV anyway
-                getattr(self.audio, f"beep_{beep_type}")()
+            self._sonos_beep(beep_type)
         else:
             getattr(self.audio, f"beep_{beep_type}")()
 
@@ -244,7 +236,6 @@ class PiClient:
             if not self.audio.record(TEMP_WAV, timeout=FOLLOWUP_TIMEOUT if is_followup else None):
                 if is_followup:
                     logger.info("Follow-up timed out, ending conversation")
-                    self._beep("done")
                     return
                 logger.error("Recording failed")
                 self._beep("error")
@@ -294,14 +285,16 @@ class PiClient:
                     if result.get('await_followup') and depth < self.MAX_FOLLOWUP_DEPTH:
                         logger.info("Bot is awaiting follow-up response (Sonos routed)")
                         tts_dur = result.get('tts_duration_seconds') or 5.0
-                        time.sleep(tts_dur + 0.5)  # Wait for Sonos to finish, plus margin
+                        # +2.0s: Sonos startup latency (TRANSITIONING→PLAYING) means
+                        # audio hasn't started yet when server responds; without this
+                        # margin the follow-up listen window opens before speech ends.
+                        time.sleep(tts_dur + 2.0)
                         self._beep("start")
                         time.sleep(0.1)
                         depth += 1
                         is_followup = True
                         continue
                     else:
-                        self._beep("done")
                         logger.info("Interaction complete")
                         return
                 elif result.get('audio_base64'):
@@ -320,7 +313,6 @@ class PiClient:
                         is_followup = True
                         continue
                     else:
-                        self._beep("done")
                         logger.info("Interaction complete")
                         return
                 else:

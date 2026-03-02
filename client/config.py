@@ -17,7 +17,7 @@ AUDIO_DEVICE = "plughw:2,0"  # Run 'arecord -L' to find yours
 
 # Paths
 BASE_DIR = Path(__file__).parent.parent
-TEMP_WAV = "/tmp/recording.wav"
+TEMP_WAV = str(BASE_DIR / "data" / "recording.wav")  # local path avoids /tmp race conditions
 
 # OpenWakeWord custom models
 # Train models with train_wakeword.py on your PC, then copy .onnx files to oww_models/

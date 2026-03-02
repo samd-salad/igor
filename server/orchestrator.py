@@ -65,6 +65,7 @@ class Orchestrator:
         # Sonos device cache for TTS output routing
         self._sonos_device = None
         self._sonos_cache_time = 0.0
+        self._sonos_lock = threading.Lock()
         # In-memory TTS audio buffer — served at /audio/tts_latest (no disk write)
         self.tts_audio: bytes = b""
         # Last known TV playback state — kept fresh by background poller
@@ -235,8 +236,8 @@ class Orchestrator:
             if self._is_critical_response(response_text, commands_executed, await_followup):
                 tts_routed = self._route_tts_to_sonos(audio_data)
             else:
-                tv_state = _get_tv_playback_state()
-                if tv_state == "playing":
+                # Use cached TV state from background poller (avoids blocking ADB call in hot path)
+                if self._last_tv_state == "playing":
                     logger.info("TV is playing — suppressing non-critical Sonos TTS")
                     tts_routed = True  # tell client to skip local playback too
                 else:
@@ -245,6 +246,7 @@ class Orchestrator:
         # Convert audio to base64 for transmission (empty if Sonos handled it)
         from shared.utils import encode_audio_base64
         audio_base64 = "" if tts_routed else encode_audio_base64(audio_data)
+        tts_duration_seconds = self._wav_duration(self.tts_audio) if tts_routed else self._wav_duration(audio_data)
 
         # Calculate total time (exclude non-time fields like llm_cost)
         timings['total'] = timings.get('stt', 0) + timings.get('llm', 0) + timings.get('tts', 0)
@@ -260,6 +262,7 @@ class Orchestrator:
             'speaker': speaker_name,
             'await_followup': await_followup,
             'tts_routed': tts_routed,
+            'tts_duration_seconds': tts_duration_seconds,
             'error': None
         }
 
@@ -281,6 +284,18 @@ class Orchestrator:
         except Exception as e:
             logger.warning(f"Failed to convert audio bytes to numpy: {e}")
             return None
+
+    @staticmethod
+    def _wav_duration(audio_data: bytes) -> float:
+        """Return duration of WAV audio in seconds."""
+        import io
+        import wave
+        try:
+            with io.BytesIO(audio_data) as buf:
+                with wave.open(buf, 'rb') as wf:
+                    return wf.getnframes() / wf.getframerate()
+        except Exception:
+            return 0.0
 
     @staticmethod
     def _resample_wav_44100(audio_data: bytes) -> bytes:
@@ -371,17 +386,18 @@ class Orchestrator:
         try:
             import soco
             now = time.time()
-            if self._sonos_device is None or now - self._sonos_cache_time > SONOS_DISCOVERY_CACHE_TTL:
-                devices = list(soco.discover(timeout=2) or [])
-                self._sonos_device = None
-                for d in devices:
-                    if d.player_name == SONOS_DEFAULT_ZONE:
-                        self._sonos_device = d
-                        break
-                if self._sonos_device is None and devices:
-                    self._sonos_device = devices[0]
-                self._sonos_cache_time = now
-            return self._sonos_device
+            with self._sonos_lock:
+                if self._sonos_device is None or now - self._sonos_cache_time > SONOS_DISCOVERY_CACHE_TTL:
+                    devices = list(soco.discover(timeout=2) or [])
+                    self._sonos_device = None
+                    for d in devices:
+                        if d.player_name == SONOS_DEFAULT_ZONE:
+                            self._sonos_device = d
+                            break
+                    if self._sonos_device is None and devices:
+                        self._sonos_device = devices[0]
+                    self._sonos_cache_time = now
+                return self._sonos_device
         except Exception as e:
             logger.warning(f"Sonos discovery failed: {e}")
             return None
@@ -424,8 +440,8 @@ class Orchestrator:
         while True:
             try:
                 self._last_tv_state = _get_tv_playback_state()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"TV state poll failed: {e}")
             time.sleep(5)
 
     def _flash_light_indicator(self, beep_type: str, light_name: str):

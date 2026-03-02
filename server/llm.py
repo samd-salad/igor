@@ -1,8 +1,12 @@
 """LLM integration with Claude API for conversational AI."""
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Optional, List, Dict, Tuple
 import anthropic
+
+_LLM_CALL_TIMEOUT = 45.0  # hard wall-clock timeout per API call (seconds)
+_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="llm_api")
 
 from datetime import datetime
 from server.config import CLAUDE_API_KEY, CLAUDE_MODEL, MAX_CONVERSATION_HISTORY
@@ -110,16 +114,21 @@ class LLM:
         # First LLM call
         try:
             logger.debug(f"Sending message to LLM: '{user_text}'")
-            response = self.client.messages.create(
+            future = _executor.submit(
+                self.client.messages.create,
                 model=self.model,
-                max_tokens=300,
+                max_tokens=1024,
                 timeout=30.0,
                 system=system_prompt,
                 tools=tools,
                 messages=self.conversation_history,
             )
+            response = future.result(timeout=_LLM_CALL_TIMEOUT)
             self.last_usage["input_tokens"] += response.usage.input_tokens
             self.last_usage["output_tokens"] += response.usage.output_tokens
+        except FutureTimeoutError:
+            logger.error(f"LLM request timed out after {_LLM_CALL_TIMEOUT}s (wall clock)")
+            return None
         except anthropic.APIStatusError as e:
             logger.error(f"LLM request failed ({e.status_code}): {e.message}")
             return None
@@ -169,16 +178,21 @@ class LLM:
             # Follow-up LLM call
             try:
                 logger.debug("Sending follow-up message to LLM with tool results")
-                response = self.client.messages.create(
+                future = _executor.submit(
+                    self.client.messages.create,
                     model=self.model,
-                    max_tokens=300,
+                    max_tokens=1024,
                     timeout=30.0,
                     system=system_prompt,
                     tools=tools,
                     messages=self.conversation_history,
                 )
+                response = future.result(timeout=_LLM_CALL_TIMEOUT)
                 self.last_usage["input_tokens"] += response.usage.input_tokens
                 self.last_usage["output_tokens"] += response.usage.output_tokens
+            except FutureTimeoutError:
+                logger.error(f"LLM follow-up timed out after {_LLM_CALL_TIMEOUT}s (wall clock)")
+                return None
             except Exception as e:
                 logger.error(f"LLM follow-up failed: {e}")
                 return None

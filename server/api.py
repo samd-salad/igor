@@ -6,7 +6,7 @@ from threading import Lock
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from shared.models import (
     ProcessInteractionRequest,
@@ -50,6 +50,11 @@ class _RateLimiter:
             if len(ts) >= self.max_requests:
                 return False
             ts.append(now)
+            # Evict idle IPs to prevent unbounded dict growth
+            if len(self._timestamps) > 1000:
+                self._timestamps = {
+                    k: v for k, v in self._timestamps.items() if v
+                }
             return True
 
 
