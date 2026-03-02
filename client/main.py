@@ -309,6 +309,8 @@ class PiClient:
                         continue
                     else:
                         logger.info("Interaction complete")
+                        tts_dur = result.get('tts_duration_seconds') or 5.0
+                        time.sleep(tts_dur + 2.0)
                         return
                 elif result.get('audio_base64'):
                     response_audio = decode_audio_base64(result['audio_base64'])
