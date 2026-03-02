@@ -226,7 +226,26 @@ def main():
                 wins.append(clip[start:start + WINDOW])
         return np.stack(wins).astype(np.float32)
 
-    pos_wins = make_windows(pos_emb)
+    def make_windows_split(emb: np.ndarray, paths: list) -> np.ndarray:
+        """Like make_windows but only uses the half of each clip where the wake word is:
+        - auto_*.wav: rolling pre-detection buffer → wake word at the END → tail half
+        - sample_*.wav / others: user speaks immediately after prompt → wake word at the START → head half
+        """
+        wins = []
+        for clip, path in zip(emb, paths):
+            n = len(clip)
+            name = Path(path).name
+            if name.startswith("auto_") or name.startswith("dup_auto_"):
+                start_from = n // 2   # wake word is at the end
+                end_at = n - WINDOW + 1
+            else:
+                start_from = 0        # wake word is at the start
+                end_at = max(WINDOW, n // 2) - WINDOW + 1
+            for start in range(start_from, end_at):
+                wins.append(clip[start:start + WINDOW])
+        return np.stack(wins).astype(np.float32) if wins else np.empty((0, WINDOW, 96), dtype=np.float32)
+
+    pos_wins = make_windows_split(pos_emb, wav_files)
     neg_wins = make_windows(neg_emb)
     print(f"  Windows — positive: {len(pos_wins)}  negative: {len(neg_wins)}")
 
