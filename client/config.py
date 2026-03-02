@@ -27,6 +27,9 @@ OWW_THRESHOLD = 0.7  # Detection threshold (0–1). Higher = fewer false positiv
 OWW_TRIGGER_FRAMES = 3  # Consecutive frames above threshold required to trigger.
                          # Each frame is ~80ms (1280 samples at 16kHz).
                          # Increase to suppress false positives from brief noisy spikes.
+OWW_MIN_RMS = 300        # Minimum RMS of detection audio to confirm wake word.
+                         # Rejects low-energy false positives (TV audio, room noise).
+                         # Set to 0 to disable. Close-mic speech is typically 800-4000+.
 
 # Auto-save detected wake words as training samples
 # Saves the audio that triggered each detection to wakeword_samples/positive/

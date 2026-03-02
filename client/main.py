@@ -20,6 +20,7 @@ from client.config import (
     OWW_MODEL_PATHS,
     OWW_THRESHOLD,
     OWW_TRIGGER_FRAMES,
+    OWW_MIN_RMS,
     OWW_AUTO_SAVE_SAMPLES,
     OWW_SAMPLE_BUFFER_SECONDS,
     WAKE_SAMPLES_DIR,
@@ -199,6 +200,16 @@ class PiClient:
         if not wake_word:
             logger.warning("Wake word detection failed")
             return
+
+        # RMS check: reject low-energy detections (TV/room audio vs close-mic speech)
+        if OWW_MIN_RMS > 0 and audio_buffer:
+            import numpy as np
+            buf_audio = np.frombuffer(b"".join(audio_buffer), dtype=np.int16)
+            rms = int(np.sqrt(np.mean(buf_audio.astype(np.float32) ** 2)))
+            if rms < OWW_MIN_RMS:
+                logger.info(f"Wake word rejected — RMS {rms} below minimum {OWW_MIN_RMS} (likely room audio)")
+                self.wakeword_detector.reset()
+                return
 
         logger.info(f"Wake word detected: {wake_word}")
         self.wakeword_detector.reset()
