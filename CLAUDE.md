@@ -170,7 +170,7 @@ No other API keys needed. Weather uses Open-Meteo (free, no account). Smart home
 - Tune sensitivity with `OWW_THRESHOLD` in `client/config.py` (default 0.5)
 - Training workflow:
   1. Pi: `python record_samples.py`  → `wakeword_samples/positive/*.wav`
-  2. PC: `rsync pi:wakeword_samples/ wakeword_samples/`
+  2. PC: `scp -r user@<PI_IP>:~/smart_assistant/wakeword_samples/ wakeword_samples/`
   3. PC: `python onnx_models/wakeword_creation/train_wakeword.py`
   4. Pi: `scp oww_models/doctor_butts.onnx pi:smart_assistant/oww_models/`
 
