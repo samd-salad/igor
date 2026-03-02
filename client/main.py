@@ -178,7 +178,6 @@ class PiClient:
                 if audio_buffer is not None:
                     audio_buffer.append(audio_bytes)
                 predictions = self.wakeword_detector.predict(audio_bytes)
-                frame_count += 1
                 for name, score in predictions.items():
                     if score >= OWW_THRESHOLD:
                         consecutive[name] = consecutive.get(name, 0) + 1
