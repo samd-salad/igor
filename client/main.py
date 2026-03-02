@@ -173,7 +173,6 @@ class PiClient:
 
             wake_word = None
             consecutive: dict[str, int] = {}
-            frame_count = 0
             while not wake_word:
                 audio_bytes = stream.read(chunk_bytes, exception_on_overflow=False)
                 if audio_buffer is not None:
@@ -183,14 +182,9 @@ class PiClient:
                 for name, score in predictions.items():
                     if score >= OWW_THRESHOLD:
                         consecutive[name] = consecutive.get(name, 0) + 1
-                        logger.info(f"score[{name}]={score:.3f} consecutive={consecutive[name]}/{OWW_TRIGGER_FRAMES}")
                         if consecutive[name] >= OWW_TRIGGER_FRAMES:
                             wake_word = name
                             break
-                    elif score > 0.1:
-                        if consecutive.get(name, 0) > 0:
-                            logger.info(f"score[{name}]={score:.3f} — dropped below threshold, resetting")
-                        consecutive[name] = 0
                     else:
                         consecutive[name] = 0
         finally:
