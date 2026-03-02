@@ -6,6 +6,7 @@ from datetime import datetime
 
 from server.commands.base import Command
 from server.config import DATA_DIR
+from server.commands.memory_cmd import _sanitize, _load_memories, _save_memories, _lock as _mem_lock
 
 logger = logging.getLogger(__name__)
 
@@ -124,9 +125,26 @@ class ResolveFeedbackCommand(Command):
     def execute(self, id: int, **_) -> str:
         with _lock:
             items = _load()
+            suggestion = ""
             for item in items:
                 if item["id"] == id:
                     item["status"] = "resolved"
                     _save(items)
-                    return f"#{id} resolved."
-        return f"No feedback item with ID {id}."
+                    suggestion = item.get("suggestion", "").strip()
+                    break
+            else:
+                return f"No feedback item with ID {id}."
+
+        if suggestion:
+            key = f"feedback_{id}"
+            value = _sanitize(suggestion, max_len=500)
+            with _mem_lock:
+                memories = _load_memories()
+                if "behavior" not in memories:
+                    memories["behavior"] = {}
+                memories["behavior"][key] = value
+                _save_memories(memories)
+            logger.info(f"Feedback #{id} suggestion saved to behavior memory: {value}")
+            return f"#{id} resolved. Behavior note saved."
+
+        return f"#{id} resolved."

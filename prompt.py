@@ -25,6 +25,7 @@ Two memory systems:
 Save immediately when you learn names, preferences, schedules, relationships, or corrections. Don't save transient info or things already stored. When in doubt, save it.
 
 Categories: preferences, schedule, people, personal, home, other
+Use 'behavior' for behavioral guidelines learned from feedback (e.g., response style, things to avoid).
 Keys: short, lowercase, underscored (e.g. coffee, sleep_time, sister)
 
 Examples:

@@ -63,7 +63,7 @@ class SaveMemoryCommand(Command):
         return {
             "category": {
                 "type": "string",
-                "description": "Category: 'preferences', 'schedule', 'people', 'personal', 'home', or 'other'"
+                "description": "Category: 'preferences', 'schedule', 'people', 'personal', 'home', 'behavior', or 'other'"
             },
             "key": {
                 "type": "string",
@@ -128,17 +128,35 @@ class ForgetMemoryCommand(Command):
 
 
 def load_persistent_memory() -> str:
-    """Load persistent memory formatted for prompt injection."""
-    memories = _load_memories()
+    """Load persistent memory formatted for prompt injection.
 
+    Personal facts use bracket-section format. Behavior guidelines are rendered
+    as a numbered list under a separate header so the LLM can distinguish
+    behavioral rules from biographical facts.
+    """
+    memories = _load_memories()
     if not memories:
         return "(empty)"
 
-    # Format as readable text for the LLM
-    lines = []
-    for category, items in sorted(memories.items()):
-        lines.append(f"[{category}]")
-        for key, value in sorted(items.items()):
-            lines.append(f"  {key}: {value}")
+    behavior_items = memories.get("behavior", {})
+    other_categories = {k: v for k, v in sorted(memories.items()) if k != "behavior"}
 
-    return "\n".join(lines)
+    sections = []
+
+    fact_lines = []
+    for category, items in other_categories.items():
+        if not items:
+            continue
+        fact_lines.append(f"[{category}]")
+        for key, value in sorted(items.items()):
+            fact_lines.append(f"  {key}: {value}")
+    if fact_lines:
+        sections.append("\n".join(fact_lines))
+
+    if behavior_items:
+        behavior_lines = ["[behavior guidelines]"]
+        for i, (key, value) in enumerate(sorted(behavior_items.items()), 1):
+            behavior_lines.append(f"  {i}. {value}")
+        sections.append("\n".join(behavior_lines))
+
+    return "\n\n".join(sections) if sections else "(empty)"

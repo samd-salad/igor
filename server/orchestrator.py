@@ -205,6 +205,15 @@ class Orchestrator:
 
         response_text, await_followup = llm_result
 
+        if not await_followup:
+            _snap = self.llm.get_history_snapshot()
+            threading.Thread(
+                target=self._run_session_summarizer,
+                args=(_snap,),
+                daemon=True,
+                name="SessionSummarizer"
+            ).start()
+
         usage = self.llm.last_usage
         llm_cost = (
             usage["input_tokens"] * CLAUDE_INPUT_COST_PER_M +
@@ -549,6 +558,41 @@ class Orchestrator:
         except Exception as e:
             logger.warning(f"Sonos TTS routing failed: {e}")
             return False
+
+    def _run_session_summarizer(self, history_snapshot: list):
+        """Background: extract facts from completed conversation and auto-save to memory.
+        Never raises — all errors logged at DEBUG.
+        """
+        try:
+            facts = self.llm.extract_memories(history_snapshot)
+            if not facts:
+                return
+
+            from server.commands.memory_cmd import _load_memories, _save_memories, _sanitize
+            from server.commands.memory_cmd import _lock as _mem_lock
+
+            saved = []
+            with _mem_lock:
+                memories = _load_memories()
+                for cat, key, val in facts:
+                    cat = _sanitize(cat, max_len=50).lower().strip()
+                    key = _sanitize(key, max_len=50).lower().strip().replace(" ", "_")
+                    val = _sanitize(val, max_len=500)
+                    if not (cat and key and val):
+                        continue
+                    if cat in memories and key in memories[cat]:
+                        continue  # don't overwrite known facts
+                    if cat not in memories:
+                        memories[cat] = {}
+                    memories[cat][key] = val
+                    saved.append(f"[{cat}][{key}]")
+                if saved:
+                    _save_memories(memories)
+
+            if saved:
+                logger.info(f"Session summarizer saved: {', '.join(saved)}")
+        except Exception as e:
+            logger.debug(f"Session summarizer failed (non-critical): {e}")
 
     def _execute_command(self, name: str, **kwargs) -> str:
         """

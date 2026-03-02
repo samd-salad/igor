@@ -227,6 +227,77 @@ class LLM:
         """Get current conversation history."""
         return self.conversation_history.copy()
 
+    def get_history_snapshot(self) -> List[Dict]:
+        """Return a copy of conversation history for background summarization."""
+        return self.conversation_history.copy()
+
+    def extract_memories(self, history_snapshot: List[Dict]) -> list:
+        """Lightweight bare API call to extract memorable facts from a conversation.
+
+        Returns list of (category, key, value) tuples, or [] on any failure.
+        Uses no tools — expects raw JSON back. Safe to call from a background thread.
+        """
+        if not history_snapshot:
+            return []
+
+        lines = []
+        for msg in history_snapshot:
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                tag = "User" if msg.get("role") == "user" else "Assistant"
+                lines.append(f"{tag}: {content.strip()}")
+        transcript = "\n".join(lines)
+        if not transcript.strip():
+            return []
+
+        summarizer_prompt = (
+            "You are a memory extraction assistant. "
+            "Read the conversation below and identify any NEW facts worth remembering long-term. "
+            "Only extract clear, stable, personal facts (names, preferences, schedules, relationships, "
+            "habits, home config). Do NOT extract: transient requests (timers, weather), "
+            "things already obvious from context, or behavioral instructions. "
+            "Be conservative — if uncertain, skip it. "
+            "Respond with ONLY a JSON array. Each element: "
+            "{\"category\": \"...\", \"key\": \"...\", \"value\": \"...\"}. "
+            "Valid categories: preferences, schedule, people, personal, home, other. "
+            "If nothing is worth saving, respond with exactly: []"
+        )
+
+        try:
+            import json
+            future = _executor.submit(
+                self.client.messages.create,
+                model=self.model,
+                max_tokens=512,
+                timeout=20.0,
+                system=summarizer_prompt,
+                messages=[{"role": "user", "content": f"Conversation:\n{transcript}"}],
+            )
+            response = future.result(timeout=30.0)
+            raw = ""
+            for block in response.content:
+                if block.type == "text":
+                    raw = block.text.strip()
+                    break
+            if not raw or raw == "[]":
+                return []
+            items = json.loads(raw)
+            if not isinstance(items, list):
+                return []
+            results = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                cat = str(item.get("category", "")).strip().lower()
+                key = str(item.get("key", "")).strip().lower().replace(" ", "_")
+                val = str(item.get("value", "")).strip()
+                if cat and key and val:
+                    results.append((cat, key, val))
+            return results
+        except Exception as e:
+            logger.debug(f"extract_memories failed: {e}")
+            return []
+
     def set_history(self, history: List[Dict]):
         """Set conversation history (for restoring from saved state)."""
         self.conversation_history = history
