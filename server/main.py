@@ -24,7 +24,7 @@ from server.config import (
     WHISPER_MODEL,
     CLAUDE_MODEL,
     CLAUDE_API_KEY,
-    PIPER_VOICE,
+    KOKORO_VOICE,
     PI_HOST,
     PI_PORT
 )
@@ -54,11 +54,10 @@ def initialize_services():
     llm = LLM()
 
     # Initialize Synthesizer
-    logger.info(f"Loading Piper voice: {PIPER_VOICE}")
-    try:
-        synthesizer = Synthesizer(PIPER_VOICE)
-    except ValueError as e:
-        logger.error(f"Failed to initialize Piper: {e}")
+    logger.info(f"Loading Kokoro TTS (voice={KOKORO_VOICE})")
+    synthesizer = Synthesizer()
+    if not synthesizer.initialize():
+        logger.error("Failed to initialize Kokoro TTS")
         sys.exit(1)
 
     # Initialize Pi callback client

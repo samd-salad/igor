@@ -1,11 +1,26 @@
 """Speech-to-text transcription using Faster Whisper."""
+import io
 import logging
+import wave
 from typing import Optional
+
+import numpy as np
 from faster_whisper import WhisperModel
 
 from server.config import WHISPER_MODEL, WHISPER_DEVICE, WHISPER_COMPUTE_TYPE
 
 logger = logging.getLogger(__name__)
+
+
+def _wav_to_float32(audio_bytes: bytes) -> np.ndarray:
+    """Decode WAV bytes to float32 mono array at native sample rate."""
+    with wave.open(io.BytesIO(audio_bytes)) as wf:
+        raw = wf.readframes(wf.getnframes())
+        channels = wf.getnchannels()
+    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    if channels == 2:
+        samples = samples.reshape(-1, 2).mean(axis=1)
+    return samples
 
 
 class Transcriber:
@@ -31,59 +46,54 @@ class Transcriber:
             logger.error(f"Whisper initialization failed: {e}")
             return False
 
+    def _run_transcription(self, audio) -> Optional[str]:
+        """Run transcription on a file path or numpy float32 array."""
+        segments, _ = self.model.transcribe(
+            audio,
+            beam_size=1,
+            language="en",
+            vad_filter=True,
+            condition_on_previous_text=False,
+            compression_ratio_threshold=2.4,
+            log_prob_threshold=-1.0,
+        )
+        segments = list(segments)
+        if not segments:
+            logger.warning("Transcription: no speech detected")
+            return None
+
+        avg_no_speech = sum(s.no_speech_prob for s in segments) / len(segments)
+        if avg_no_speech > 0.6:
+            logger.warning(f"Transcription rejected: no_speech_prob={avg_no_speech:.2f}")
+            return None
+
+        text = " ".join(seg.text for seg in segments).strip()
+        if not text:
+            logger.warning("Transcription resulted in empty text")
+            return None
+
+        logger.info(f"Transcribed: '{text}'")
+        return text
+
     def transcribe(self, audio_path: str) -> Optional[str]:
-        """
-        Transcribe audio file to text.
-
-        Args:
-            audio_path: Path to WAV file
-
-        Returns:
-            Transcribed text or None on failure
-        """
+        """Transcribe audio file to text."""
         if not self.model:
             logger.error("Transcriber not initialized")
             return None
-
         try:
-            logger.debug(f"Transcribing audio file: {audio_path}")
-            segments, info = self.model.transcribe(audio_path, beam_size=1)
-            text = " ".join(seg.text for seg in segments).strip()
-
-            if not text:
-                logger.warning("Transcription resulted in empty text")
-                return None
-
-            logger.info(f"Transcribed: '{text}'")
-            return text
-
+            return self._run_transcription(audio_path)
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
             return None
 
     def transcribe_bytes(self, audio_bytes: bytes) -> Optional[str]:
-        """
-        Transcribe audio from bytes.
-
-        Args:
-            audio_bytes: WAV audio data as bytes
-
-        Returns:
-            Transcribed text or None on failure
-        """
-        import tempfile
-        import os
-
-        # Write bytes to temp file for Whisper
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-            f.write(audio_bytes)
-            temp_path = f.name
-
+        """Transcribe WAV audio from bytes (no temp file)."""
+        if not self.model:
+            logger.error("Transcriber not initialized")
+            return None
         try:
-            return self.transcribe(temp_path)
-        finally:
-            # Clean up temp file
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass  # File may already be deleted
+            audio = _wav_to_float32(audio_bytes)
+            return self._run_transcription(audio)
+        except Exception as e:
+            logger.error(f"Transcription failed: {e}")
+            return None

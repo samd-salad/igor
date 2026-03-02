@@ -1,31 +1,28 @@
-"""Text-to-speech synthesis using Piper."""
+"""Text-to-speech synthesis using Kokoro (kokoro-onnx)."""
+import io
 import logging
 import re
-import subprocess
-import tempfile
-import os
-from pathlib import Path
+import wave
 from typing import Optional
 
-from server.config import PIPER_VOICE, PIPER_SAMPLE_RATE
+import numpy as np
+
+from server.config import (
+    KOKORO_MODEL_FILE,
+    KOKORO_VOICES_FILE,
+    KOKORO_VOICE,
+    KOKORO_SPEED,
+    KOKORO_SAMPLE_RATE,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def _preprocess_text(text: str) -> str:
-    """
-    Clean text for TTS synthesis.
-
-    - Removes/replaces quotes that cause Piper parsing errors
-    - Normalizes punctuation for natural speech
-    - Removes problematic characters
-    """
-    # Replace smart quotes with nothing (they cause issues)
-    text = text.replace('"', '').replace('"', '').replace('"', '')
-    text = text.replace("'", "'").replace("'", "'")  # Normalize apostrophes
-
-    # Remove straight double quotes entirely (cause Piper errors)
-    text = text.replace('"', '')
+    """Clean text for TTS synthesis."""
+    # Normalize quotes
+    text = text.replace('\u201c', '').replace('\u201d', '').replace('"', '')
+    text = text.replace('\u2018', "'").replace('\u2019', "'")
 
     # Replace semicolons with commas (more natural pause)
     text = text.replace(';', ',')
@@ -33,14 +30,11 @@ def _preprocess_text(text: str) -> str:
     # Replace colons mid-sentence with commas (except time like 3:00)
     text = re.sub(r':(?!\d)', ',', text)
 
-    # Normalize multiple spaces
-    text = re.sub(r' +', ' ', text)
-
     # Remove asterisks (markdown artifacts)
     text = text.replace('*', '')
 
     # Normalize dashes to simple pauses
-    text = text.replace('—', ', ').replace('–', ', ').replace(' - ', ', ')
+    text = text.replace('\u2014', ', ').replace('\u2013', ', ').replace(' - ', ', ')
 
     # Remove parentheses (speak content naturally)
     text = text.replace('(', ', ').replace(')', ', ')
@@ -53,97 +47,74 @@ def _preprocess_text(text: str) -> str:
 
 
 class Synthesizer:
-    """Handles text-to-speech using Piper TTS."""
+    """Handles text-to-speech using Kokoro ONNX."""
 
-    def __init__(self, voice_path: str = PIPER_VOICE):
-        # Validate voice model path for security
-        voice_path_obj = Path(voice_path).resolve()
-        if not voice_path_obj.exists():
-            raise ValueError(f"Voice model not found: {voice_path}")
-        if not voice_path_obj.is_file():
-            raise ValueError(f"Voice model is not a file: {voice_path}")
+    def __init__(self):
+        self.voice = KOKORO_VOICE
+        self.speed = KOKORO_SPEED
+        self.sample_rate = KOKORO_SAMPLE_RATE
+        self._kokoro = None
+        logger.info(f"Synthesizer initialized (voice={self.voice}, speed={self.speed})")
 
-        self.voice_path = str(voice_path_obj)
-        self.sample_rate = PIPER_SAMPLE_RATE
-        logger.info(f"Synthesizer initialized with voice: {self.voice_path}")
+    def initialize(self) -> bool:
+        """Load Kokoro model into memory. Returns success."""
+        try:
+            from kokoro_onnx import Kokoro
+            self._kokoro = Kokoro(KOKORO_MODEL_FILE, KOKORO_VOICES_FILE)
+            logger.info("Kokoro TTS loaded successfully")
+            return True
+        except ImportError:
+            logger.error("kokoro-onnx not installed. Run: pip install kokoro-onnx")
+            return False
+        except FileNotFoundError as e:
+            logger.error(
+                f"Kokoro model files not found: {e}\n"
+                "Download kokoro-v1.0.onnx and voices-v1.0.bin from "
+                "https://github.com/thewh1teagle/kokoro-onnx/releases and place in kokoro/"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Failed to load Kokoro: {e}")
+            return False
 
     def synthesize(self, text: str) -> Optional[bytes]:
-        """
-        Synthesize text to speech and return audio as bytes.
-
-        Args:
-            text: Text to speak
-
-        Returns:
-            WAV audio data as bytes, or None on failure
-        """
+        """Synthesize text to speech and return WAV bytes."""
         if not text:
             logger.warning("Empty text provided for synthesis")
             return None
 
-        # Preprocess text to avoid TTS errors
         text = _preprocess_text(text)
-
         if not text:
             logger.warning("Text empty after preprocessing")
             return None
 
-        # Truncate text for logging to avoid leaking sensitive data
-        log_text = text[:50] + "..." if len(text) > 50 else text
-        logger.debug(f"Synthesizing: '{log_text}'")
+        if not self._kokoro:
+            logger.error("Synthesizer not initialized")
+            return None
 
-        temp_wav = None
         try:
-            # Create temp file for output (keep file handle open for security)
-            temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-            temp_wav = temp_file.name
-            temp_file.close()
-
-            # Run Piper with list arguments (NO shell=True to prevent injection)
-            # Pass text via stdin to avoid command line length limits and injection
-            result = subprocess.run(
-                ['piper', '--model', self.voice_path, '--output_file', temp_wav],
-                input=text.encode('utf-8'),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=30,
-                check=False
+            samples, sample_rate = self._kokoro.create(
+                text,
+                voice=self.voice,
+                speed=self.speed,
+                lang="en-us",
             )
 
-            if result.returncode != 0:
-                error_msg = result.stderr.decode('utf-8', errors='replace')
-                logger.error(f"Piper failed with code {result.returncode}: {error_msg[:200]}")
+            if samples is None or len(samples) == 0:
+                logger.error("Kokoro returned empty audio")
                 return None
 
-            # Read the generated audio
-            if not os.path.exists(temp_wav):
-                logger.error(f"Output file not created: {temp_wav}")
-                return None
+            buf = io.BytesIO()
+            with wave.open(buf, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                wf.writeframes((samples * 32767).astype(np.int16).tobytes())
 
-            with open(temp_wav, 'rb') as f:
-                audio_data = f.read()
+            audio_bytes = buf.getvalue()
+            logger.info(f"Synthesized {len(audio_bytes)} bytes of audio")
+            return audio_bytes
 
-            if not audio_data:
-                logger.error("Piper generated empty audio file")
-                return None
-
-            logger.info(f"Synthesized {len(audio_data)} bytes of audio")
-            return audio_data
-
-        except subprocess.TimeoutExpired:
-            logger.error("TTS synthesis timed out after 30 seconds")
-            return None
-        except FileNotFoundError:
-            logger.error("Piper executable not found. Is it installed and in PATH?")
-            return None
         except Exception as e:
             logger.error(f"TTS synthesis failed: {type(e).__name__}: {str(e)[:200]}")
             return None
-        finally:
-            # Always clean up temp file
-            if temp_wav and os.path.exists(temp_wav):
-                try:
-                    os.unlink(temp_wav)
-                except Exception as e:
-                    logger.warning(f"Failed to remove temp file {temp_wav}: {e}")
-

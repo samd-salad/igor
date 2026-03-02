@@ -31,9 +31,13 @@ WHISPER_COMPUTE_TYPE = "int8"
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
 
-# Piper TTS model
-PIPER_VOICE = str(BASE_DIR / "voices" / "en_US-arctic-medium.onnx")
-PIPER_SAMPLE_RATE = 22050
+# Kokoro TTS (kokoro-onnx) — model files in kokoro/ dir
+# Download from https://github.com/thewh1teagle/kokoro-onnx/releases
+KOKORO_MODEL_FILE = str(BASE_DIR / "kokoro" / "kokoro-v1.0.onnx")
+KOKORO_VOICES_FILE = str(BASE_DIR / "kokoro" / "voices-v1.0.bin")
+KOKORO_VOICE = os.getenv("KOKORO_VOICE", "am_onyx")  # am_onyx, am_michael, am_fenrir, af_heart, af_bella
+KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.0"))
+KOKORO_SAMPLE_RATE = 24000
 MEMORY_FILE = DATA_DIR / "memory.txt"  # Legacy path; memory_cmd.py uses memory.json (derived via .with_suffix)
 KNOWN_DEVICES_FILE = DATA_DIR / "known_devices.json"
 BENCHMARK_FILE = DATA_DIR / "benchmark.csv"
