@@ -21,6 +21,17 @@ import server.commands as commands
 
 logger = logging.getLogger(__name__)
 
+
+def _strip_markdown(text: str) -> str:
+    """Strip markdown formatting that Piper would speak literally."""
+    import re
+    text = re.sub(r'\*+([^*]+)\*+', r'\1', text)          # bold / italic
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)  # headers
+    text = re.sub(r'`+([^`]+)`+', r'\1', text)            # inline code
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text) # links
+    text = re.sub(r'^[-*+]\s+', '', text, flags=re.MULTILINE)   # bullet points
+    return text.strip()
+
 # Try to import speaker identification (optional dependency)
 try:
     from server.speaker_id import SpeakerIdentifier
@@ -205,7 +216,7 @@ class Orchestrator:
 
         # Step 3: Text-to-Speech
         start = time.time()
-        audio_data = self.synthesizer.synthesize(response_text)
+        audio_data = self.synthesizer.synthesize(_strip_markdown(response_text))
         timings['tts'] = time.time() - start
 
         if not audio_data:

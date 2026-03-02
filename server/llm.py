@@ -1,18 +1,43 @@
 """LLM integration with Claude API for conversational AI."""
 import logging
-import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Optional, List, Dict, Tuple
 import anthropic
-
-_LLM_CALL_TIMEOUT = 45.0  # hard wall-clock timeout per API call (seconds)
-_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="llm_api")
 
 from datetime import datetime
 from server.config import CLAUDE_API_KEY, CLAUDE_MODEL, MAX_CONVERSATION_HISTORY
 from prompt import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
+
+_LLM_CALL_TIMEOUT = 45.0  # hard wall-clock timeout per API call (seconds)
+_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="llm_api")
+
+# Respond tool — LLM must always call this to deliver its final message.
+# await_followup is a schema-enforced bool; no [AWAIT] marker parsing needed.
+_RESPOND_TOOL = {
+    "name": "respond",
+    "description": (
+        "Send your spoken response to the user. Always call this last to deliver your final message. "
+        "Set await_followup=true ONLY when the user's next response is required to complete the "
+        "current task (e.g. a timer was requested but no duration was given). "
+        "Never set it true after completing a task, giving information, or saying 'anything else?'."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "text": {
+                "type": "string",
+                "description": "Your spoken response. Plain text only — no markdown, asterisks, or bullet points.",
+            },
+            "await_followup": {
+                "type": "boolean",
+                "description": "True only if the user must respond for the current task to be completed.",
+            },
+        },
+        "required": ["text", "await_followup"],
+    },
+}
 
 
 class LLM:
@@ -30,36 +55,22 @@ class LLM:
         """Build system prompt with current context injected."""
         now = datetime.now()
         time_context = f"Current: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
-
         if speaker:
             time_context += f" | Speaking: {speaker}"
-
         prompt = SYSTEM_PROMPT.format(persistent_memory=persistent_memory)
         prompt += f"\n<current_context>\n{time_context}\n</current_context>"
         return prompt
 
     @staticmethod
-    def _strip_await_marker(text: str) -> Tuple[str, bool]:
-        """
-        Detect and strip [AWAIT] marker from response.
-
-        Returns:
-            Tuple of (cleaned_text, await_followup)
-        """
-        await_pattern = r'\s*\[AWAIT\]\s*$'
-        if re.search(await_pattern, text, re.IGNORECASE):
-            cleaned = re.sub(await_pattern, '', text, flags=re.IGNORECASE).strip()
-            return (cleaned, True)
-        return (text, False)
-
-    @staticmethod
-    def _serialize_content(content) -> list:
-        """Convert Anthropic SDK content block objects to plain dicts for history storage."""
+    def _serialize_content(content, exclude_names: set = None) -> list:
+        """Convert Anthropic SDK content blocks to plain dicts. Optionally exclude tools by name."""
         result = []
         for block in content:
             if block.type == "text":
                 result.append({"type": "text", "text": block.text})
             elif block.type == "tool_use":
+                if exclude_names and block.name in exclude_names:
+                    continue
                 result.append({
                     "type": "tool_use",
                     "id": block.id,
@@ -71,8 +82,8 @@ class LLM:
     def _trim_history(self):
         """Trim history and ensure it starts with a plain-text user message.
 
-        A tool_result user message without its preceding tool_use assistant message
-        causes a Claude API validation error, so we walk past any such orphaned messages.
+        tool_result user messages without a preceding tool_use cause Claude API
+        validation errors, so we walk past any such orphaned messages.
         """
         if len(self.conversation_history) > self.max_history:
             self.conversation_history = self.conversation_history[-self.max_history:]
@@ -81,6 +92,36 @@ class LLM:
             if first["role"] == "user" and isinstance(first["content"], str):
                 break
             self.conversation_history.pop(0)
+
+    def _api_call(self, system_prompt: str, tools: list) -> Optional[object]:
+        """Single API call with hard wall-clock timeout."""
+        try:
+            future = _executor.submit(
+                self.client.messages.create,
+                model=self.model,
+                max_tokens=1024,
+                timeout=30.0,
+                system=system_prompt,
+                tools=tools,
+                tool_choice={"type": "any"},
+                messages=self.conversation_history,
+            )
+            response = future.result(timeout=_LLM_CALL_TIMEOUT)
+            self.last_usage["input_tokens"] += response.usage.input_tokens
+            self.last_usage["output_tokens"] += response.usage.output_tokens
+            return response
+        except FutureTimeoutError:
+            logger.error(f"LLM timed out after {_LLM_CALL_TIMEOUT}s (wall clock)")
+            return None
+        except anthropic.APIStatusError as e:
+            logger.error(f"LLM request failed ({e.status_code}): {e.message}")
+            return None
+        except anthropic.APIConnectionError as e:
+            logger.error(f"LLM connection error: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"LLM error: {e}")
+            return None
 
     def chat(
         self,
@@ -93,12 +134,8 @@ class LLM:
         """
         Send message to LLM and get response.
 
-        Args:
-            user_text: User's message
-            tools: List of available tools in Anthropic format
-            tool_executor: Callback function to execute tools (name, **kwargs) -> result
-            persistent_memory: Persistent memory to include in system prompt
-            speaker: Identified speaker name (if known)
+        The LLM must call respond(text, await_followup) as its final action.
+        await_followup is a schema-enforced bool — no text marker parsing.
 
         Returns:
             Tuple of (reply_text, await_followup) or None on failure
@@ -107,115 +144,79 @@ class LLM:
         self._trim_history()
 
         system_prompt = self._get_system_prompt(persistent_memory, speaker)
-
-        # Reset usage tracking for this interaction
         self.last_usage = {"input_tokens": 0, "output_tokens": 0}
 
-        # First LLM call
-        try:
-            logger.debug(f"Sending message to LLM: '{user_text}'")
-            future = _executor.submit(
-                self.client.messages.create,
-                model=self.model,
-                max_tokens=1024,
-                timeout=30.0,
-                system=system_prompt,
-                tools=tools,
-                messages=self.conversation_history,
-            )
-            response = future.result(timeout=_LLM_CALL_TIMEOUT)
-            self.last_usage["input_tokens"] += response.usage.input_tokens
-            self.last_usage["output_tokens"] += response.usage.output_tokens
-        except FutureTimeoutError:
-            logger.error(f"LLM request timed out after {_LLM_CALL_TIMEOUT}s (wall clock)")
-            return None
-        except anthropic.APIStatusError as e:
-            logger.error(f"LLM request failed ({e.status_code}): {e.message}")
-            return None
-        except anthropic.APIConnectionError as e:
-            logger.error(f"LLM connection error: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"LLM error: {e}")
-            return None
+        all_tools = tools + [_RESPOND_TOOL]
 
-        # Handle tool calls
-        if response.stop_reason == "tool_use":
-            tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
-            logger.info(f"LLM requested {len(tool_use_blocks)} tool call(s)")
-
-            # Store assistant turn with full content (text + tool_use blocks)
-            self.conversation_history.append({
-                "role": "assistant",
-                "content": self._serialize_content(response.content),
-            })
-
-            # Execute each tool and collect results
-            tool_results = []
-            for tool_use in tool_use_blocks:
-                tool_name = tool_use.name
-                tool_args = tool_use.input
-                logger.info(f"Executing tool: {tool_name}({tool_args})")
-                try:
-                    result = tool_executor(tool_name, **tool_args)
-                    logger.info(f"Tool '{tool_name}' returned: {result}")
-                except Exception as e:
-                    logger.error(f"Tool '{tool_name}' failed: {e}")
-                    result = f"Error executing {tool_name}: {e}"
-
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_use.id,
-                    "content": str(result),
-                })
-
-            # Tool results go back as a user message (Anthropic format)
-            self.conversation_history.append({
-                "role": "user",
-                "content": tool_results,
-            })
-
-            # Follow-up LLM call
-            try:
-                logger.debug("Sending follow-up message to LLM with tool results")
-                future = _executor.submit(
-                    self.client.messages.create,
-                    model=self.model,
-                    max_tokens=1024,
-                    timeout=30.0,
-                    system=system_prompt,
-                    tools=tools,
-                    messages=self.conversation_history,
-                )
-                response = future.result(timeout=_LLM_CALL_TIMEOUT)
-                self.last_usage["input_tokens"] += response.usage.input_tokens
-                self.last_usage["output_tokens"] += response.usage.output_tokens
-            except FutureTimeoutError:
-                logger.error(f"LLM follow-up timed out after {_LLM_CALL_TIMEOUT}s (wall clock)")
-                return None
-            except Exception as e:
-                logger.error(f"LLM follow-up failed: {e}")
+        for round_num in range(6):  # max 5 command rounds + 1 respond round
+            response = self._api_call(system_prompt, all_tools)
+            if response is None:
                 return None
 
-        # Extract text from final response
-        reply = "".join(block.text for block in response.content if block.type == "text").strip()
+            tool_calls = [b for b in response.content if b.type == "tool_use"]
 
-        if not reply:
-            logger.warning("LLM returned empty response")
-            return None
+            if not tool_calls:
+                # Shouldn't happen with tool_choice=any — fall back gracefully
+                logger.warning("LLM returned no tool calls despite tool_choice=any")
+                text = "".join(b.text for b in response.content if b.type == "text").strip()
+                if text:
+                    self.conversation_history.append({"role": "assistant", "content": text})
+                    self._trim_history()
+                    return (text, False)
+                return None
 
-        reply, await_followup = self._strip_await_marker(reply)
+            respond_call = next((b for b in tool_calls if b.name == "respond"), None)
+            command_calls = [b for b in tool_calls if b.name != "respond"]
 
-        if await_followup:
-            logger.info("LLM is awaiting follow-up response")
+            if respond_call and not command_calls:
+                # Clean respond-only turn: store as plain text, skip the tool_use block
+                text = respond_call.input.get("text", "").strip()
+                await_followup = bool(respond_call.input.get("await_followup", False))
+                if not text:
+                    logger.warning("respond called with empty text")
+                    return None
+                logger.info(f"LLM responded: '{text}' (await={await_followup})")
+                self.conversation_history.append({"role": "assistant", "content": text})
+                self._trim_history()
+                return (text, await_followup)
 
-        logger.info(f"LLM replied: '{reply}'")
+            if command_calls:
+                # Store assistant turn, excluding the respond tool_use to keep history clean
+                serialized = self._serialize_content(response.content, exclude_names={"respond"})
+                self.conversation_history.append({"role": "assistant", "content": serialized})
 
-        # Store final assistant turn
-        self.conversation_history.append({"role": "assistant", "content": reply})
-        self._trim_history()
+                tool_results = []
+                for call in command_calls:
+                    logger.info(f"Executing tool: {call.name}({call.input})")
+                    try:
+                        result = tool_executor(call.name, **call.input)
+                        logger.info(f"Tool '{call.name}' returned: {result}")
+                    except Exception as e:
+                        logger.error(f"Tool '{call.name}' failed: {e}")
+                        result = f"Error: {e}"
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": call.id,
+                        "content": str(result),
+                    })
 
-        return (reply, await_followup)
+                self.conversation_history.append({"role": "user", "content": tool_results})
+
+                if respond_call:
+                    # Commands + respond in same turn — take the respond result
+                    text = respond_call.input.get("text", "").strip()
+                    await_followup = bool(respond_call.input.get("await_followup", False))
+                    if text:
+                        logger.info(f"LLM responded: '{text}' (await={await_followup})")
+                        self.conversation_history.append({"role": "assistant", "content": text})
+                        self._trim_history()
+                        return (text, await_followup)
+                    # empty text with commands — fall through to next round
+
+                continue  # loop back for the respond call
+
+        logger.error("LLM did not call respond within the round limit")
+        return None
 
     def clear_history(self):
         """Clear conversation history."""
