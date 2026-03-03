@@ -116,6 +116,8 @@ class EventLoop:
                         logger.error(f"Failed to send timer alert to Pi: {timer.name}")
                 else:
                     logger.error(f"Failed to synthesize timer alert: {timer.name}")
+                    # Fallback: extra beep so user knows the timer fired even without speech
+                    self._pi_client.play_beep("alert")
             else:
                 logger.warning(f"No synthesizer or Pi client - cannot play timer alert: {timer.name}")
 
