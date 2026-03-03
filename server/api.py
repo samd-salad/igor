@@ -68,6 +68,7 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
     )
 
     from server.config import PI_HOST
+    from server.beeps import _DEFS as _BEEP_DEFS
     allowed_origins = [
         f"http://{PI_HOST}:8080",
         f"http://{PI_HOST}",
@@ -172,7 +173,7 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
         beep_type: str
         indicator_light: str | None = Field(None, max_length=100)
 
-    _VALID_BEEP_TYPES = {"start", "end", "done", "error", "alert"}
+    _VALID_BEEP_TYPES = set(_BEEP_DEFS.keys())
 
     @app.post("/api/sonos_beep")
     async def sonos_beep(request: _SonosBeepRequest, req: Request):
