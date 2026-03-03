@@ -146,7 +146,7 @@ class WeatherCommand(Command):
             precips = daily.get("precipitation_probability_max") or []
             high   = round(highs[0])   if highs   else None
             low    = round(lows[0])    if lows    else None
-            precip = precips[0]        if precips else None
+            precip = int(precips[0])   if precips else None
 
             result = f"{display_name}: {temp}°F, {description}, wind {wind} mph."
             if high is not None and low is not None:
