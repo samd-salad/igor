@@ -215,9 +215,16 @@ class LLM:
 
         all_tools = tools + [_RESPOND_TOOL]
 
+        commands_succeeded = False  # True after at least one round with no tool errors
+
         for round_num in range(6):  # max 5 command rounds + 1 respond round
             response = self._api_call(system_prompt, all_tools)
             if response is None:
+                if commands_succeeded:
+                    # Commands ran fine; only the respond round timed out.
+                    # Return a minimal confirmation so the action isn't silent.
+                    logger.warning("Respond round timed out after successful commands — returning 'Done.'")
+                    return ("Done.", False)
                 return None
 
             tool_calls = [b for b in response.content if b.type == "tool_use"]
@@ -283,6 +290,9 @@ class LLM:
                         tool_results.append({"type": "tool_result", "tool_use_id": call.id, "content": result_str})
 
                 self.conversation_history.append({"role": "user", "content": tool_results})
+
+                if not any_tool_error:
+                    commands_succeeded = True
 
                 # Short-circuit: if tools failed and there's no respond in this turn,
                 # skip the next LLM API call and surface the error immediately.
