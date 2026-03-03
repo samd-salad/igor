@@ -35,7 +35,7 @@ def _get_devices(force: bool = False) -> list:
         if not force and _cache and (now - _cache_time) < SONOS_DISCOVERY_CACHE_TTL:
             return list(_cache)
         try:
-            _cache = list(soco.discover() or [])
+            _cache = list(soco.discover(timeout=3) or [])
             _cache_time = now
             logger.debug(f"Sonos discovered {len(_cache)} device(s)")
         except Exception as e:
