@@ -13,6 +13,13 @@ def suppress(seconds: float):
         _suppress_until = max(_suppress_until, time.time() + seconds)
 
 
+def unsuppress():
+    """Clear any active suppression immediately."""
+    global _suppress_until
+    with _lock:
+        _suppress_until = 0.0
+
+
 def is_suppressed() -> bool:
     """Return True if wake word detection is currently suppressed."""
     with _lock:

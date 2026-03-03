@@ -33,7 +33,7 @@ from client.config import (
 from client.audio import Audio
 from client.wakeword import WakeWordDetector
 from client.pi_server import run_pi_server
-from client.suppress import is_suppressed
+from client.suppress import is_suppressed, unsuppress
 from shared.protocol import PROCESS_INTERACTION_ENDPOINT, SONOS_BEEP_ENDPOINT
 from shared.models import ProcessInteractionRequest
 from shared.utils import setup_logging, read_wav_file, encode_audio_base64, decode_audio_base64, get_timestamp
@@ -307,9 +307,7 @@ class PiClient:
                         # No start beep here — the chime embedded in the TTS audio is
                         # the listening signal; a second beep would double-trigger.
                         time.sleep(tts_dur + 2.0)
-                        if is_suppressed():
-                            logger.info("Wake word suppressed during follow-up — ending conversation")
-                            return
+                        unsuppress()  # TTS done; clear TV command suppression
                         depth += 1
                         is_followup = True
                         continue
@@ -317,6 +315,7 @@ class PiClient:
                         logger.info("Interaction complete")
                         tts_dur = result.get('tts_duration_seconds') or 5.0
                         time.sleep(tts_dur + 2.0)
+                        unsuppress()  # TTS done; clear TV command suppression
                         return
                 elif result.get('audio_base64'):
                     response_audio = decode_audio_base64(result['audio_base64'])
@@ -325,12 +324,10 @@ class PiClient:
                         self._beep("error")
                         return
 
+                    unsuppress()  # Audio playback done; clear any active suppression
                     if result.get('await_followup') and depth < self.MAX_FOLLOWUP_DEPTH:
                         logger.info("Bot is awaiting follow-up response")
                         time.sleep(0.3)
-                        if is_suppressed():
-                            logger.info("Wake word suppressed during follow-up — ending conversation")
-                            return
                         self._beep("start")
                         time.sleep(0.1)
                         depth += 1
