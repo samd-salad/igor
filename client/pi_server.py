@@ -127,6 +127,19 @@ def create_pi_app(audio_system, start_time: float) -> Flask:
                 status=Status.ERROR, error="Internal server error"
             ).model_dump()), 500
 
+    @app.route('/api/suppress_wakeword', methods=['POST'])
+    def suppress_wakeword():
+        try:
+            data = request.get_json() or {}
+            seconds = float(data.get('seconds', 20.0))
+            from client.suppress import suppress as _suppress
+            _suppress(seconds)
+            logger.info(f"Wake word suppressed for {seconds:.0f}s")
+            return jsonify({'status': 'ok', 'seconds': seconds})
+        except Exception as e:
+            logger.error(f"Error in suppress_wakeword: {e}")
+            return jsonify({'error': str(e)}), 500
+
     @app.route('/api/health', methods=['GET'])
     def health():
         try:

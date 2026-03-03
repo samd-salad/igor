@@ -6,7 +6,7 @@ Audio is automatically split into 3-second clips. Press Ctrl+C when done.
 
 Aim for at least 100 clips. More variety = fewer false positives.
 Good negative content:
-  - Normal conversation (anything except "Doctor Butts")
+  - Normal conversation (anything except "Igor")
   - TV / music / podcast playing
   - Background noise, fans, kitchen sounds
   - Other people talking
@@ -36,7 +36,7 @@ def main():
     print(f"  Clips saved: {existing} existing")
     print(f"  Recording {CLIP_SECONDS}-second clips continuously.")
     print(f"  Just talk, play TV/music, or make noise. Press Ctrl+C to stop.\n")
-    print(f"  DO NOT say 'Doctor Butts' during this recording.\n")
+    print(f"  DO NOT say 'Igor' during this recording.\n")
 
     p = pyaudio.PyAudio()
 

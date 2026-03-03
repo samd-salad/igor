@@ -84,6 +84,7 @@ class Orchestrator:
         self._benchmark_lock = threading.Lock()
         # Last known TV playback state — kept fresh by background poller
         self._last_tv_state: str = "unknown"
+        self._tv_state_lock = threading.Lock()
         self._tv_poll_thread = threading.Thread(target=self._poll_tv_state, daemon=True, name="TVStatePoll")
         self._tv_poll_thread.start()
 
@@ -121,6 +122,12 @@ class Orchestrator:
         timings = {}
         commands_executed = []
 
+        # Snapshot TV state once — all routing decisions in this interaction use the
+        # same state so LLM context, await_followup override, and Sonos routing are
+        # internally consistent even if the poller fires mid-interaction.
+        with self._tv_state_lock:
+            tv_state = self._last_tv_state
+
         # Step 1: Speech-to-Text
         logger.info(f"Processing interaction (wake word: {wake_word})")
 
@@ -138,6 +145,29 @@ class Orchestrator:
                 'error': 'Audio file too large'
             }
 
+        # Step 1b: Start speaker ID immediately in background — runs concurrently with STT
+        _speaker_result: Dict = {}
+
+        def _run_speaker_id_task():
+            try:
+                t0 = time.time()
+                audio_array = self._audio_bytes_to_numpy(audio_bytes)
+                if audio_array is not None:
+                    result = self.speaker_identifier.identify(audio_array, sample_rate=16000)
+                    _speaker_result['name'] = result.name if result.is_known else None
+                    _speaker_result['confidence'] = result.confidence
+                    _speaker_result['duration'] = time.time() - t0
+            except Exception as e:
+                logger.warning(f"Speaker identification failed: {e}")
+
+        speaker_thread = None
+        if self.speaker_identifier:
+            speaker_thread = threading.Thread(
+                target=_run_speaker_id_task, daemon=True, name="SpeakerID"
+            )
+            speaker_thread.start()
+
+        # Step 1: STT (runs concurrently with speaker ID above)
         start = time.time()
         transcription = self.transcriber.transcribe_bytes(audio_bytes)
         timings['stt'] = time.time() - start
@@ -163,25 +193,20 @@ class Orchestrator:
         logger.info(f"Transcribed: '{transcription[:100]}{'...' if len(transcription) > 100 else ''}'")
         self._log_benchmark('stt', timings['stt'], transcription)
 
-        # Step 1b: Speaker Identification (optional, runs in parallel with STT conceptually)
+        # Collect speaker ID result (STT takes longer, so this is usually already done)
         speaker_name = None
         speaker_confidence = 0.0
-        if self.speaker_identifier:
-            try:
-                start_speaker = time.time()
-                # Convert audio bytes to numpy for speaker ID
-                audio_array = self._audio_bytes_to_numpy(audio_bytes)
-                if audio_array is not None:
-                    result = self.speaker_identifier.identify(audio_array, sample_rate=16000)
-                    speaker_name = result.name if result.is_known else None
-                    speaker_confidence = result.confidence
-                    timings['speaker_id'] = time.time() - start_speaker
-                    if speaker_name:
-                        logger.info(f"Identified speaker: {speaker_name} ({speaker_confidence:.0%})")
-                    else:
-                        logger.debug(f"Unknown speaker (best match: {result.confidence:.0%})")
-            except Exception as e:
-                logger.warning(f"Speaker identification failed: {e}")
+        if speaker_thread:
+            speaker_thread.join(timeout=2.0)
+            if _speaker_result:
+                speaker_name = _speaker_result.get('name')
+                speaker_confidence = _speaker_result.get('confidence', 0.0)
+                if 'duration' in _speaker_result:
+                    timings['speaker_id'] = _speaker_result['duration']
+                if speaker_name:
+                    logger.info(f"Identified speaker: {speaker_name} ({speaker_confidence:.0%})")
+                else:
+                    logger.debug(f"Unknown speaker (best match: {speaker_confidence:.0%})")
 
         # Step 2: LLM Processing
         start = time.time()
@@ -194,13 +219,22 @@ class Orchestrator:
             commands_executed.append(name)
             return self._execute_command(name, prefer_sonos=prefer_sonos, **kwargs)
 
+        patterns = get_patterns()
+        if tv_state == "playing":
+            tv_note = (
+                "TV is currently playing audio. "
+                "This request may be ambient speech from the room — "
+                "respond briefly and do not save memories from this interaction."
+            )
+            patterns = tv_note + ("\n" + patterns if patterns else "")
+
         llm_result = self.llm.chat(
             user_text=transcription,
             tools=tools,
             tool_executor=tool_executor,
             persistent_memory=persistent_memory,
             speaker=speaker_name,
-            patterns=get_patterns(),
+            patterns=patterns,
         )
         timings['llm'] = time.time() - start
 
@@ -219,7 +253,13 @@ class Orchestrator:
 
         response_text, await_followup = llm_result
 
-        if not await_followup:
+        # When TV is playing, block follow-up mode — prevents a false trigger
+        # from spawning a second listening cycle while TV audio is still running.
+        if tv_state == "playing" and await_followup:
+            logger.info("TV is playing — disabling await_followup to prevent follow-up loop")
+            await_followup = False
+
+        if not await_followup and tv_state != "playing":
             _snap = self.llm.get_history_snapshot()
             threading.Thread(
                 target=self._run_session_summarizer,
@@ -270,8 +310,8 @@ class Orchestrator:
             if self._is_critical_response(response_text, commands_executed, await_followup):
                 tts_routed = self._route_tts_to_sonos(audio_data, await_followup=await_followup)
             else:
-                # Use cached TV state from background poller (avoids blocking ADB call in hot path)
-                if self._last_tv_state == "playing":
+                # Use snapshotted TV state (consistent with LLM context and await decision above)
+                if tv_state == "playing":
                     logger.info("TV is playing — suppressing non-critical Sonos TTS")
                     tts_routed = True  # tell client to skip local playback too
                 else:
@@ -284,8 +324,13 @@ class Orchestrator:
 
         # Calculate total time (exclude non-time fields like llm_cost)
         timings['total'] = timings.get('stt', 0) + timings.get('llm', 0) + timings.get('tts', 0)
-        # Log with detailed statistics (pass pre-logged TTS stats to avoid race)
-        self._log_interaction_stats(timings, transcription, response_text, _tts_stats_pre)
+        # Log stats table in background — pure informational, doesn't affect response
+        threading.Thread(
+            target=self._log_interaction_stats,
+            args=(timings.copy(), transcription, response_text, _tts_stats_pre),
+            daemon=True,
+            name="BenchmarkStats",
+        ).start()
 
         return {
             'transcription': transcription,
@@ -466,7 +511,9 @@ class Orchestrator:
         if not SONOS_TTS_OUTPUT:
             return False
         try:
-            if indicator_light and self._last_tv_state == "playing":
+            with self._tv_state_lock:
+                tv_playing = self._last_tv_state == "playing"
+            if indicator_light and tv_playing:
                 threading.Thread(
                     target=self._flash_light_indicator,
                     args=(beep_type, indicator_light),
@@ -483,7 +530,9 @@ class Orchestrator:
         """Background thread: polls TV playback state every 5s to keep _last_tv_state fresh."""
         while True:
             try:
-                self._last_tv_state = _get_tv_playback_state()
+                state = _get_tv_playback_state()
+                with self._tv_state_lock:
+                    self._last_tv_state = state
             except Exception as e:
                 logger.debug(f"TV state poll failed: {e}")
             time.sleep(5)
@@ -624,6 +673,13 @@ class Orchestrator:
         'adjust_volume': 'adjust_sonos_volume',
     }
 
+    # TV commands that warrant suppressing the wake word after execution
+    # (TV audio starts up and would cause immediate false triggers)
+    _TV_COMMANDS = {
+        'tv_power', 'tv_launch', 'tv_playback', 'tv_skip',
+        'tv_search_youtube', 'tv_key', 'tv_adb_connect',
+    }
+
     def _execute_command(self, name: str, prefer_sonos: bool = False, **kwargs) -> str:
         """
         Execute a command with Pi callback support.
@@ -638,17 +694,27 @@ class Orchestrator:
         if name in ('set_volume', 'get_volume'):
             logger.info(f"Routing hardware command '{name}' to Pi")
             result = self.pi_client.hardware_control(name, kwargs)
-            log_command(name)
+            threading.Thread(target=log_command, args=(name,), daemon=True).start()
             return result if result else f"Failed to execute {name} on Pi"
 
         # All other commands execute locally
         try:
             result = commands.execute(name, **kwargs)
-            log_command(name)
-            return result
+            threading.Thread(target=log_command, args=(name,), daemon=True).start()
         except Exception as e:
             logger.error(f"Command '{name}' failed: {e}")
             return f"Error: {e}"
+
+        # After TV commands, suppress wake word on Pi so startup audio doesn't retrigger
+        if name in self._TV_COMMANDS:
+            threading.Thread(
+                target=self.pi_client.suppress_wakeword,
+                kwargs={"seconds": 20.0},
+                daemon=True,
+                name="SuppressWakeword",
+            ).start()
+
+        return result
 
     def _log_benchmark(self, stage: str, duration: float, transcription: Optional[str] = None, word_count: Optional[int] = None, cost: Optional[float] = None):
         """Log performance benchmark to CSV."""

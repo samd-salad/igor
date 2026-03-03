@@ -5,7 +5,7 @@ Workflow:
   1. Pi:   python record_samples.py           → wakeword_samples/positive/*.wav
   2. PC:   scp or rsync samples to PC
   3. PC:   python onnx_models/wakeword_creation/train_wakeword.py
-  4. Pi:   scp oww_models/doctor_butts.onnx to Pi's oww_models/
+  4. Pi:   scp oww_models/igor.onnx to Pi's oww_models/
 
 Dependencies (install once on PC):
   pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -35,11 +35,11 @@ ROOT        = Path(__file__).parent.parent.parent
 POSITIVE_DIR = ROOT / "wakeword_samples" / "positive"
 NEGATIVE_DIR = ROOT / "wakeword_samples" / "negative"  # optional real negatives
 OUTPUT_DIR  = ROOT / "oww_models"
-MODEL_NAME  = "doctor_butts"   # becomes the key in model.predict() results
+MODEL_NAME  = "igor"   # becomes the key in model.predict() results
 
 SAMPLE_RATE  = 16000
 CLIP_SAMPLES = SAMPLE_RATE * 3  # 3-second clips (pad/trim all audio to this)
-N_EPOCHS     = 300
+N_EPOCHS     = 50
 BATCH_SIZE   = 64
 LAYER_DIM    = 64   # increased from 32 — more capacity to discriminate real-world audio
 
@@ -204,8 +204,8 @@ def main():
     # ------------------------------------------------------------------
     # Extract embeddings via OWW frozen backbone
     # ------------------------------------------------------------------
-    print("\nExtracting embeddings (downloading base models ~50 MB on first run)...")
-    _download_backbone_models()
+    # print("\nExtracting embeddings (downloading base models ~50 MB on first run)...")
+    # _download_backbone_models()
     feat = AudioFeatures(sr=SAMPLE_RATE, ncpu=4, inference_framework="onnx")
 
     pos_emb = feat.embed_clips(pos_audio, batch_size=64)   # (N, 16, 96)
@@ -227,20 +227,27 @@ def main():
         return np.stack(wins).astype(np.float32)
 
     def make_windows_split(emb: np.ndarray, paths: list) -> np.ndarray:
-        """Like make_windows but only uses the half of each clip where the wake word is:
-        - auto_*.wav: rolling pre-detection buffer → wake word at the END → tail half
-        - sample_*.wav / others: user speaks immediately after prompt → wake word at the START → head half
+        """Like make_windows but skips the silence-heavy start of auto-saved clips:
+        - auto_*.wav: 2.5s pre-detection buffer (~23 frames) + wake word at end (~5 frames)
+                      → only last N windows overlap with the wake word region
+        - sample_*.wav / others: user speaks throughout → use all windows
         """
+        N_WINDOWS = 4  # last 4 windows of auto_* clips all partially overlap wake word
         wins = []
         for clip, path in zip(emb, paths):
             n = len(clip)
+            max_start = n - WINDOW  # last valid start index (inclusive)
+            if max_start < 0:
+                continue
             name = Path(path).name
             if name.startswith("auto_") or name.startswith("dup_auto_"):
-                start_from = n // 2   # wake word is at the end
-                end_at = n - WINDOW + 1
+                # Wake word is at the end — take the last N_WINDOWS windows
+                end_at = max_start + 1
+                start_from = max(0, end_at - N_WINDOWS)
             else:
-                start_from = 0        # wake word is at the start
-                end_at = max(WINDOW, n // 2) - WINDOW + 1
+                # Directly recorded — wake word present throughout, use all windows
+                start_from = 0
+                end_at = max_start + 1
             for start in range(start_from, end_at):
                 wins.append(clip[start:start + WINDOW])
         return np.stack(wins).astype(np.float32) if wins else np.empty((0, WINDOW, 96), dtype=np.float32)
@@ -322,6 +329,24 @@ def main():
         print("  Warning: positive scores are low — consider recording more samples.")
     if neg_scores.max() > 0.5:
         print("  Warning: some negatives score high — consider adding real negative recordings.")
+        # Identify which negative FILES are scoring high (per-clip max score)
+        if NEGATIVE_DIR.exists():
+            neg_files = sorted(NEGATIVE_DIR.glob("*.wav"))
+            if neg_files:
+                print("\n  Top-scoring negative files (possible contamination):")
+                feat2 = AudioFeatures(sr=SAMPLE_RATE, ncpu=1, inference_framework="onnx")
+                for path in neg_files:
+                    try:
+                        audio = pad_or_trim(load_wav(path), CLIP_SAMPLES)
+                        emb = feat2.embed_clips(np.stack([audio]), batch_size=1)
+                        wins = make_windows(emb)
+                        with torch.no_grad():
+                            scores = inference_model(torch.from_numpy(wins)).squeeze().numpy()
+                        peak = float(np.atleast_1d(scores).max())
+                        if peak > 0.5:
+                            print(f"    {peak:.3f}  {path.name}")
+                    except Exception:
+                        pass
 
     # ------------------------------------------------------------------
     # Export to ONNX

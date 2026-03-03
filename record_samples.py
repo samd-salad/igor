@@ -67,7 +67,7 @@ def main():
     count = existing
 
     print("=" * 60)
-    print("  Wake word recorder — 'Doctor Butts'")
+    print("  Wake word recorder — 'Igor'")
     print("=" * 60)
     print(f"  Goal: {GOAL} samples | Existing: {existing}")
     print(f"  Each recording is {DURATION}s — say the phrase once per recording")

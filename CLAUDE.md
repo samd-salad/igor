@@ -31,9 +31,10 @@ Pi (client/)                         PC (server/)
 OpenWakeWord wake word detection →   /api/process_interaction
 PyAudio VAD recording                  Whisper STT
 Flask callback server           ←      Claude LLM + tools
-  /api/play_audio                       Piper TTS
+  /api/play_audio                       Kokoro TTS
   /api/hardware_control          →    /api/play_audio (timer alerts)
   /api/play_beep                 →    /api/hardware_control (volume RPC)
+  /api/suppress_wakeword         →    (after TV commands)
 ```
 
 ## Directory Structure
@@ -158,8 +159,44 @@ No other API keys needed. Weather uses Open-Meteo (free, no account). Smart home
 
 - History capped at `MAX_CONVERSATION_HISTORY` (10) messages
 - `_trim_history()` ensures history always starts with a plain-text user message — tool_result orphans are dropped to avoid Claude API role errors
-- Follow-up mode: LLM appends `[AWAIT]` to signal the client to listen again without a wake word
+- `await_followup` bool on the respond tool: client listens again without wake word
 - Persistent memory injected into system prompt from `data/memory.json`
+- Session summarizer runs after each non-follow-up turn to auto-save facts to memory (skipped when TV is playing)
+- History overflow compresses dropped messages into `_history_summary` injected as `<prior_context>`
+
+## Interaction Flows
+
+### Normal flow (wake word → response)
+1. Pi detects wake word (`OWW_THRESHOLD` × `OWW_TRIGGER_FRAMES` consecutive frames)
+2. RMS energy filter rejects low-energy detections (TV/room audio)
+3. `_beep("start")` → Sonos `/api/sonos_beep` → light flash if TV playing, else Sonos beep
+4. VAD records until silence, sends WAV to server `/api/process_interaction`
+5. `_beep("end")` on recording complete
+6. Server: STT → LLM (with tools) → Kokoro TTS → response back
+7. Pi plays local audio **or** server routes to Sonos (if `prefer_sonos_output=True`)
+8. If `await_followup=True`: client sleeps (tts_dur + 2s), checks suppression, listens again
+
+### Beep routing chain (USE_SONOS_OUTPUT=True)
+```
+_beep(type) → _sonos_beep(type) → POST /api/sonos_beep
+  → play_sonos_beep(type, indicator_light)
+    → if TV playing AND indicator_light set: LIFX flash (silent)
+    → else: Sonos play_uri beep WAV
+```
+**Rule**: When TV is playing, ALL audio indicators go through LIFX light flash. No sound on Sonos.
+
+### TV-playing path
+- `_last_tv_state` is polled every 5s via ADB (`dumpsys media_session`); up to 5s stale
+- When playing: non-critical TTS suppressed (tts_routed=True, no audio); `await_followup` forced False; session summarizer skipped; LLM context includes TV note
+- After any TV command: `suppress_wakeword(20s)` sent to Pi → `client/suppress.py` blocks detection
+
+### Wake word suppression
+- Suppression state lives in `client/suppress.py` (module-level, thread-safe)
+- Pi Flask server at `/api/suppress_wakeword` sets it; checked at top of `_handle_interaction()` and inside detection loop
+- Follow-up paths also check suppression before opening the mic
+
+### Error beep rule
+`self._beep("error")` everywhere (never `self.audio.beep_error()` directly) so routing respects `USE_SONOS_OUTPUT` and TV state.
 
 ## Wake Word (OpenWakeWord)
 
@@ -172,7 +209,7 @@ No other API keys needed. Weather uses Open-Meteo (free, no account). Smart home
   1. Pi: `python record_samples.py`  → `wakeword_samples/positive/*.wav`
   2. PC: `scp -r user@<PI_IP>:~/smart_assistant/wakeword_samples/ wakeword_samples/`
   3. PC: `python onnx_models/wakeword_creation/train_wakeword.py`
-  4. Pi: `scp oww_models/doctor_butts.onnx pi:smart_assistant/oww_models/`
+  4. Pi: `scp oww_models/igor.onnx pi:smart_assistant/oww_models/`
 
 ## Todo
 

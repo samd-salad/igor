@@ -3,6 +3,7 @@ import colorsys
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from .base import Command
 from ._utils import parse_amount, parse_direction_updown
@@ -22,6 +23,8 @@ _lan = None
 _cache: list = []
 _cache_time: float = 0.0
 _cache_lock = threading.Lock()
+# Thread pool for parallel UDP commands (one thread per bulb, max 16)
+_executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="lifx")
 
 NAMED_COLORS = {
     "red":    [0,      65535, 65535, 3500],
@@ -121,7 +124,7 @@ def _hex_to_hsbk(hex_str: str, kelvin: int = 3500) -> list | None:
 
 
 def _apply_to_targets(label: str, action, action_desc: str) -> str:
-    """Resolve bulbs, apply action to each, return status string."""
+    """Resolve bulbs, apply action to each in parallel, return status string."""
     if not _LIFXLAN_AVAILABLE:
         return "LIFX unavailable: lifxlan not installed"
     targets = _resolve_target(label)
@@ -129,11 +132,18 @@ def _apply_to_targets(label: str, action, action_desc: str) -> str:
         desc = f"'{label}'" if label else "any LIFX bulbs"
         return f"No lights found for {desc}"
     errors = []
-    for light in targets:
+    if len(targets) == 1:
         try:
-            action(light)
+            action(targets[0])
         except Exception as e:
             errors.append(str(e))
+    else:
+        futures = [(light, _executor.submit(action, light)) for light in targets]
+        for _, fut in futures:
+            try:
+                fut.result(timeout=5.0)
+            except Exception as e:
+                errors.append(str(e))
     bulb_desc = f"'{label}'" if label else f"all {len(targets)} bulb(s)"
     if errors:
         return f"{action_desc} {bulb_desc} — {len(errors)} error(s): {errors[0]}"
@@ -491,17 +501,27 @@ class SetSceneCommand(Command):
         if not lights:
             return "No lights found"
 
-        applied = []
+        # Build (light, label, settings) tasks first (label lookup is usually cached)
+        tasks = []
         for light in lights:
             label = _safe_label(light)
             settings = scene_config.get(label) or scene_config.get("*")
-            if settings is None:
-                continue
+            if settings is not None:
+                tasks.append((light, label, settings))
+
+        if not tasks:
+            return f"No lights matched scene '{matched_name}'"
+
+        applied = []
+        applied_lock = threading.Lock()
+
+        def _apply_one(light, label, settings):
             try:
                 if settings.get("power") is False:
                     light.set_power(0, duration=500, rapid=False)
-                    applied.append(f"{label} off")
-                    continue
+                    with applied_lock:
+                        applied.append(f"{label} off")
+                    return
                 light.set_power(65535, duration=0, rapid=True)
                 if "kelvin" in settings or "brightness" in settings:
                     hsbk = [0, 0, 65535, 3500]
@@ -510,9 +530,20 @@ class SetSceneCommand(Command):
                     if "kelvin" in settings:
                         hsbk[3] = settings["kelvin"]
                     light.set_color(hsbk, duration=1000)
-                applied.append(label)
+                with applied_lock:
+                    applied.append(label)
             except Exception as e:
                 logger.warning(f"Scene '{matched_name}' failed on {label}: {e}")
+
+        if len(tasks) == 1:
+            _apply_one(*tasks[0])
+        else:
+            futures = [_executor.submit(_apply_one, *t) for t in tasks]
+            for f in futures:
+                try:
+                    f.result(timeout=5.0)
+                except Exception as e:
+                    logger.warning(f"Scene task exception: {e}")
 
         if not applied:
             return f"No lights matched scene '{matched_name}'"

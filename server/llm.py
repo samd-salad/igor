@@ -1,5 +1,6 @@
 """LLM integration with Claude API for conversational AI."""
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Optional, List, Dict, Tuple
 import anthropic
@@ -10,7 +11,7 @@ from prompt import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
-_LLM_CALL_TIMEOUT = 15.0  # hard wall-clock timeout per API call (seconds)
+_LLM_CALL_TIMEOUT = 22.0  # hard wall-clock timeout per API call (seconds)
 
 _ERROR_FRAGMENTS = (
     'not found', 'not available', 'not connected', 'not installed',
@@ -61,11 +62,12 @@ class LLM:
         self.conversation_history: List[Dict] = []
         self.last_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
         self._history_summary: str = ""
+        self._summary_lock = threading.Lock()  # guards _history_summary across threads
         logger.info(f"LLM initialized: Claude API ({model})")
 
     def _compress_dropped_messages(self, messages: list):
         """Summarize messages being dropped from history into _history_summary.
-        Fires synchronously but only when history overflows (~every 10+ exchanges).
+        Runs in a background thread — summary is ready for the next interaction.
         """
         lines = []
         for msg in messages:
@@ -76,7 +78,9 @@ class LLM:
         if not lines:
             return
 
-        prior = f"Prior summary:\n{self._history_summary}\n\n" if self._history_summary else ""
+        with self._summary_lock:
+            prior_summary = self._history_summary
+        prior = f"Prior summary:\n{prior_summary}\n\n" if prior_summary else ""
         transcript = "\n".join(lines)
         try:
             future = _executor.submit(
@@ -90,7 +94,8 @@ class LLM:
             response = future.result(timeout=20.0)
             for block in response.content:
                 if block.type == "text":
-                    self._history_summary = block.text.strip()
+                    with self._summary_lock:
+                        self._history_summary = block.text.strip()
                     logger.debug(f"History compressed: {self._history_summary[:80]}...")
                     break
         except Exception as e:
@@ -104,8 +109,10 @@ class LLM:
             time_context += f" | Speaking: {speaker}"
         prompt = SYSTEM_PROMPT.format(persistent_memory=persistent_memory)
         prompt += f"\n<current_context>\n{time_context}\n</current_context>"
-        if self._history_summary:
-            prompt += f"\n<prior_context>\n{self._history_summary}\n</prior_context>"
+        with self._summary_lock:
+            summary = self._history_summary
+        if summary:
+            prompt += f"\n<prior_context>\n{summary}\n</prior_context>"
         if patterns:
             prompt += f"\n<observed_patterns>\n{patterns}\n</observed_patterns>"
         return prompt
@@ -131,7 +138,8 @@ class LLM:
     def _trim_history(self):
         """Trim history and ensure it starts with a plain-text user message.
 
-        When messages are dropped, compresses them into _history_summary so
+        When messages are dropped, fires history compression in a background
+        thread so it never blocks the current response. Summary will be ready
         context isn't lost. tool_result orphans are still dropped to prevent
         Claude API role validation errors.
         """
@@ -139,7 +147,12 @@ class LLM:
             to_drop = self.conversation_history[:-self.max_history]
             self.conversation_history = self.conversation_history[-self.max_history:]
             if to_drop:
-                self._compress_dropped_messages(to_drop)
+                threading.Thread(
+                    target=self._compress_dropped_messages,
+                    args=(to_drop,),
+                    daemon=True,
+                    name="HistoryCompressor",
+                ).start()
         while self.conversation_history:
             first = self.conversation_history[0]
             if first["role"] == "user" and isinstance(first["content"], str):
@@ -153,7 +166,7 @@ class LLM:
                 self.client.messages.create,
                 model=self.model,
                 max_tokens=1024,
-                timeout=12.0,
+                timeout=18.0,
                 system=system_prompt,
                 tools=tools,
                 tool_choice={"type": "any"},
@@ -239,24 +252,35 @@ class LLM:
                 serialized = self._serialize_content(response.content, exclude_names={"respond"})
                 self.conversation_history.append({"role": "assistant", "content": serialized})
 
-                tool_results = []
-                any_tool_error = False
-                for call in command_calls:
+                def _exec_call(call):
                     logger.info(f"Executing tool: {call.name}({call.input})")
                     try:
                         result = tool_executor(call.name, **call.input)
                         logger.info(f"Tool '{call.name}' returned: {result}")
-                        if _is_tool_error(result):
-                            any_tool_error = True
+                        return str(result), _is_tool_error(result)
                     except Exception as e:
                         logger.error(f"Tool '{call.name}' failed: {e}")
-                        result = f"Error: {e}"
+                        return f"Error: {e}", True
+
+                any_tool_error = False
+                if len(command_calls) == 1:
+                    result_str, is_err = _exec_call(command_calls[0])
+                    if is_err:
                         any_tool_error = True
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": call.id,
-                        "content": str(result),
-                    })
+                    tool_results = [{"type": "tool_result", "tool_use_id": command_calls[0].id, "content": result_str}]
+                else:
+                    # Multiple independent commands — execute in parallel, preserve order
+                    futures = [(call, _executor.submit(_exec_call, call)) for call in command_calls]
+                    tool_results = []
+                    for call, fut in futures:
+                        try:
+                            result_str, is_err = fut.result(timeout=30.0)
+                        except Exception as e:
+                            logger.error(f"Tool '{call.name}' executor error: {e}")
+                            result_str, is_err = f"Error: {e}", True
+                        if is_err:
+                            any_tool_error = True
+                        tool_results.append({"type": "tool_result", "tool_use_id": call.id, "content": result_str})
 
                 self.conversation_history.append({"role": "user", "content": tool_results})
 

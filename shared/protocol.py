@@ -9,6 +9,7 @@ SONOS_BEEP_ENDPOINT = "/api/sonos_beep"
 PLAY_AUDIO_ENDPOINT = "/api/play_audio"
 HARDWARE_CONTROL_ENDPOINT = "/api/hardware_control"
 PLAY_BEEP_ENDPOINT = "/api/play_beep"
+SUPPRESS_WAKEWORD_ENDPOINT = "/api/suppress_wakeword"
 CLIENT_HEALTH_ENDPOINT = "/api/health"
 
 # Default timeout for Pi callback HTTP requests

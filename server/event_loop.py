@@ -71,9 +71,15 @@ class EventLoop:
                     fired.append(timer)
                     del self._timers[name]
 
-        # Fire timers outside of lock to avoid blocking
+        # Fire each timer in its own thread — TTS synthesis + HTTP to Pi would
+        # otherwise block the event loop for 1-2s per timer.
         for timer in fired:
-            self._fire_timer(timer)
+            threading.Thread(
+                target=self._fire_timer,
+                args=(timer,),
+                daemon=True,
+                name=f"Timer-{timer.name}",
+            ).start()
 
     def _fire_timer(self, timer: Timer):
         """

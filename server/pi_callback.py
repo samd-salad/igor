@@ -3,7 +3,7 @@ import logging
 import requests
 from typing import Optional
 
-from shared.protocol import PLAY_AUDIO_ENDPOINT, HARDWARE_CONTROL_ENDPOINT, PLAY_BEEP_ENDPOINT, REQUEST_TIMEOUT
+from shared.protocol import PLAY_AUDIO_ENDPOINT, HARDWARE_CONTROL_ENDPOINT, PLAY_BEEP_ENDPOINT, SUPPRESS_WAKEWORD_ENDPOINT, REQUEST_TIMEOUT
 from shared.models import PlayAudioRequest, HardwareControlRequest, PlayBeepRequest, BeepType, Priority, Status
 from shared.utils import encode_audio_base64
 
@@ -138,6 +138,25 @@ class PiCallbackClient:
             return False
         except Exception as e:
             logger.error(f"Unexpected error sending beep: {e}")
+            return False
+
+    def suppress_wakeword(self, seconds: float = 20.0) -> bool:
+        """
+        Tell the Pi to suppress wake word detection for `seconds` seconds.
+
+        Called after TV commands so Netflix startup / content audio doesn't
+        trigger a false detection while the assistant is clearly done.
+        """
+        try:
+            response = requests.post(
+                f"{self.pi_base_url}{SUPPRESS_WAKEWORD_ENDPOINT}",
+                json={"seconds": seconds},
+                timeout=2.0,
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.debug(f"suppress_wakeword failed (non-critical): {e}")
             return False
 
     def check_health(self) -> bool:

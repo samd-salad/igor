@@ -33,6 +33,7 @@ from client.config import (
 from client.audio import Audio
 from client.wakeword import WakeWordDetector
 from client.pi_server import run_pi_server
+from client.suppress import is_suppressed
 from shared.protocol import PROCESS_INTERACTION_ENDPOINT, SONOS_BEEP_ENDPOINT
 from shared.models import ProcessInteractionRequest
 from shared.utils import setup_logging, read_wav_file, encode_audio_base64, decode_audio_base64, get_timestamp
@@ -110,7 +111,7 @@ class PiClient:
 
                     if self.consecutive_errors >= self.max_consecutive_errors:
                         logger.error("Too many consecutive errors, restarting audio...")
-                        self.audio.beep_error()
+                        self._beep("error")
                         self.audio.cleanup()
                         time.sleep(2)
                         if not self.audio.initialize():
@@ -152,6 +153,11 @@ class PiClient:
 
     def _handle_interaction(self):
         """Handle a single voice interaction (may include follow-ups)."""
+        if is_suppressed():
+            logger.debug("Wake word suppressed — skipping detection cycle")
+            time.sleep(0.1)
+            return
+
         logger.debug("Listening for wake word...")
 
         # Rolling buffer: keeps the last N chunks so we can save the detection audio
@@ -175,6 +181,10 @@ class PiClient:
             consecutive: dict[str, int] = {}
             while not wake_word:
                 audio_bytes = stream.read(chunk_bytes, exception_on_overflow=False)
+                if is_suppressed():
+                    logger.info("Wake word suppressed mid-detection — resetting")
+                    self.wakeword_detector.reset()
+                    return
                 if audio_buffer is not None:
                     audio_buffer.append(audio_bytes)
                 predictions = self.wakeword_detector.predict(audio_bytes)
@@ -274,7 +284,7 @@ class PiClient:
                     result = response.json()
                 except Exception:
                     logger.error("Server returned invalid JSON response")
-                    self.audio.beep_error()
+                    self._beep("error")
                     return
 
                 transcription = result.get('transcription', '')
@@ -282,7 +292,7 @@ class PiClient:
 
                 if result.get('error'):
                     logger.error(f"Server reported error: {result['error']}")
-                    self.audio.beep_error()
+                    self._beep("error")
                     return
 
                 if result.get('tts_routed'):
@@ -294,9 +304,12 @@ class PiClient:
                         # +2.0s: Sonos startup latency (TRANSITIONING→PLAYING) means
                         # audio hasn't started yet when server responds; without this
                         # margin the follow-up listen window opens before speech ends.
+                        # No start beep here — the chime embedded in the TTS audio is
+                        # the listening signal; a second beep would double-trigger.
                         time.sleep(tts_dur + 2.0)
-                        self._beep("start")
-                        time.sleep(0.1)
+                        if is_suppressed():
+                            logger.info("Wake word suppressed during follow-up — ending conversation")
+                            return
                         depth += 1
                         is_followup = True
                         continue
@@ -315,6 +328,9 @@ class PiClient:
                     if result.get('await_followup') and depth < self.MAX_FOLLOWUP_DEPTH:
                         logger.info("Bot is awaiting follow-up response")
                         time.sleep(0.3)
+                        if is_suppressed():
+                            logger.info("Wake word suppressed during follow-up — ending conversation")
+                            return
                         self._beep("start")
                         time.sleep(0.1)
                         depth += 1
@@ -330,19 +346,19 @@ class PiClient:
 
             except requests.Timeout:
                 logger.error(f"Server request timed out after {REQUEST_TIMEOUT}s")
-                self.audio.beep_error()
+                self._beep("error")
                 return
             except requests.ConnectionError:
                 logger.error(f"Cannot connect to server at {self.server_url}")
-                self.audio.beep_error()
+                self._beep("error")
                 return
             except requests.RequestException as e:
                 logger.error(f"Server request failed: {e}")
-                self.audio.beep_error()
+                self._beep("error")
                 return
             except Exception as e:
                 logger.error(f"Unexpected error during interaction: {e}", exc_info=True)
-                self.audio.beep_error()
+                self._beep("error")
                 return
 
 
