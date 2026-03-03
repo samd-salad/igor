@@ -11,7 +11,7 @@ from prompt import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
-_LLM_CALL_TIMEOUT = 22.0  # hard wall-clock timeout per API call (seconds)
+_LLM_CALL_TIMEOUT = 12.0  # hard wall-clock timeout per API call (seconds)
 
 _ERROR_FRAGMENTS = (
     'not found', 'not available', 'not connected', 'not installed',
@@ -101,21 +101,29 @@ class LLM:
         except Exception as e:
             logger.debug(f"History compression failed: {e}")
 
-    def _get_system_prompt(self, persistent_memory: str = "", speaker: str = None, patterns: str = "") -> str:
-        """Build system prompt with current context injected."""
+    def _get_system_prompt(self, persistent_memory: str = "", speaker: str = None, patterns: str = "") -> tuple:
+        """Build system prompt split into (base, dynamic) for prompt caching.
+
+        base   — persona + persistent memory; stable between save_memory calls.
+                 Marked cache_control=ephemeral so Anthropic reuses the KV cache.
+        dynamic — current time/speaker/context; changes every call, never cached.
+        """
+        base = SYSTEM_PROMPT.format(persistent_memory=persistent_memory)
+
         now = datetime.now()
         time_context = f"Current: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
         if speaker:
             time_context += f" | Speaking: {speaker}"
-        prompt = SYSTEM_PROMPT.format(persistent_memory=persistent_memory)
-        prompt += f"\n<current_context>\n{time_context}\n</current_context>"
+        dynamic = f"<current_context>\n{time_context}\n</current_context>"
+
         with self._summary_lock:
             summary = self._history_summary
         if summary:
-            prompt += f"\n<prior_context>\n{summary}\n</prior_context>"
+            dynamic += f"\n<prior_context>\n{summary}\n</prior_context>"
         if patterns:
-            prompt += f"\n<observed_patterns>\n{patterns}\n</observed_patterns>"
-        return prompt
+            dynamic += f"\n<observed_patterns>\n{patterns}\n</observed_patterns>"
+
+        return base, dynamic
 
     @staticmethod
     def _serialize_content(content, exclude_names: set = None) -> list:
@@ -159,22 +167,48 @@ class LLM:
                 break
             self.conversation_history.pop(0)
 
-    def _api_call(self, system_prompt: str, tools: list) -> Optional[object]:
-        """Single API call with hard wall-clock timeout."""
+    def _api_call(self, base_prompt: str, dynamic_context: str, tools: list) -> Optional[object]:
+        """Single API call with prompt caching and hard wall-clock timeout.
+
+        base_prompt is marked cache_control=ephemeral so Anthropic's KV cache
+        can skip reprocessing the persona/memory on every turn.  dynamic_context
+        (current time, speaker, patterns) changes each call and is never cached.
+        The last tool is also marked cacheable — tool schemas are stable all session.
+        """
+        # System: two blocks — cached stable base, uncached dynamic context
+        system_blocks = [
+            {"type": "text", "text": base_prompt, "cache_control": {"type": "ephemeral"}},
+        ]
+        if dynamic_context:
+            system_blocks.append({"type": "text", "text": dynamic_context})
+
+        # Tools: mark the last entry so the entire list is in the cache key
+        cached_tools = list(tools)
+        if cached_tools:
+            last = dict(cached_tools[-1])
+            last["cache_control"] = {"type": "ephemeral"}
+            cached_tools[-1] = last
+
         try:
             future = _executor.submit(
                 self.client.messages.create,
                 model=self.model,
-                max_tokens=1024,
-                timeout=18.0,
-                system=system_prompt,
-                tools=tools,
+                max_tokens=512,
+                timeout=10.0,
+                system=system_blocks,
+                tools=cached_tools,
                 tool_choice={"type": "any"},
                 messages=self.conversation_history,
             )
             response = future.result(timeout=_LLM_CALL_TIMEOUT)
-            self.last_usage["input_tokens"] += response.usage.input_tokens
-            self.last_usage["output_tokens"] += response.usage.output_tokens
+            usage = response.usage
+            self.last_usage["input_tokens"] += usage.input_tokens
+            self.last_usage["output_tokens"] += usage.output_tokens
+            # Log cache efficiency when tokens are served from cache
+            cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+            cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            if cache_read or cache_write:
+                logger.debug(f"Cache: {cache_read} read / {cache_write} written")
             return response
         except FutureTimeoutError:
             logger.error(f"LLM timed out after {_LLM_CALL_TIMEOUT}s (wall clock)")
@@ -210,22 +244,35 @@ class LLM:
         self.conversation_history.append({"role": "user", "content": user_text})
         self._trim_history()
 
-        system_prompt = self._get_system_prompt(persistent_memory, speaker, patterns)
+        # Snapshot AFTER trim so rollback restores the already-compacted state.
+        # If taken before trim, a rollback would restore pre-trim messages and
+        # the next call would re-drop and re-compress the same messages.
+        _history_snapshot = list(self.conversation_history)
+
+        base_prompt, dynamic_context = self._get_system_prompt(persistent_memory, speaker, patterns)
         self.last_usage = {"input_tokens": 0, "output_tokens": 0}
 
         all_tools = tools + [_RESPOND_TOOL]
 
+        def _fail():
+            """Roll back conversation history and return None."""
+            self.conversation_history = _history_snapshot
+            return None
+
         commands_succeeded = False  # True after at least one round with no tool errors
 
         for round_num in range(6):  # max 5 command rounds + 1 respond round
-            response = self._api_call(system_prompt, all_tools)
+            response = self._api_call(base_prompt, dynamic_context, all_tools)
             if response is None:
                 if commands_succeeded:
                     # Commands ran fine; only the respond round timed out.
-                    # Return a minimal confirmation so the action isn't silent.
+                    # Store "Done." so the conversation loop closes properly,
+                    # then return so it gets synthesized and played.
                     logger.warning("Respond round timed out after successful commands — returning 'Done.'")
+                    self.conversation_history.append({"role": "assistant", "content": "Done."})
+                    self._trim_history()
                     return ("Done.", False)
-                return None
+                return _fail()
 
             tool_calls = [b for b in response.content if b.type == "tool_use"]
 
@@ -237,7 +284,7 @@ class LLM:
                     self.conversation_history.append({"role": "assistant", "content": text})
                     self._trim_history()
                     return (text, False)
-                return None
+                return _fail()
 
             respond_call = next((b for b in tool_calls if b.name == "respond"), None)
             command_calls = [b for b in tool_calls if b.name != "respond"]
@@ -248,7 +295,7 @@ class LLM:
                 await_followup = bool(respond_call.input.get("await_followup", False))
                 if not text:
                     logger.warning("respond called with empty text")
-                    return None
+                    return _fail()
                 logger.info(f"LLM responded: '{text}' (await={await_followup})")
                 self.conversation_history.append({"role": "assistant", "content": text})
                 self._trim_history()
@@ -298,7 +345,7 @@ class LLM:
                 # skip the next LLM API call and surface the error immediately.
                 if any_tool_error and not respond_call:
                     logger.warning("Tool error detected — skipping LLM response, surfacing error immediately")
-                    return None
+                    return _fail()
 
                 if respond_call:
                     # Commands + respond in same turn — take the respond result
@@ -314,7 +361,7 @@ class LLM:
                 continue  # loop back for the respond call
 
         logger.error("LLM did not call respond within the round limit")
-        return None
+        return _fail()
 
     def clear_history(self):
         """Clear conversation history."""
