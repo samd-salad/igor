@@ -74,7 +74,7 @@ async def _async_power(state: str) -> str:
             return "TV is already off"
         # KEYCODE_POWER toggles reliably on this TV
         remote.send_key_command("KEYCODE_POWER")
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(2.0)
         return f"Turned TV {'on' if state == 'on' else 'off'}"
     except Exception as e:
         return f"TV power failed: {e}"
