@@ -105,5 +105,5 @@ LIGHT_SCENES: dict = {
 GOOGLE_TV_HOST = os.getenv("GOOGLE_TV_HOST", "192.168.0.20")
 GOOGLE_TV_CERT_FILE = str(DATA_DIR / "google_tv_cert.pem")
 GOOGLE_TV_KEY_FILE  = str(DATA_DIR / "google_tv_key.pem")
-GOOGLE_TV_CLIENT_NAME = "DrButts"
+GOOGLE_TV_CLIENT_NAME = "Igor"
 ADB_KEY_FILE = str(DATA_DIR / "adbkey")

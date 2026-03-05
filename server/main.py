@@ -40,7 +40,7 @@ if not CLAUDE_API_KEY:
 
 def initialize_services():
     """Initialize all services required by the server."""
-    logger.info("Initializing Dr. Butts Voice Assistant Server...")
+    logger.info("Initializing Igor Voice Assistant Server...")
 
     # Initialize Transcriber
     logger.info(f"Loading Whisper model: {WHISPER_MODEL}")

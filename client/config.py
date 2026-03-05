@@ -38,13 +38,26 @@ OWW_SAMPLE_BUFFER_SECONDS = 2.5  # How much audio before detection to capture
 WAKE_SAMPLES_DIR = BASE_DIR / "wakeword_samples" / "positive"
 
 # Voice Activity Detection (VAD) settings
-SILENCE_END_DURATION = 2.0
-RMS_SILENCE_THRESHOLD = 1200
+#
+# Tradeoff: low threshold stops recording faster (catches quiet pauses) but
+# may truncate speech in noisy rooms.  High threshold keeps recording longer
+# but picks up more TV audio.  1000 is a compromise — true silence is ~200-400
+# RMS, breathy pauses are ~600-1000, normal speech is ~800-4000.
+#
+# SILENCE_END_DURATION: consecutive seconds below threshold to end recording.
+# 1.5s catches natural sentence endings without cutting off mid-thought pauses
+# (most inter-phrase pauses are 0.3-0.8s; 1.5s requires sustained silence).
+SILENCE_END_DURATION = 1.5
+RMS_SILENCE_THRESHOLD = 1000
 MIN_RECORDING = 0.7
 MAX_RECORDING = 15
 
 # Follow-up mode settings
-FOLLOWUP_TIMEOUT = 5.0
+# How long to wait for user to START speaking after a follow-up prompt.
+# 10s gives the user time to think, read the TV, or get distracted without
+# the conversation silently ending.  Old value of 5s caused frequent
+# "follow-up timed out" when users paused to think.
+FOLLOWUP_TIMEOUT = 10.0
 
 # Audio output routing
 USE_SONOS_OUTPUT = False  # Set True to route TTS through Sonos instead of Pi speaker

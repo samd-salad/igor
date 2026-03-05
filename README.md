@@ -1,9 +1,9 @@
-# Dr. Butts Voice Assistant
+# Igor Voice Assistant
 
-Local, privacy-focused voice assistant. Say "Doctor Butts" and ask questions, set timers, control volume, or just chat.
+Local, privacy-focused voice assistant. Say "Igor" and ask questions, set timers, control volume, or just chat.
 
 - **Pi (Client)**: OpenWakeWord wake word, audio recording/playback, hardware control
-- **PC (Server)**: Whisper STT, Claude API LLM, Piper TTS
+- **PC (Server)**: Whisper STT, Claude API LLM, Kokoro TTS
 
 ---
 
@@ -72,14 +72,14 @@ pip install openwakeword
 python onnx_models/wakeword_creation/train_wakeword.py
 ```
 
-Output: `oww_models/doctor_butts.onnx`
+Output: `oww_models/igor.onnx`
 
 The script uses synthetic negatives (noise/silence) by default. For fewer false positives in noisy rooms, record real background audio (TV, music, other speech) into `wakeword_samples/negative/*.wav` — the script picks them up automatically.
 
 ### Step 4 — Deploy to Pi
 
 ```bash
-scp oww_models/doctor_butts.onnx pi@<PI_IP>:~/smart_assistant/oww_models/
+scp oww_models/igor.onnx pi@<PI_IP>:~/smart_assistant/oww_models/
 ```
 
 The client globs `oww_models/*.onnx` on startup — drop any `.onnx` file there and it becomes a wake word.
@@ -109,7 +109,7 @@ Follow the prompts — you'll record 5 voice samples in different styles. Resemb
 
 ## Usage
 
-1. Say **"Doctor Butts"** → wait for ascending beep
+1. Say **"Igor"** → wait for ascending beep
 2. Speak your command → wait for descending beep
 3. Listen to response
 
@@ -137,7 +137,7 @@ Restart=always
 ```
 
 ```bash
-sudo systemctl enable drbutts-server && sudo systemctl start drbutts-server
+sudo systemctl enable igor-server && sudo systemctl start igor-server
 ```
 
 ---
@@ -152,9 +152,9 @@ sudo systemctl enable drbutts-server && sudo systemctl start drbutts-server
 | Can't connect to server | Verify IPs in config, check firewall (ports 8000 PC, 8080 Pi) |
 | Audio device not found | Run `arecord -L`, update `AUDIO_DEVICE` |
 | No API key error | Set `ANTHROPIC_API_KEY` env var |
-| Piper voice not found | Re-run `setup_server.sh` |
+| Kokoro model not found | Re-run `setup_server.sh` or check `kokoro/` directory |
 
 ```bash
-sudo journalctl -u drbutts-server -f
-sudo journalctl -u drbutts-client -f
+sudo journalctl -u igor-server -f
+sudo journalctl -u igor-client -f
 ```

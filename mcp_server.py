@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MCP server exposing Dr. Butts commands for development/testing with Claude Code."""
+"""MCP server exposing Igor commands for development/testing with Claude Code."""
 import json
 import sys
 from pathlib import Path
@@ -9,12 +9,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 from mcp.server.fastmcp import FastMCP
 import server.commands as commands
 
-mcp = FastMCP("dr-butts")
+mcp = FastMCP("igor")
 
 
 @mcp.tool()
 def list_commands() -> str:
-    """List all available Dr. Butts commands and their parameter schemas."""
+    """List all available Igor commands and their parameter schemas."""
     lines = []
     for name, cmd in commands.get_all_commands().items():
         params = list(cmd.parameters.keys())
@@ -27,7 +27,7 @@ def list_commands() -> str:
 
 @mcp.tool()
 def run_command(name: str, args: str = "{}") -> str:
-    """Execute a Dr. Butts command by name with JSON-encoded args.
+    """Execute an Igor command by name with JSON-encoded args.
 
     Args:
         name: Command name (e.g. 'set_timer', 'calculate', 'get_time')

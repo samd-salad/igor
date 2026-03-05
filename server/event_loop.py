@@ -1,4 +1,26 @@
-"""Background event loop for timers and scheduled events with Pi callback support."""
+"""Background event loop for timers and scheduled events with Pi callback support.
+
+Architecture:
+  - A single background thread (_run) polls for expired timers every 0.5s.
+  - When a timer fires, it spawns a NEW daemon thread for that timer's alert so
+    TTS synthesis + HTTP to Pi (1-2s each) don't block the polling loop.
+  - Timer state is protected by a single lock — the poll thread modifies
+    _timers (removes fired entries) while the main thread may add/cancel.
+
+Timer alert flow:
+  1. _check_timers() finds an expired timer, removes it from _timers.
+  2. _fire_timer() runs in its own thread:
+     a. Plays alert beep on Pi (heads-up before speech).
+     b. Synthesizes TTS on server ("pasta timer is done").
+     c. Sends WAV to Pi for playback via PiCallbackClient.play_audio().
+     d. Falls back to a second beep if TTS synthesis fails.
+  3. Optional per-timer callback fires after audio, for future extensibility.
+
+Global singleton pattern: initialize_event_loop() must be called once at server
+startup with pi_client and synthesizer injected.  get_event_loop() returns the
+existing instance; calling it before initialization creates a non-functional
+instance (no audio delivery).
+"""
 import logging
 import threading
 import time
@@ -10,10 +32,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Timer:
-    """Timer data structure."""
+    """Timer data structure holding identity, fire time, and optional callback."""
     name: str
-    fire_at: float  # Unix timestamp
-    callback: Optional[Callable[[str], None]] = None
+    fire_at: float  # Unix timestamp when this timer should fire
+    callback: Optional[Callable[[str], None]] = None  # Optional post-alert hook
 
 
 class EventLoop:
@@ -24,8 +46,10 @@ class EventLoop:
         Initialize event loop.
 
         Args:
-            pi_client: PiCallbackClient for sending audio to Pi
-            synthesizer: Synthesizer for generating alert audio
+            pi_client: PiCallbackClient for sending audio/beeps to Pi.
+                       If None, timers fire silently (no audio delivery).
+            synthesizer: Synthesizer for generating TTS alert audio.
+                         If None, only the beep plays (no speech).
         """
         self._timers: dict[str, Timer] = {}
         self._lock = threading.Lock()
@@ -36,7 +60,7 @@ class EventLoop:
         logger.info("EventLoop initialized")
 
     def start(self):
-        """Start the background event loop."""
+        """Start the background polling thread (idempotent — safe to call twice)."""
         if self._thread is not None:
             logger.warning("Event loop already running")
             return
@@ -47,7 +71,7 @@ class EventLoop:
         logger.info("Event loop started")
 
     def stop(self):
-        """Stop the background event loop."""
+        """Stop the polling thread and wait for it to exit (up to 2s)."""
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)
@@ -55,13 +79,22 @@ class EventLoop:
         logger.info("Event loop stopped")
 
     def _run(self):
-        """Main loop - checks timers periodically."""
+        """Main polling loop — checks for expired timers every 500ms.
+
+        500ms granularity is fine for timer alerts — human perception of
+        "late" starts around 2-3 seconds.
+        """
         while self._running:
             self._check_timers()
             time.sleep(0.5)
 
     def _check_timers(self):
-        """Check and fire any expired timers."""
+        """Atomically collect all expired timers, then fire each in its own thread.
+
+        Fires in separate threads because TTS synthesis + HTTP to Pi takes ~1-2s.
+        If we fired inline, the poll loop would stall and all timers due at the
+        same tick would be delayed by N × 2s.
+        """
         now = time.time()
         fired = []
 
@@ -69,6 +102,7 @@ class EventLoop:
             for name, timer in list(self._timers.items()):
                 if now >= timer.fire_at:
                     fired.append(timer)
+                    # Remove immediately so it can't fire twice if poll overlaps
                     del self._timers[name]
 
         # Fire each timer in its own thread — TTS synthesis + HTTP to Pi would
@@ -82,29 +116,36 @@ class EventLoop:
             ).start()
 
     def _fire_timer(self, timer: Timer):
-        """
-        Handle a fired timer.
+        """Handle a fired timer: play alert beep, synthesize and deliver TTS.
 
-        Synthesizes audio on server and sends to Pi for playback.
+        Runs in its own daemon thread per timer so multiple concurrent timers
+        don't serialize.  All errors are caught — a failed alert is logged but
+        never crashes the event loop.
+
+        Fallback chain:
+          1. Beep first (immediate audio signal even before speech is ready).
+          2. Synthesize "X timer is done".
+          3. Send WAV to Pi.
+          4. If synthesis fails → second beep as fallback (requires pi_client).
         """
         logger.info(f"Timer fired: {timer.name}")
 
         try:
-            # Play alert beep on Pi first
+            # Step 1: Alert beep — gives immediate audio feedback while TTS synthesizes
             if self._pi_client:
                 self._pi_client.play_beep("alert")
-                time.sleep(0.3)  # Small delay between beep and speech
+                time.sleep(0.3)  # Brief gap between beep and speech
 
-            # Generate TTS message
+            # Step 2: Generate TTS message
             message = f"{timer.name} timer is done"
 
-            # Synthesize audio and send to Pi
+            # Step 3: Synthesize and deliver audio to Pi
             if self._synthesizer and self._pi_client:
                 logger.debug(f"Synthesizing timer alert: '{message}'")
                 audio_data = self._synthesizer.synthesize(message)
 
                 if audio_data:
-                    # Send to Pi for playback
+                    # Send synthesized WAV to Pi for speaker playback
                     success = self._pi_client.play_audio(
                         audio_data,
                         message,
@@ -121,7 +162,7 @@ class EventLoop:
             else:
                 logger.warning(f"No synthesizer or Pi client - cannot play timer alert: {timer.name}")
 
-            # Call custom callback if provided
+            # Step 4: Optional per-timer custom callback (for future extensibility)
             if timer.callback:
                 try:
                     timer.callback(timer.name)
@@ -132,16 +173,19 @@ class EventLoop:
             logger.error(f"Error firing timer '{timer.name}': {e}", exc_info=True)
 
     def add_timer(self, name: str, seconds: float, callback: Optional[Callable[[str], None]] = None) -> bool:
-        """
-        Add a timer.
+        """Add a timer that fires after `seconds` seconds.
+
+        Timer names are unique — attempting to add a second timer with the same
+        name returns False.  The LLM timer command handles this by telling the
+        user to use a different name or cancel the existing one.
 
         Args:
-            name: Timer name/label
-            seconds: Duration in seconds
-            callback: Optional callback to call when timer fires
+            name: Unique timer label (e.g. "pasta", "laundry").
+            seconds: Duration until firing.
+            callback: Optional callable(name) invoked after audio playback.
 
         Returns:
-            False if name already exists, True on success
+            True on success, False if name already exists.
         """
         with self._lock:
             if name in self._timers:
@@ -159,14 +203,13 @@ class EventLoop:
         return True
 
     def cancel_timer(self, name: str) -> bool:
-        """
-        Cancel a timer by name.
+        """Cancel a timer by name before it fires.
 
         Args:
-            name: Timer name
+            name: Timer label to cancel.
 
         Returns:
-            False if not found, True on success
+            True if found and cancelled, False if not found.
         """
         with self._lock:
             if name in self._timers:
@@ -178,32 +221,34 @@ class EventLoop:
         return False
 
     def list_timers(self) -> list[tuple[str, float]]:
-        """
-        List all active timers.
+        """Return all active timers as (name, seconds_remaining) tuples.
 
-        Returns:
-            List of (name, seconds_remaining) tuples
+        Seconds remaining is clamped to 0.0 for timers that are about to fire
+        but haven't been reaped by the poll loop yet (can happen in the <500ms
+        window between expiry and the next _check_timers() call).
         """
         now = time.time()
         with self._lock:
             return [(name, max(0, timer.fire_at - now)) for name, timer in self._timers.items()]
 
     def get_timer_count(self) -> int:
-        """Get number of active timers."""
+        """Return the number of currently active timers."""
         with self._lock:
             return len(self._timers)
 
 
-# Global singleton
+# ---------------------------------------------------------------------------
+# Global singleton — one event loop per server process
+# ---------------------------------------------------------------------------
 _event_loop: Optional[EventLoop] = None
 
 
 def get_event_loop() -> EventLoop:
-    """
-    Get or create the global event loop.
+    """Get or create the global event loop.
 
-    Note: For server use, you should initialize with pi_client and synthesizer
-    before calling this.
+    WARNING: If called before initialize_event_loop(), creates an instance
+    with no pi_client or synthesizer — timers will fire but produce no audio.
+    Always call initialize_event_loop() at server startup.
     """
     global _event_loop
     if _event_loop is None:
@@ -213,15 +258,18 @@ def get_event_loop() -> EventLoop:
 
 
 def initialize_event_loop(pi_client, synthesizer) -> EventLoop:
-    """
-    Initialize the global event loop with dependencies.
+    """Initialize the global event loop with audio delivery dependencies.
+
+    Must be called once at server startup (server/main.py) with the fully
+    constructed PiCallbackClient and Synthesizer.  Subsequent calls are
+    no-ops (returns existing instance with a warning).
 
     Args:
-        pi_client: PiCallbackClient instance
-        synthesizer: Synthesizer instance
+        pi_client: PiCallbackClient instance for sending audio to Pi.
+        synthesizer: Synthesizer instance for TTS generation.
 
     Returns:
-        Initialized EventLoop
+        The initialized (and already started) EventLoop singleton.
     """
     global _event_loop
     if _event_loop is not None:
