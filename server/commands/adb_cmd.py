@@ -75,7 +75,7 @@ def _get_signer() -> "PythonRSASigner":
     return PythonRSASigner(pub, priv)
 
 
-def _adb_shell(command: str, auth_timeout: float = 1.0, cmd_timeout: float = 10.0) -> tuple:
+def _adb_shell(command: str, auth_timeout: float = 5.0, cmd_timeout: float = 10.0) -> tuple:
     """Run a shell command on the TV via ADB. Returns (output, error_str)."""
     if not _ADB_AVAILABLE:
         return "", "adb-shell not installed. Run: pip install adb-shell"
@@ -113,12 +113,24 @@ def _tv_adb_available() -> str | None:
 def _get_tv_playback_state() -> str:
     """Query ADB for current media playback state.
 
-    Returns 'playing', 'paused', 'stopped', or 'unknown'.
-    'unknown' on any error — callers should treat unknown as non-playing.
+    Returns 'playing', 'paused', 'stopped', 'idle', or 'unknown'.
+
+    'unknown' means ADB couldn't connect or timed out — the TV's actual state
+    is indeterminate.  Callers should NOT treat 'unknown' as 'not playing';
+    the TV may still be playing but ADB was slow.  The orchestrator's poller
+    handles this by keeping the last known good state on 'unknown'.
+
+    'idle' means ADB connected successfully but no active media session was
+    found — the TV is on but nothing is playing (e.g. home screen, app menu).
+
+    cmd_timeout=5.0 because dumpsys media_session regularly takes 2-4s on
+    Google TV devices, especially under load.  The old 3.0s timeout caused
+    frequent 'unknown' returns that silently disabled all TV-aware protections
+    (TTS suppression, await_followup override, LLM context note).
     """
     if not _ADB_AVAILABLE or not GOOGLE_TV_HOST or "0.X" in GOOGLE_TV_HOST:
         return "unknown"
-    out, err = _adb_shell("dumpsys media_session", cmd_timeout=3.0)
+    out, err = _adb_shell("dumpsys media_session", cmd_timeout=5.0)
     if err or not out:
         return "unknown"
     # STATE_PLAYING=3, STATE_PAUSED=2, STATE_STOPPED=1
@@ -128,7 +140,8 @@ def _get_tv_playback_state() -> str:
         return "paused"
     if "state=PlaybackState {state=1" in out:
         return "stopped"
-    return "unknown"
+    # ADB worked but no media session state found — TV is on, nothing playing
+    return "idle"
 
 
 
@@ -179,7 +192,14 @@ class TvLaunchCommand(Command):
         package = APP_PACKAGES.get(app_lower)
         if not package:
             return f"Unknown app '{app}'. Supported: {', '.join(sorted(APP_PACKAGES.keys()))}"
-        out, err = _adb_shell(f"monkey -p {package} -c android.intent.category.LAUNCHER 1")
+        # Use am start instead of monkey — more reliable for app launch.
+        # monkey sometimes fails silently or triggers wrong activities.
+        quoted = shlex.quote(package)
+        cmd = (
+            f"am start -n $(cmd package resolve-activity --brief {quoted} | tail -n 1) "
+            f"2>/dev/null || monkey -p {quoted} -c android.intent.category.LAUNCHER 1"
+        )
+        out, err = _adb_shell(cmd)
         if err:
             return f"Failed to launch {app}: {err}"
         return f"Launched {app} on TV"

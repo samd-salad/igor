@@ -35,7 +35,7 @@ class LogFeedbackCommand(Command):
     description = (
         "Log a change request or complaint about something the assistant just did. "
         "Call this after gathering what went wrong and what the user wants instead. "
-        "If you need more detail, ask first (respond with await_followup=true), then log once you have it."
+        "If you need more detail, ask first, then log once you have it."
     )
 
     @property

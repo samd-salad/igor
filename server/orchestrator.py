@@ -1,8 +1,54 @@
-"""Main orchestrator for processing voice interactions."""
+"""Main orchestrator: coordinates STT → Quality Gate → Intent Router → LLM → TTS pipeline.
+
+Each call to process_interaction() runs the full pipeline:
+  1. TV state snapshot — taken once at the top so routing decisions later are
+     consistent, even if the background poller fires mid-interaction.
+  2. Speaker identification — runs concurrently with STT in a background thread.
+  3. STT — Faster Whisper transcribes the WAV bytes.
+  4. Quality Gate — rejects Whisper hallucinations, ambient TV dialogue, garbage.
+  5. Intent Router (Tier 1) — maps unambiguous short phrases ("pause", "lights off")
+     directly to commands, skipping the LLM entirely (~0ms vs ~1.5s).
+  6. LLM (Tier 2+) — Claude processes the transcription with tool_choice=auto.
+     Action commands short-circuit with "Done." (1 API call). Narrated commands
+     (weather, timers, etc.) get a second API call for the LLM to read results.
+  7. TTS — Kokoro synthesizes the response text to WAV.
+  8. Routing — TTS is either sent to Sonos (if prefer_sonos=True) or returned
+     as base64 audio for the Pi to play locally.
+  9. Session summarizer — background thread extracts memorable facts after
+     non-follow-up turns (skipped for Tier 1 matches and TV playback).
+
+TV state and routing:
+  The TV playback state is polled every 5s by a background thread (_poll_tv_state).
+  At the start of each interaction the state is snapshotted from the shared variable.
+  All routing decisions — quality gate TV filter, LLM context note, await_followup
+  override, Sonos suppression, session summarizer skip — use this snapshot.
+
+  When TV is playing:
+    - Quality gate rejects long transcriptions (>25 words, likely TV dialogue).
+    - LLM gets a note ("TV is playing — this may be ambient speech...").
+    - Non-critical TTS is suppressed (pure acknowledgments for light/volume commands).
+    - await_followup is forced False (prevents follow-up loop during TV audio).
+    - Session summarizer is skipped.
+
+await_followup heuristic:
+  Replaces LLM-controlled boolean. Set True when the response ends with '?',
+  no commands were executed, and the response is short (<20 words). Overridden
+  to False when TV is playing.
+
+Sonos audio routing:
+  _is_critical_response() classifies the response; non-critical responses are
+  suppressed when TV is playing.  Critical responses always route to Sonos.
+
+Volume command redirect:
+  When prefer_sonos=True, set_volume and adjust_volume are redirected to Sonos
+  commands (set_sonos_volume, adjust_sonos_volume) since the user's audio goes
+  through the Sonos, not the Pi speaker.
+"""
 import logging
 import threading
 import time
 import csv
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Optional, Dict, List
 
 from server.transcription import Transcriber
@@ -10,6 +56,8 @@ from server.llm import LLM
 from server.synthesis import Synthesizer
 from server.pi_callback import PiCallbackClient
 from server.commands.adb_cmd import _get_tv_playback_state
+from server.quality_gate import filter_transcription
+from server.intent_router import route as route_intent
 from server.config import (
     BENCHMARK_FILE, SPEAKER_EMBEDDINGS_FILE, SPEAKER_SIMILARITY_THRESHOLD,
     CLAUDE_INPUT_COST_PER_M, CLAUDE_OUTPUT_COST_PER_M,
@@ -24,16 +72,20 @@ logger = logging.getLogger(__name__)
 
 
 def _strip_markdown(text: str) -> str:
-    """Strip markdown formatting that Piper would speak literally."""
+    """Strip markdown formatting that TTS would speak literally.
+
+    Kokoro reads asterisks, hashes, and backticks aloud literally.
+    Strip them before synthesis so "**bold**" becomes "bold" in speech.
+    """
     import re
-    text = re.sub(r'\*+([^*]+)\*+', r'\1', text)          # bold / italic
-    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)  # headers
-    text = re.sub(r'`+([^`]+)`+', r'\1', text)            # inline code
-    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text) # links
-    text = re.sub(r'^[-*+]\s+', '', text, flags=re.MULTILINE)   # bullet points
+    text = re.sub(r'\*+([^*]+)\*+', r'\1', text)          # **bold** / *italic*
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)  # ## headers
+    text = re.sub(r'`+([^`]+)`+', r'\1', text)            # `code`
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text) # [link text](url)
+    text = re.sub(r'^[-*+]\s+', '', text, flags=re.MULTILINE)   # - bullet points
     return text.strip()
 
-# Try to import speaker identification (optional dependency)
+# Optional dependency — Resemblyzer for speaker voice identification
 try:
     from server.speaker_id import SpeakerIdentifier
     SPEAKER_ID_AVAILABLE = True
@@ -43,7 +95,7 @@ except ImportError:
 
 
 class Orchestrator:
-    """Coordinates the full voice interaction pipeline: STT -> LLM -> TTS."""
+    """Coordinates the full voice interaction pipeline: STT → LLM → TTS."""
 
     def __init__(
         self,
@@ -58,7 +110,7 @@ class Orchestrator:
         self.synthesizer = synthesizer
         self.pi_client = pi_client
 
-        # Initialize speaker identification if available
+        # Speaker identification — optional, graceful fallback if not installed
         self.speaker_identifier = None
         if enable_speaker_id and SPEAKER_ID_AVAILABLE:
             try:
@@ -74,15 +126,20 @@ class Orchestrator:
             except Exception as e:
                 logger.warning(f"Failed to initialize speaker identification: {e}")
 
-        # Sonos device cache for TTS output routing
+        # Sonos device cache — rediscovery is throttled by SONOS_DISCOVERY_CACHE_TTL
         self._sonos_device = None
         self._sonos_cache_time = 0.0
         self._sonos_lock = threading.Lock()
-        # In-memory TTS audio buffer — served at /audio/tts_latest (no disk write)
+
+        # In-memory TTS audio buffer — served at /audio/tts_latest (no disk write).
+        # Written by _route_tts_to_sonos(), read by api.get_tts_audio().
         self._tts_audio: bytes = b""
         self._tts_audio_lock = threading.Lock()
+
         self._benchmark_lock = threading.Lock()
-        # Last known TV playback state — kept fresh by background poller
+
+        # TV playback state — updated every 5s by background poller.
+        # Values: "playing", "paused", "stopped", "unknown"
         self._last_tv_state: str = "unknown"
         self._tv_state_lock = threading.Lock()
         self._tv_poll_thread = threading.Thread(target=self._poll_tv_state, daemon=True, name="TVStatePoll")
@@ -92,7 +149,7 @@ class Orchestrator:
 
     @property
     def tts_audio(self) -> bytes:
-        """Thread-safe read of the in-memory TTS buffer."""
+        """Thread-safe read of the in-memory TTS buffer (property access form)."""
         with self._tts_audio_lock:
             return self._tts_audio
 
@@ -102,22 +159,17 @@ class Orchestrator:
             return self._tts_audio
 
     def process_interaction(self, audio_bytes: bytes, wake_word: str, prefer_sonos: bool = False) -> Dict:
-        """
-        Process a complete voice interaction.
-
-        Pipeline:
-        1. Transcribe audio -> text
-        2. Send to LLM with tools
-        3. Execute any commands
-        4. Synthesize response -> audio
-        5. Log benchmarks
+        """Process a complete voice interaction: STT → LLM → TTS → routing.
 
         Args:
-            audio_bytes: WAV audio data from Pi
-            wake_word: Wake word that was detected
+            audio_bytes: WAV audio from Pi (16kHz, 16-bit mono).
+            wake_word: Wake word model that triggered this interaction.
+            prefer_sonos: True when Pi is configured with USE_SONOS_OUTPUT=True.
 
         Returns:
-            Dictionary with transcription, response_text, audio_base64, timings, etc.
+            Dict with transcription, response_text, audio_base64 (or empty if Sonos),
+            commands_executed, timings, speaker, await_followup, tts_routed,
+            tts_duration_seconds, error.
         """
         timings = {}
         commands_executed = []
@@ -128,10 +180,9 @@ class Orchestrator:
         with self._tv_state_lock:
             tv_state = self._last_tv_state
 
-        # Step 1: Speech-to-Text
         logger.info(f"Processing interaction (wake word: {wake_word})")
 
-        # Validate audio size (defense in depth - Pydantic also validates)
+        # Size validation (defense in depth — Pydantic also validates at the API layer)
         if len(audio_bytes) > 10_000_000:  # 10MB max
             logger.error(f"Audio too large: {len(audio_bytes)} bytes")
             return {
@@ -145,7 +196,9 @@ class Orchestrator:
                 'error': 'Audio file too large'
             }
 
-        # Step 1b: Start speaker ID immediately in background — runs concurrently with STT
+        # Step 1a: Start speaker ID in background — runs concurrently with STT.
+        # STT is slower (~0.5-2s) so speaker ID (typically ~0.3s) usually finishes
+        # before we need the result.
         _speaker_result: Dict = {}
 
         def _run_speaker_id_task():
@@ -167,7 +220,7 @@ class Orchestrator:
             )
             speaker_thread.start()
 
-        # Step 1: STT (runs concurrently with speaker ID above)
+        # Step 1b: STT (concurrent with speaker ID above)
         start = time.time()
         transcription = self.transcriber.transcribe_bytes(audio_bytes)
         timings['stt'] = time.time() - start
@@ -185,15 +238,15 @@ class Orchestrator:
                 'error': 'Speech recognition failed'
             }
 
-        # Validate transcription length
-        if len(transcription) > 10_000:  # Max 10k characters
+        # Truncate absurdly long transcriptions (e.g. if mic stayed open)
+        if len(transcription) > 10_000:
             logger.warning(f"Transcription too long ({len(transcription)} chars), truncating")
             transcription = transcription[:10_000] + " [truncated]"
 
         logger.info(f"Transcribed: '{transcription[:100]}{'...' if len(transcription) > 100 else ''}'")
         self._log_benchmark('stt', timings['stt'], transcription)
 
-        # Collect speaker ID result (STT takes longer, so this is usually already done)
+        # Collect speaker ID result — join with 2s timeout since STT took longer
         speaker_name = None
         speaker_confidence = 0.0
         if speaker_thread:
@@ -208,58 +261,127 @@ class Orchestrator:
                 else:
                     logger.debug(f"Unknown speaker (best match: {speaker_confidence:.0%})")
 
-        # Step 2: LLM Processing
-        start = time.time()
-        tools = commands.get_tools()
-        persistent_memory = load_persistent_memory()
-
-        # Create tool executor with Pi callback support
-        def tool_executor(name: str, **kwargs) -> str:
-            """Execute command and track it."""
-            commands_executed.append(name)
-            return self._execute_command(name, prefer_sonos=prefer_sonos, **kwargs)
-
-        patterns = get_patterns()
-        if tv_state == "playing":
-            tv_note = (
-                "TV is currently playing audio. "
-                "This request may be ambient speech from the room — "
-                "respond briefly and do not save memories from this interaction."
-            )
-            patterns = tv_note + ("\n" + patterns if patterns else "")
-
-        llm_result = self.llm.chat(
-            user_text=transcription,
-            tools=tools,
-            tool_executor=tool_executor,
-            persistent_memory=persistent_memory,
-            speaker=speaker_name,
-            patterns=patterns,
-        )
-        timings['llm'] = time.time() - start
-
-        if not llm_result:
-            logger.error("LLM failed to generate response")
+        # ---- Quality Gate ----
+        tv_playing = (tv_state == "playing")
+        filtered = filter_transcription(transcription, tv_playing=tv_playing)
+        if filtered is None:
+            logger.info("Quality gate rejected transcription")
             return {
                 'transcription': transcription,
                 'response_text': '',
                 'audio_base64': '',
-                'commands_executed': commands_executed,
+                'commands_executed': [],
                 'timings': timings,
                 'speaker': speaker_name,
                 'await_followup': False,
-                'error': 'AI processing failed'
+                'error': None,
             }
+        transcription = filtered
 
-        response_text, await_followup = llm_result
+        # ---- Intent Router (Tier 1) ----
+        tier1 = route_intent(transcription)
+        if tier1 is not None:
+            start = time.time()
+            try:
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    fut = pool.submit(
+                        self._execute_command,
+                        tier1.command, prefer_sonos=prefer_sonos, **tier1.params,
+                    )
+                    result = fut.result(timeout=30.0)
+                # Check if the command actually failed — don't mask with hardcoded text
+                result_lower = result.lower() if result else ""
+                if any(f in result_lower for f in ('error', 'failed', 'not found', 'not available', 'not connected', 'unknown')):
+                    response_text = result  # Surface the actual error to the user
+                else:
+                    response_text = tier1.response
+            except FutureTimeout:
+                logger.error(f"Tier 1 command '{tier1.command}' timed out after 30s")
+                response_text = f"{tier1.command} timed out."
+            except Exception as e:
+                logger.error(f"Tier 1 command '{tier1.command}' failed: {e}")
+                response_text = f"Error: {e}"
+            commands_executed.append(tier1.command)
+            timings['llm'] = 0.0
+            timings['llm_cost'] = 0.0
+            await_followup = False
+        else:
+            # ---- LLM Processing (Tier 2+) ----
+            start = time.time()
+            tools = commands.get_tools()
+            persistent_memory = load_persistent_memory()
 
-        # When TV is playing, block follow-up mode — prevents a false trigger
-        # from spawning a second listening cycle while TV audio is still running.
-        if tv_state == "playing" and await_followup:
+            def tool_executor(name: str, **kwargs) -> str:
+                """Wrapper: execute command, track name in commands_executed list."""
+                commands_executed.append(name)
+                return self._execute_command(name, prefer_sonos=prefer_sonos, **kwargs)
+
+            patterns = get_patterns()
+
+            # Inject TV state note into LLM context when content is playing.
+            if tv_playing:
+                tv_note = (
+                    "TV is currently playing. The transcription almost certainly contains "
+                    "TV/media dialogue mixed in. Extract only clear, direct commands "
+                    "(pause, volume, lights, etc.) and ignore everything else. "
+                    "If no clear command is present, respond with 'Didn't catch a command.' "
+                    "Do NOT engage with media dialogue or ask questions. "
+                    "2-3 word responses only."
+                )
+                patterns = tv_note + ("\n" + patterns if patterns else "")
+
+            llm_result = self.llm.chat(
+                user_text=transcription,
+                tools=tools,
+                tool_executor=tool_executor,
+                persistent_memory=persistent_memory,
+                speaker=speaker_name,
+                patterns=patterns,
+            )
+            timings['llm'] = time.time() - start
+
+            if not llm_result:
+                logger.error("LLM failed to generate response")
+                return {
+                    'transcription': transcription,
+                    'response_text': '',
+                    'audio_base64': '',
+                    'commands_executed': commands_executed,
+                    'timings': timings,
+                    'speaker': speaker_name,
+                    'await_followup': False,
+                    'error': 'AI processing failed'
+                }
+
+            response_text = llm_result.text
+            # commands_executed already populated by tool_executor callback
+
+            # await_followup heuristic (replaces LLM-controlled boolean):
+            # Only follow up on short questions with no commands executed.
+            await_followup = (
+                response_text.rstrip().endswith('?')
+                and not commands_executed
+                and len(response_text.split()) < 20
+            )
+
+            # Log LLM cost (input + output tokens × per-million price)
+            usage = self.llm.last_usage
+            llm_cost = (
+                usage["input_tokens"] * CLAUDE_INPUT_COST_PER_M +
+                usage["output_tokens"] * CLAUDE_OUTPUT_COST_PER_M
+            ) / 1_000_000
+            timings['llm_cost'] = llm_cost
+            logger.info(f"LLM response generated")
+            self._log_benchmark('llm', timings['llm'], cost=llm_cost)
+
+        # When TV is playing, block follow-up mode.
+        if tv_playing and await_followup:
             logger.info("TV is playing — disabling await_followup to prevent follow-up loop")
             await_followup = False
 
-        if not await_followup and tv_state != "playing":
+        # Run session summarizer after non-follow-up turns, when TV isn't playing,
+        # and when it wasn't a Tier 1 match (no LLM history to summarize).
+        if not await_followup and not tv_playing and tier1 is None:
             _snap = self.llm.get_history_snapshot()
             threading.Thread(
                 target=self._run_session_summarizer,
@@ -267,15 +389,6 @@ class Orchestrator:
                 daemon=True,
                 name="SessionSummarizer"
             ).start()
-
-        usage = self.llm.last_usage
-        llm_cost = (
-            usage["input_tokens"] * CLAUDE_INPUT_COST_PER_M +
-            usage["output_tokens"] * CLAUDE_OUTPUT_COST_PER_M
-        ) / 1_000_000
-        timings['llm_cost'] = llm_cost
-        logger.info(f"LLM response generated")
-        self._log_benchmark('llm', timings['llm'], cost=llm_cost)
 
         # Step 3: Text-to-Speech
         start = time.time()
@@ -291,40 +404,45 @@ class Orchestrator:
                 'commands_executed': commands_executed,
                 'timings': timings,
                 'speaker': speaker_name,
-                'await_followup': await_followup,
+                'await_followup': False,
+                'tts_routed': False,
+                'tts_duration_seconds': 0.0,
                 'error': 'Text-to-speech failed'
             }
 
         logger.info(f"TTS synthesis complete")
         word_count = len(response_text.split())
-        # Load historical stats BEFORE logging current run so comparison is
-        # "current vs past" (not "current vs including-current"), and avoids
-        # a Windows file-cache race where the freshly-appended row isn't
-        # visible to an immediate re-open.
+
+        # Load historical stats BEFORE logging current run so the "vs. avg" column
+        # in the stats table compares against past data only (not including this run).
+        # Also avoids a Windows file-cache race on immediate re-open.
         _tts_stats_pre = self._load_benchmark_stats('tts')
         self._log_benchmark('tts', timings['tts'], word_count=word_count)
 
-        # Route TTS to Sonos if client requested it and server allows it
+        # Step 4: Route TTS to Sonos or return as base64 for Pi local playback
         tts_routed = False
         if prefer_sonos and SONOS_TTS_OUTPUT:
-            if self._is_critical_response(response_text, commands_executed, await_followup):
+            if self._is_critical_response(response_text, commands_executed, await_followup, tv_playing=(tv_state == "playing")):
+                # Critical responses always play (timers, weather, commands with info)
                 tts_routed = self._route_tts_to_sonos(audio_data, await_followup=await_followup)
             else:
-                # Use snapshotted TV state (consistent with LLM context and await decision above)
+                # Non-critical: suppress when TV is playing (pure action acknowledgments)
                 if tv_state == "playing":
                     logger.info("TV is playing — suppressing non-critical Sonos TTS")
                     tts_routed = True  # tell client to skip local playback too
                 else:
                     tts_routed = self._route_tts_to_sonos(audio_data, await_followup=await_followup)
 
-        # Convert audio to base64 for transmission (empty if Sonos handled it)
+        # Pack response for transmission
         from shared.utils import encode_audio_base64
+        # If Sonos handled it, return empty audio_base64 (Pi won't play locally)
         audio_base64 = "" if tts_routed else encode_audio_base64(audio_data)
+        # Duration used by Pi to know how long to sleep before opening follow-up mic
         tts_duration_seconds = self._wav_duration(self.get_tts_audio()) if tts_routed else self._wav_duration(audio_data)
 
-        # Calculate total time (exclude non-time fields like llm_cost)
         timings['total'] = timings.get('stt', 0) + timings.get('llm', 0) + timings.get('tts', 0)
-        # Log stats table in background — pure informational, doesn't affect response
+
+        # Log the stats comparison table in background — pure informational
         threading.Thread(
             target=self._log_interaction_stats,
             args=(timings.copy(), transcription, response_text, _tts_stats_pre),
@@ -346,18 +464,20 @@ class Orchestrator:
         }
 
     def _audio_bytes_to_numpy(self, audio_bytes: bytes):
-        """Convert WAV audio bytes to numpy array for speaker identification."""
+        """Convert WAV audio bytes to float32 numpy array for speaker identification.
+
+        Resemblyzer's SpeakerIdentifier.identify() expects a float32 array
+        normalised to [-1.0, 1.0], not raw int16 PCM bytes.
+        """
         import io
         import wave
         import numpy as np
 
         try:
-            # Parse WAV header and extract PCM data
             with io.BytesIO(audio_bytes) as wav_buffer:
                 with wave.open(wav_buffer, 'rb') as wav_file:
-                    # Read all frames
                     frames = wav_file.readframes(wav_file.getnframes())
-                    # Convert to numpy array (assuming 16-bit PCM)
+                    # int16 → float32, normalised to [-1, 1]
                     audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
                     return audio
         except Exception as e:
@@ -366,7 +486,11 @@ class Orchestrator:
 
     @staticmethod
     def _wav_duration(audio_data: bytes) -> float:
-        """Return duration of WAV audio in seconds."""
+        """Return duration of WAV audio in seconds.
+
+        Used to tell the Pi client how long to sleep before opening the follow-up
+        microphone (so it doesn't start listening while Sonos is still playing).
+        """
         import io
         import wave
         try:
@@ -378,7 +502,12 @@ class Orchestrator:
 
     @staticmethod
     def _resample_wav_44100(audio_data: bytes) -> bytes:
-        """Resample WAV to 44100 Hz for Sonos compatibility (Sonos rejects 22050 Hz)."""
+        """Resample WAV to 44100 Hz for Sonos compatibility.
+
+        Sonos rejects WAVs at non-44100 Hz with no error — it just silently
+        fails to play.  Kokoro outputs at 24000 Hz; this resamples to 44100 Hz.
+        Uses linear interpolation (fast, adequate quality for speech).
+        """
         import io
         import wave
         import numpy as np
@@ -391,7 +520,7 @@ class Orchestrator:
                 frames = wf.readframes(wf.getnframes())
 
         if framerate == 44100:
-            return audio_data
+            return audio_data  # Already at target rate — no-op
 
         samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32)
         ratio = 44100 / framerate
@@ -410,11 +539,18 @@ class Orchestrator:
 
     @staticmethod
     def _pad_wav_for_sonos(audio_data: bytes, pad_seconds: float = 2.0) -> bytes:
-        """Append silence so the clip is long enough for Sonos to exit TRANSITIONING.
+        """Append silence so the clip is long enough for Sonos to start playing.
 
-        Sonos Ray requires ~1+ seconds of audio to buffer before reaching
-        PLAYING state. Short clips (< ~1s) silently fail: TRANSITIONING → STOPPED.
-        Trailing silence is inaudible but gives Sonos enough data to start.
+        Sonos Ray requires ~1+ seconds of audio data in its buffer before it
+        transitions from TRANSITIONING to PLAYING state.  Short clips (< ~1s)
+        silently fail: device reaches TRANSITIONING, then immediately goes to
+        STOPPED without playing anything.  Trailing silence is inaudible but
+        provides enough data for Sonos to buffer and begin.
+
+        Args:
+            audio_data: WAV bytes at any sample rate.
+            pad_seconds: Minimum total duration.  Clips already at or above this
+                         are returned unchanged.
         """
         import io
         import wave
@@ -428,7 +564,7 @@ class Orchestrator:
                 duration = wf.getnframes() / framerate
 
         if duration >= pad_seconds:
-            return audio_data  # already long enough
+            return audio_data  # Already long enough
 
         silence_frames = int((pad_seconds - duration) * framerate) * n_channels
         silence = b'\x00' * (silence_frames * sampwidth)
@@ -442,15 +578,30 @@ class Orchestrator:
         return out.getvalue()
 
     @staticmethod
-    def _is_critical_response(response_text: str, commands_executed: list, await_followup: bool) -> bool:
-        """Return True if TTS must play regardless of TV state.
+    def _is_critical_response(response_text: str, commands_executed: list, await_followup: bool, tv_playing: bool = False) -> bool:
+        """Determine whether TTS must play regardless of TV state.
 
-        Critical: timer actions, informational queries, follow-up prompts, questions.
-        Non-critical: pure action acknowledgments (lights, volume, launch, playback).
+        Critical = must play even if TV is on:
+          - Follow-up prompts (user must hear the question to respond)
+          - Any question in the response text (only when TV is NOT playing)
+          - Informational commands (weather, time, timers, calculations)
+          - Memory operations (confirmation that something was saved)
+
+        Non-critical = pure action acknowledgment that can be silently suppressed
+        when TV is playing (lights changed, volume adjusted, show launched):
+          - Light changes, Sonos volume, TV launch/playback commands
+          - No question, no timer, no information conveyed
+
+        When TV is playing, questions from the LLM are NOT critical — they're
+        likely the LLM responding to ambient TV audio.  Only actual informational
+        commands justify interrupting TV playback.
         """
         if await_followup:
             return True
-        if '?' in response_text:
+        # Questions bypass suppression ONLY when TV is off — when TV is playing,
+        # the LLM's questions are usually reactions to ambient TV dialogue and
+        # should not steal Sonos audio control from the TV.
+        if not tv_playing and '?' in response_text:
             return True
         CRITICAL_COMMANDS = {
             'set_timer', 'cancel_timer', 'list_timers',
@@ -461,7 +612,12 @@ class Orchestrator:
         return any(cmd in CRITICAL_COMMANDS for cmd in commands_executed)
 
     def _get_sonos_device(self):
-        """Return cached Sonos device, rediscovering if stale. Returns None if unavailable."""
+        """Return cached Sonos device for TTS routing, rediscovering if stale.
+
+        Discovery is throttled by SONOS_DISCOVERY_CACHE_TTL (default 5 min).
+        If the default zone is not found, falls back to the first device.
+        Returns None if no devices are found or soco is not installed.
+        """
         try:
             import soco
             now = time.time()
@@ -474,7 +630,7 @@ class Orchestrator:
                             self._sonos_device = d
                             break
                     if self._sonos_device is None and devices:
-                        self._sonos_device = devices[0]
+                        self._sonos_device = devices[0]  # Fallback: first device found
                     self._sonos_cache_time = now
                 return self._sonos_device
         except Exception as e:
@@ -482,7 +638,16 @@ class Orchestrator:
             return None
 
     def _sonos_play_uri(self, uri: str, title: str) -> bool:
-        """Play a URI on the cached Sonos device with DIDL metadata."""
+        """Play a URI on the cached Sonos device with DIDL metadata.
+
+        DIDL (Digital Item Description Language) metadata is required by Sonos
+        UPnP/AV stack — without it the device may reject the play_uri call.
+        On failure, forces cache invalidation and retries once.
+
+        Args:
+            uri: HTTP URL the Sonos device will fetch (must be accessible from LAN).
+            title: Display name shown on Sonos controller apps.
+        """
         device = self._get_sonos_device()
         if not device:
             logger.warning("Sonos: no device available for play_uri")
@@ -495,6 +660,7 @@ class Orchestrator:
         try:
             device.play_uri(uri, meta=meta)
         except Exception as e:
+            # Stale device object (e.g. IP changed after DHCP) — invalidate and retry
             logger.warning(f"Sonos: play_uri failed ({e}), forcing rediscovery and retrying")
             with self._sonos_lock:
                 self._sonos_device = None
@@ -507,13 +673,19 @@ class Orchestrator:
         return True
 
     def play_sonos_beep(self, beep_type: str, indicator_light: str = None) -> bool:
-        """Play a beep through Sonos, or flash a LIFX light if TV is playing."""
+        """Play a beep through Sonos, or flash a LIFX light if TV is playing.
+
+        Called by the /api/sonos_beep endpoint (triggered by Pi client beeps).
+        When TV is playing and indicator_light is set, a visual LIFX flash
+        replaces the audio beep to avoid interrupting TV audio.
+        """
         if not SONOS_TTS_OUTPUT:
             return False
         try:
             with self._tv_state_lock:
                 tv_playing = self._last_tv_state == "playing"
             if indicator_light and tv_playing:
+                # TV is playing — use silent LIFX flash instead of Sonos audio
                 threading.Thread(
                     target=self._flash_light_indicator,
                     args=(beep_type, indicator_light),
@@ -527,12 +699,37 @@ class Orchestrator:
             return False
 
     def _poll_tv_state(self):
-        """Background thread: polls TV playback state every 5s to keep _last_tv_state fresh."""
+        """Background thread: poll TV playback state every 5s via ADB.
+
+        Calls _get_tv_playback_state() from adb_cmd.py which runs
+        'adb shell dumpsys media_session'.  State can be up to 5s stale
+        — acceptable for the routing decisions made here.
+
+        Sticky state on failure: if ADB returns 'unknown' (connection timeout,
+        device unreachable), we keep the last known good state rather than
+        resetting.  This prevents a single slow ADB poll from silently
+        disabling ALL TV-aware protections (TTS suppression, await_followup
+        override, LLM context note).  This was the root cause of the
+        2026-03-03 20:16+ incident where the assistant talked over the TV
+        for ~5 minutes because 'unknown' was treated as 'not playing'.
+
+        State transitions are logged at INFO to aid debugging stale-state issues.
+        """
         while True:
             try:
                 state = _get_tv_playback_state()
                 with self._tv_state_lock:
-                    self._last_tv_state = state
+                    prev = self._last_tv_state
+                    if state == "unknown":
+                        # ADB failed — keep last known state (sticky).
+                        # Don't overwrite a valid 'playing' state just because
+                        # ADB was slow; the TV may still be playing.
+                        if prev != "unknown":
+                            logger.debug(f"TV state poll returned 'unknown' — keeping '{prev}'")
+                    else:
+                        if state != prev:
+                            logger.info(f"TV state: {prev} → {state}")
+                        self._last_tv_state = state
             except Exception as e:
                 logger.debug(f"TV state poll failed: {e}")
             time.sleep(5)
@@ -540,14 +737,27 @@ class Orchestrator:
     def _flash_light_indicator(self, beep_type: str, light_name: str):
         """Flash a LIFX light as a silent visual indicator (runs in background thread).
 
-        Saves current light state, flashes to an indicator color for ~400ms, then restores.
-        Used instead of Sonos beep when TV audio is active to avoid interrupting playback.
+        Sequence:
+          1. Save current light state (color + power).
+          2. Set light to indicator color for ~400ms.
+          3. Restore original state.
+          4. If light was off, turn it back off after restore.
+
+        Color coding:
+          start (listening) → blue
+          end (processing)  → green
+          error             → red
+          alert (timer)     → orange
+
+        Args:
+            beep_type: Beep type determines indicator color.
+            light_name: LIFX light label to flash (from INDICATOR_LIGHT config).
         """
         _COLORS = {
-            'start': [43690, 65535, 65535, 6500],  # blue: "listening"
-            'end':   [21845, 52428, 65535, 4000],  # green: "got it"
-            'error': [0,     65535, 65535, 3500],  # red: "error"
-            'alert': [10923, 65535, 65535, 3500],  # orange: "alert"
+            'start': [43690, 65535, 65535, 6500],  # blue
+            'end':   [21845, 52428, 65535, 4000],  # green
+            'error': [0,     65535, 65535, 3500],  # red
+            'alert': [10923, 65535, 65535, 3500],  # orange
         }
         color = _COLORS.get(beep_type)
         if color is None:
@@ -566,6 +776,7 @@ class Orchestrator:
             time.sleep(0.4)
             light.set_color(orig_color, duration=150, rapid=True)
             if orig_power < 1000:
+                # Light was off — restore to off after color transition
                 time.sleep(0.15)
                 light.set_power(0, duration=0, rapid=True)
         except Exception as e:
@@ -573,10 +784,15 @@ class Orchestrator:
 
     @staticmethod
     def _append_done_chime(wav_data: bytes) -> bytes:
-        """Append a short done-chime tone after TTS speech (before silence pad).
+        """Embed a done-chime tone at the end of TTS audio.
 
-        Embeds the 'done' signal into the TTS WAV so Sonos plays it at exactly
-        the right time — no client-side timing guesswork needed.
+        When await_followup=True, the Pi needs a signal to open the microphone
+        after the Sonos finishes playing.  A client-side timer is unreliable
+        (Sonos startup latency varies) so we embed the chime directly in the
+        WAV — the user hears "sure, what name?" followed by the chime, then
+        knows to speak.
+
+        Chime: two 1200 Hz tones with a 40ms gap (short, unobtrusive).
         """
         import io
         import math
@@ -607,24 +823,39 @@ class Orchestrator:
         return out.getvalue()
 
     def _route_tts_to_sonos(self, audio_data: bytes, await_followup: bool = False) -> bool:
-        """Resample TTS audio, save it, and trigger Sonos playback. Returns True if successful."""
+        """Resample, optionally chime, pad, buffer, and trigger Sonos playback.
+
+        Full pipeline:
+          1. Check Sonos device available.
+          2. Resample to 44100 Hz.
+          3. Append done-chime if await_followup (so Pi knows when to open mic).
+          4. Pad to minimum 2s duration (Sonos startup buffer requirement).
+          5. Store in memory (served at /audio/tts_latest).
+          6. Call play_uri on Sonos.
+
+        Returns True if Sonos accepted the play_uri call, False otherwise.
+        On False, caller falls back to returning audio_base64 for Pi local play.
+        """
         try:
             if not self._get_sonos_device():
                 logger.warning("No Sonos devices found for TTS output")
                 return False
 
             wav_44k = self._resample_wav_44100(audio_data)
+
             # Chime only when expecting a follow-up — signals "your turn to speak"
             if await_followup:
                 wav_44k = self._append_done_chime(wav_44k)
-            # Pad to minimum duration so Sonos exits TRANSITIONING → PLAYING
+
+            # Pad to ensure Sonos can buffer enough data before PLAYING state
             wav_44k = self._pad_wav_for_sonos(wav_44k, pad_seconds=2.0)
-            # Store in memory — /audio/tts_latest serves from here (no disk write)
+
+            # Store in memory — /audio/tts_latest serves from here (no disk I/O)
             with self._tts_audio_lock:
                 self._tts_audio = wav_44k
 
             uri = f"http://{SERVER_EXTERNAL_HOST}:{SERVER_PORT}/audio/tts_latest"
-            if not self._sonos_play_uri(uri, "Dr. Butts"):
+            if not self._sonos_play_uri(uri, "Igor"):
                 return False
             logger.info(f"TTS routed to Sonos '{self._sonos_device.player_name}'")
             return True
@@ -634,8 +865,16 @@ class Orchestrator:
             return False
 
     def _run_session_summarizer(self, history_snapshot: list):
-        """Background: extract facts from completed conversation and auto-save to memory.
-        Never raises — all errors logged at DEBUG.
+        """Extract memorable facts from a completed conversation and auto-save to memory.
+
+        Runs in a background daemon thread — never raises, never blocks interactions.
+        Only saves NEW facts (skips keys already present in memory.json).
+        Calls LLM.extract_memories() which makes a bare API call expecting JSON back.
+
+        Examples of extracted facts:
+          ("preferences", "coffee", "dark roast")
+          ("people", "sister_name", "Laura")
+          ("schedule", "morning_run", "weekdays at 6am")
         """
         try:
             facts = self.llm.extract_memories(history_snapshot)
@@ -649,13 +888,14 @@ class Orchestrator:
             with _mem_lock:
                 memories = _load_memories()
                 for cat, key, val in facts:
+                    # Sanitize all fields to prevent injection into JSON storage
                     cat = _sanitize(cat, max_len=50).lower().strip()
                     key = _sanitize(key, max_len=50).lower().strip().replace(" ", "_")
                     val = _sanitize(val, max_len=500)
                     if not (cat and key and val):
                         continue
                     if cat in memories and key in memories[cat]:
-                        continue  # don't overwrite known facts
+                        continue  # Don't overwrite known facts — user must explicit save
                     if cat not in memories:
                         memories[cat] = {}
                     memories[cat][key] = val
@@ -668,36 +908,51 @@ class Orchestrator:
         except Exception as e:
             logger.debug(f"Session summarizer failed (non-critical): {e}")
 
+    # When Sonos is the active audio output, Pi volume commands should control
+    # the Sonos instead of the Pi's ALSA mixer (Pi speaker not in use).
     _SONOS_VOLUME_REDIRECT = {
         'set_volume': 'set_sonos_volume',
         'adjust_volume': 'adjust_sonos_volume',
     }
 
-    # TV commands that warrant suppressing the wake word after execution
-    # (TV audio starts up and would cause immediate false triggers)
+    # TV commands that warrant wake word suppression after execution.
+    # Netflix startup, YouTube intro, etc. can immediately retrigger the detector.
     _TV_COMMANDS = {
         'tv_power', 'tv_launch', 'tv_playback', 'tv_skip',
         'tv_search_youtube', 'tv_key', 'tv_adb_connect',
     }
 
     def _execute_command(self, name: str, prefer_sonos: bool = False, **kwargs) -> str:
-        """
-        Execute a command with Pi callback support.
+        """Execute a command, handling Sonos redirect and Pi hardware RPC.
 
-        Special handling for hardware commands that need to run on Pi.
+        Three paths:
+          1. Sonos redirect: if prefer_sonos and command is a volume command,
+             transparently redirect to the equivalent Sonos command.
+          2. Hardware RPC: set_volume/get_volume must run on Pi (ALSA lives there).
+             Forwarded via PiCallbackClient.hardware_control().
+          3. Local execution: all other commands run directly on the server.
+             After TV commands, suppresses Pi wake word for 20s in a background thread.
+
+        Args:
+            name: Command name as called by the LLM.
+            prefer_sonos: True when Pi output is routed through Sonos.
+            **kwargs: Command parameters from LLM tool call.
+
+        Returns:
+            String result from the command (shown to LLM as tool_result).
         """
-        # When Sonos is the active output, redirect Pi volume commands to Sonos
+        # Redirect Pi volume to Sonos when audio output is Sonos
         if prefer_sonos and name in self._SONOS_VOLUME_REDIRECT:
             name = self._SONOS_VOLUME_REDIRECT[name]
 
-        # Hardware commands get routed to Pi via RPC
+        # Volume commands must execute on Pi — ALSA mixer is not accessible from server
         if name in ('set_volume', 'get_volume'):
             logger.info(f"Routing hardware command '{name}' to Pi")
             result = self.pi_client.hardware_control(name, kwargs)
             threading.Thread(target=log_command, args=(name,), daemon=True).start()
             return result if result else f"Failed to execute {name} on Pi"
 
-        # All other commands execute locally
+        # All other commands execute locally on the server
         try:
             result = commands.execute(name, **kwargs)
             threading.Thread(target=log_command, args=(name,), daemon=True).start()
@@ -705,7 +960,8 @@ class Orchestrator:
             logger.error(f"Command '{name}' failed: {e}")
             return f"Error: {e}"
 
-        # After TV commands, suppress wake word on Pi so startup audio doesn't retrigger
+        # After TV commands, suppress wake word on Pi so startup audio doesn't retrigger.
+        # Runs in a background thread — fire-and-forget, non-blocking.
         if name in self._TV_COMMANDS:
             threading.Thread(
                 target=self.pi_client.suppress_wakeword,
@@ -717,7 +973,11 @@ class Orchestrator:
         return result
 
     def _log_benchmark(self, stage: str, duration: float, transcription: Optional[str] = None, word_count: Optional[int] = None, cost: Optional[float] = None):
-        """Log performance benchmark to CSV."""
+        """Append a performance data point to data/benchmark.csv.
+
+        Creates the file with headers on first write.  Thread-safe via _benchmark_lock.
+        Non-critical — errors are logged but never propagate.
+        """
         try:
             if transcription and not word_count:
                 word_count = len(transcription.split())
@@ -727,7 +987,7 @@ class Orchestrator:
             elif stage == 'llm':
                 model = self.llm.model
             elif stage == 'tts':
-                model = 'piper'
+                model = 'kokoro'
             else:
                 model = 'unknown'
 
@@ -758,7 +1018,11 @@ class Orchestrator:
             logger.error(f"Failed to log benchmark: {e}")
 
     def _load_benchmark_stats(self, stage: str) -> Dict[str, float]:
-        """Load historical statistics for a stage from benchmark.csv."""
+        """Load historical average duration and per-word time for a pipeline stage.
+
+        Used by _log_interaction_stats() to show "vs. avg" deltas in the
+        performance table.  Returns zeros if no data exists yet.
+        """
         durations = []
         per_word_times = []
 
@@ -784,7 +1048,18 @@ class Orchestrator:
             return {'avg_duration': 0, 'avg_per_word': 0}
 
     def _log_interaction_stats(self, timings: Dict[str, float], transcription: str, response_text: str, tts_stats: Dict = None):
-        """Log interaction summary with performance comparison to historical averages."""
+        """Log a formatted performance summary table comparing current vs. historical averages.
+
+        Runs in a background thread — never blocks the response.
+        Example output:
+          ┌───────┬──────────┬────────┬──────────┐
+          │ Stage │   Time   │vs. Avg │ Per Word │
+          ├───────┼──────────┼────────┼──────────┤
+          │ STT   │   0.62s  │  ↓15%  │  0.031s  │
+          │ LLM   │   2.14s  │   ~    │  $0.001  │
+          │ TTS   │   0.83s  │  ↑ 5%  │  0.025s  │
+          └───────┴──────────┴────────┴──────────┘
+        """
         total = timings['total']
         stt_time = timings['stt']
         llm_time = timings['llm']
@@ -802,7 +1077,7 @@ class Orchestrator:
             tts_stats = self._load_benchmark_stats('tts')
 
         def cmp(current, avg) -> str:
-            """Return fixed-width 8-char comparison string."""
+            """Return fixed-width comparison arrow: ↓ fast, ↑ slow, ~ near-average."""
             if avg == 0:
                 return "        "
             pct = ((current - avg) / avg) * 100
@@ -818,8 +1093,6 @@ class Orchestrator:
         def fmt_pw(pw) -> str:
             return f"{pw:.3f}s" if pw is not None else "   —  "
 
-        # ┌───────┬──────────┬────────┬──────────┐
-        # │ Stage │   Time   │vs. Avg │ Per Word │
         W = "┌───────┬──────────┬────────┬──────────┐"
         H = "│ Stage │   Time   │vs. Avg │ Per Word │"
         S = "├───────┼──────────┼────────┼──────────┤"
@@ -841,9 +1114,9 @@ class Orchestrator:
         logger.info(B)
 
     def get_conversation_history(self) -> List[Dict]:
-        """Get current conversation history from LLM."""
+        """Return current LLM conversation history (for API inspection)."""
         return self.llm.get_history()
 
     def clear_conversation_history(self):
-        """Clear conversation history."""
+        """Reset LLM conversation history (for API /api/conversation/clear)."""
         self.llm.clear_history()

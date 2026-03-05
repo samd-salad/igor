@@ -1,8 +1,45 @@
-"""LLM integration with Claude API for conversational AI."""
+"""LLM integration with Claude API for conversational AI.
+
+High-level flow for each user utterance (chat() method):
+  1. Append user message to conversation_history.
+  2. Trim history to MAX_CONVERSATION_HISTORY (drops oldest, compresses to summary).
+  3. Enter tool loop (up to 3 rounds):
+       Round 1: API call with tool_choice=auto
+         -> end_turn (text only) -> return text (pure conversation)
+         -> tool_use -> execute tools
+            -> action commands only -> return "Done." (short-circuit, no round 2)
+            -> any narrated command -> continue to round 2
+       Round 2: Tool results -> API call -> LLM narrates result
+       Round 3: (rare) Multi-step or error recovery
+
+  No rollback: on API failure, user message stays in history. Errors are surfaced
+  to the user, not silently dropped.
+
+History management:
+  - history is stored as [{role, content}] where content is either a string
+    (user/assistant text) or a list of tool_use/tool_result dicts.
+  - History must always START with a plain-text user message — tool_result orphans
+    at the head are dropped to prevent Claude API role validation errors.
+  - When history overflows, dropped messages are summarized in a background thread
+    and stored in _history_summary, injected as <prior_context> next call.
+
+Prompt caching:
+  - _get_system_prompt() returns (base, dynamic) tuple.
+  - base = persona + persistent_memory — stable between save_memory calls,
+    marked cache_control=ephemeral so Anthropic reuses the KV cache (~2000-4000 tokens).
+  - dynamic = current time, speaker, patterns — changes every call, never cached.
+  - Last tool schema is also marked cacheable — stable all session.
+  - Cache efficiency logged at DEBUG: "Cache: N read / M written".
+
+Timeouts:
+  - _LLM_CALL_TIMEOUT: wall-clock timeout on the Future (12s).  If the API hangs
+    or times out on Anthropic's side, this prevents indefinite blocking.
+  - SDK timeout: 10s client-side HTTP timeout; fires first in normal timeout scenarios.
+"""
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, NamedTuple
 import anthropic
 
 from datetime import datetime
@@ -11,82 +48,99 @@ from prompt import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
-_LLM_CALL_TIMEOUT = 12.0  # hard wall-clock timeout per API call (seconds)
+# Hard wall-clock timeout per API call.  Set LONGER than the SDK timeout (10s) so
+# the SDK normally fires first and the exception is caught as APIConnectionError.
+# _LLM_CALL_TIMEOUT is a backstop for the rare case where the SDK itself deadlocks
+# and never raises — then Future.result() fires and we log it as a wall-clock timeout.
+_LLM_CALL_TIMEOUT = 12.0
 
-_ERROR_FRAGMENTS = (
-    'not found', 'not available', 'not connected', 'not installed',
-    'not configured', 'unavailable', 'failed', 'adb error', 'error:',
-    'pi not connected', 'no sonos', 'timed out',
-)
+# Shared thread pool for API calls, parallel tool execution, and background
+# compression/summarization.  max_workers=8 ensures that a burst of parallel
+# tool calls (e.g. "turn off lights AND TV AND set volume") can't starve the
+# pool and block the next API call or background compression.  Old value of 4
+# could deadlock when 3 slow tool calls + 1 API call + 1 compression competed.
+_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="llm_api")
 
-def _is_tool_error(result: str) -> bool:
-    """Return True if a tool result string indicates a failure."""
-    r = result.lower()
-    return any(frag in r for frag in _ERROR_FRAGMENTS)
-_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="llm_api")
 
-# Respond tool — LLM must always call this to deliver its final message.
-# await_followup is a schema-enforced bool; no [AWAIT] marker parsing needed.
-_RESPOND_TOOL = {
-    "name": "respond",
-    "description": (
-        "Send your spoken response to the user. Always call this last to deliver your final message. "
-        "Set await_followup=true ONLY when the user's next response is required to complete the "
-        "current task (e.g. a timer was requested but no duration was given). "
-        "Never set it true after completing a task, giving information, or saying 'anything else?'."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "text": {
-                "type": "string",
-                "description": "Your spoken response. Plain text only — no markdown, asterisks, or bullet points.",
-            },
-            "await_followup": {
-                "type": "boolean",
-                "description": "True only if the user must respond for the current task to be completed.",
-            },
-        },
-        "required": ["text", "await_followup"],
-    },
-}
+class ChatResult(NamedTuple):
+    """Return type for LLM.chat()."""
+    text: str
+    commands_executed: list  # Command names that were called
+
+
+# Commands whose results must be narrated by the LLM (second API round).
+# Everything else short-circuits with "Done." (no second API round).
+NARRATED_COMMANDS = frozenset({
+    'get_weather', 'get_time', 'calculate',
+    'list_timers', 'cancel_timer',
+    'list_feedback', 'list_sonos', 'list_lights', 'list_scenes',
+    'get_volume', 'save_memory', 'forget_memory',
+    'log_feedback', 'resolve_feedback',
+})
 
 
 class LLM:
     """Handles LLM interactions with the Claude API."""
 
     def __init__(self, api_key: str = CLAUDE_API_KEY, model: str = CLAUDE_MODEL, max_history: int = MAX_CONVERSATION_HISTORY):
+        # Anthropic SDK client — single instance shared across all calls
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
         self.max_history = max_history
+
+        # conversation_history: list of {role, content} dicts.
+        # Content is either a plain string or a list of tool_use/tool_result blocks.
+        # Must always start with a plain-text user message (enforced by _trim_history).
         self.conversation_history: List[Dict] = []
+
+        # Cumulative token usage for the current interaction (reset at start of chat()).
+        # Exposed to orchestrator for cost logging.
         self.last_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+
+        # Compressed summary of messages that were dropped from history by _trim_history().
+        # Injected into the system prompt as <prior_context> so the assistant retains
+        # continuity even after the history window rolls over.
         self._history_summary: str = ""
-        self._summary_lock = threading.Lock()  # guards _history_summary across threads
+
+        # Lock protecting _history_summary — a background compression thread writes it
+        # while the main interaction thread reads it in _get_system_prompt().
+        self._summary_lock = threading.Lock()
+
         logger.info(f"LLM initialized: Claude API ({model})")
 
     def _compress_dropped_messages(self, messages: list):
         """Summarize messages being dropped from history into _history_summary.
-        Runs in a background thread — summary is ready for the next interaction.
+
+        Fires in a background thread from _trim_history() so it never blocks the
+        current response.  The summary will be available for the *next* interaction.
+
+        If a prior summary exists, it's prepended so the compressor can chain
+        summaries over very long sessions without losing early context.
+
+        Only plain-text user/assistant messages are included — tool_use/tool_result
+        blocks are skipped (not meaningful as conversation text).
         """
         lines = []
         for msg in messages:
             content = msg.get("content", "")
+            # Only include plain string content — skip tool call/result blocks
             if isinstance(content, str) and content.strip():
                 tag = "User" if msg.get("role") == "user" else "Assistant"
                 lines.append(f"{tag}: {content.strip()}")
         if not lines:
-            return
+            return  # Nothing summarizable — all dropped messages were tool blocks
 
+        # Chain with existing summary if present
         with self._summary_lock:
             prior_summary = self._history_summary
         prior = f"Prior summary:\n{prior_summary}\n\n" if prior_summary else ""
         transcript = "\n".join(lines)
+
         try:
             future = _executor.submit(
                 self.client.messages.create,
                 model=self.model,
-                max_tokens=150,
+                max_tokens=150,   # Compact — just enough for 2-3 sentences
                 timeout=15.0,
                 system="Summarize the key facts and context from this conversation excerpt in 2-3 sentences. Focus on what matters for continuing the conversation naturally.",
                 messages=[{"role": "user", "content": f"{prior}Conversation:\n{transcript}"}],
@@ -99,42 +153,60 @@ class LLM:
                     logger.debug(f"History compressed: {self._history_summary[:80]}...")
                     break
         except Exception as e:
+            # Non-critical — losing the summary just means slightly less context
             logger.debug(f"History compression failed: {e}")
 
     def _get_system_prompt(self, persistent_memory: str = "", speaker: str = None, patterns: str = "") -> tuple:
         """Build system prompt split into (base, dynamic) for prompt caching.
 
-        base   — persona + persistent memory; stable between save_memory calls.
-                 Marked cache_control=ephemeral so Anthropic reuses the KV cache.
-        dynamic — current time/speaker/context; changes every call, never cached.
+        Returns a 2-tuple so _api_call() can send them as separate system blocks:
+          base   — persona + persistent_memory.  Stable between save_memory calls.
+                   Marked cache_control=ephemeral → Anthropic KV-caches this.
+          dynamic — current timestamp, speaker name, history summary, usage patterns.
+                   Changes every call → never cached.
+
+        Splitting avoids re-processing ~2000-4000 tokens of tool schemas + persona
+        on every API call.  Cache read/write counts are logged at DEBUG.
+
+        Args:
+            persistent_memory: Contents of data/memory.json, injected by orchestrator.
+            speaker: Identified speaker name from Resemblyzer, or None.
+            patterns: Formatted string from routines.get_patterns(), or "".
         """
+        # Base: stable persona + user memory (cached by Anthropic)
         base = SYSTEM_PROMPT.format(persistent_memory=persistent_memory)
 
+        # Dynamic: changes every call — time, speaker, history context, usage patterns
         now = datetime.now()
         time_context = f"Current: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
         if speaker:
             time_context += f" | Speaking: {speaker}"
         dynamic = f"<current_context>\n{time_context}\n</current_context>"
 
+        # Inject compressed history summary if overflow has occurred
         with self._summary_lock:
             summary = self._history_summary
         if summary:
             dynamic += f"\n<prior_context>\n{summary}\n</prior_context>"
+
+        # Inject usage patterns (e.g. "get_weather: 6:00–8:00 (7×)")
         if patterns:
             dynamic += f"\n<observed_patterns>\n{patterns}\n</observed_patterns>"
 
         return base, dynamic
 
     @staticmethod
-    def _serialize_content(content, exclude_names: set = None) -> list:
-        """Convert Anthropic SDK content blocks to plain dicts. Optionally exclude tools by name."""
+    def _serialize_content(content) -> list:
+        """Convert Anthropic SDK content blocks to plain dicts for history storage.
+
+        The SDK returns typed objects (TextBlock, ToolUseBlock); history needs
+        plain dicts that can be serialised / compared.
+        """
         result = []
         for block in content:
             if block.type == "text":
                 result.append({"type": "text", "text": block.text})
             elif block.type == "tool_use":
-                if exclude_names and block.name in exclude_names:
-                    continue
                 result.append({
                     "type": "tool_use",
                     "id": block.id,
@@ -144,23 +216,35 @@ class LLM:
         return result
 
     def _trim_history(self):
-        """Trim history and ensure it starts with a plain-text user message.
+        """Trim history to max_history messages and enforce starting invariant.
 
-        When messages are dropped, fires history compression in a background
-        thread so it never blocks the current response. Summary will be ready
-        context isn't lost. tool_result orphans are still dropped to prevent
-        Claude API role validation errors.
+        Two operations:
+        1. If history exceeds max_history, drop the oldest messages.  Compress
+           dropped messages in a background thread — summary ready by next call.
+        2. Drop leading non-text-user messages.  Claude API requires that the
+           first history message is a plain-text user message.  tool_result
+           orphans at the head (left over from a previous tool round) would
+           cause an API validation error ("messages must start with user role
+           with string content").
+
+        Called:
+          - After appending the user message at the start of chat().
+          - After appending the assistant's final text response.
+          - After the "Done." short-circuit path.
         """
         if len(self.conversation_history) > self.max_history:
             to_drop = self.conversation_history[:-self.max_history]
             self.conversation_history = self.conversation_history[-self.max_history:]
             if to_drop:
+                # Background thread — never blocks current response
                 threading.Thread(
                     target=self._compress_dropped_messages,
                     args=(to_drop,),
                     daemon=True,
                     name="HistoryCompressor",
                 ).start()
+
+        # Enforce: history must start with a plain-text user message
         while self.conversation_history:
             first = self.conversation_history[0]
             if first["role"] == "user" and isinstance(first["content"], str):
@@ -168,12 +252,21 @@ class LLM:
             self.conversation_history.pop(0)
 
     def _api_call(self, base_prompt: str, dynamic_context: str, tools: list) -> Optional[object]:
-        """Single API call with prompt caching and hard wall-clock timeout.
+        """Make a single Claude API call with prompt caching and wall-clock timeout.
 
-        base_prompt is marked cache_control=ephemeral so Anthropic's KV cache
-        can skip reprocessing the persona/memory on every turn.  dynamic_context
-        (current time, speaker, patterns) changes each call and is never cached.
-        The last tool is also marked cacheable — tool schemas are stable all session.
+        System prompt is split into two blocks:
+          - base_prompt: marked cache_control=ephemeral → Anthropic caches it
+          - dynamic_context: no cache marker → re-processed every call
+
+        The last tool schema is also marked cacheable — tool schemas are stable
+        all session, so the full tool list is cached after the first call.
+
+        Timeout strategy:
+          - SDK timeout=10.0s: client-side HTTP timeout; normally fires first
+          - future.result(timeout=_LLM_CALL_TIMEOUT=12s): backstop for SDK deadlock
+          - SDK timeout → APIConnectionError; Future timeout → FutureTimeoutError
+
+        Returns the raw Anthropic response object, or None on any error.
         """
         # System: two blocks — cached stable base, uncached dynamic context
         system_blocks = [
@@ -182,7 +275,7 @@ class LLM:
         if dynamic_context:
             system_blocks.append({"type": "text", "text": dynamic_context})
 
-        # Tools: mark the last entry so the entire list is in the cache key
+        # Tools: mark the last entry cacheable so the full list is in the cache key
         cached_tools = list(tools)
         if cached_tools:
             last = dict(cached_tools[-1])
@@ -190,26 +283,36 @@ class LLM:
             cached_tools[-1] = last
 
         try:
+            api_kwargs = {
+                "model": self.model,
+                "max_tokens": 512,   # Voice responses are short; 512 is ample
+                "timeout": 10.0,     # SDK-level HTTP timeout (client-side; fires first)
+                "system": system_blocks,
+                "messages": self.conversation_history,
+            }
+            if cached_tools:
+                api_kwargs["tools"] = cached_tools
+                api_kwargs["tool_choice"] = {"type": "auto"}
+
             future = _executor.submit(
-                self.client.messages.create,
-                model=self.model,
-                max_tokens=512,
-                timeout=10.0,
-                system=system_blocks,
-                tools=cached_tools,
-                tool_choice={"type": "any"},
-                messages=self.conversation_history,
+                self.client.messages.create, **api_kwargs
             )
+            # Wall-clock timeout — fires even if the SDK is stuck waiting for bytes
             response = future.result(timeout=_LLM_CALL_TIMEOUT)
+
+            # Accumulate token usage for cost reporting in orchestrator
             usage = response.usage
             self.last_usage["input_tokens"] += usage.input_tokens
             self.last_usage["output_tokens"] += usage.output_tokens
-            # Log cache efficiency when tokens are served from cache
+
+            # Log cache efficiency — useful for tuning what to cache
             cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
             cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
             if cache_read or cache_write:
                 logger.debug(f"Cache: {cache_read} read / {cache_write} written")
+
             return response
+
         except FutureTimeoutError:
             logger.error(f"LLM timed out after {_LLM_CALL_TIMEOUT}s (wall clock)")
             return None
@@ -231,160 +334,175 @@ class LLM:
         persistent_memory: str = "",
         speaker: str = None,
         patterns: str = "",
-    ) -> Optional[Tuple[str, bool]]:
-        """
-        Send message to LLM and get response.
+    ) -> Optional[ChatResult]:
+        """Process user utterance. Returns ChatResult or None on total failure.
 
-        The LLM must call respond(text, await_followup) as its final action.
-        await_followup is a schema-enforced bool — no text marker parsing.
+        Flow:
+          Round 1: API call with tool_choice=auto
+            -> end_turn -> return text (pure conversation)
+            -> tool_use -> execute tools
+               -> action commands only -> return "Done." (short-circuit, no round 2)
+               -> any narrated command -> continue to round 2
+          Round 2: Tool results -> API call -> LLM narrates result
+          Round 3: (rare) Multi-step or error recovery
+
+        No rollback: on API failure, user message stays in history. Errors are
+        surfaced to the user, not silently dropped.
+
+        Args:
+            user_text: Transcribed speech from the user.
+            tools: List of command tool schemas from commands.get_tools().
+            tool_executor: Callable(name, **kwargs) -> str; wraps commands.execute().
+            persistent_memory: Loaded memory.json contents for system prompt.
+            speaker: Identified speaker name (for personalisation), or None.
+            patterns: Usage pattern string from routines.get_patterns(), or "".
 
         Returns:
-            Tuple of (reply_text, await_followup) or None on failure
+            ChatResult(text, commands_executed) on success, None on failure.
         """
         self.conversation_history.append({"role": "user", "content": user_text})
         self._trim_history()
 
-        # Snapshot AFTER trim so rollback restores the already-compacted state.
-        # If taken before trim, a rollback would restore pre-trim messages and
-        # the next call would re-drop and re-compress the same messages.
-        _history_snapshot = list(self.conversation_history)
-
-        base_prompt, dynamic_context = self._get_system_prompt(persistent_memory, speaker, patterns)
+        base_prompt, dynamic_context = self._get_system_prompt(
+            persistent_memory, speaker, patterns
+        )
         self.last_usage = {"input_tokens": 0, "output_tokens": 0}
+        commands_executed = []
 
-        all_tools = tools + [_RESPOND_TOOL]
+        for round_num in range(3):
+            response = self._api_call(base_prompt, dynamic_context, tools)
 
-        def _fail():
-            """Roll back conversation history and return None."""
-            self.conversation_history = _history_snapshot
-            return None
-
-        commands_succeeded = False  # True after at least one round with no tool errors
-
-        for round_num in range(6):  # max 5 command rounds + 1 respond round
-            response = self._api_call(base_prompt, dynamic_context, all_tools)
             if response is None:
-                if commands_succeeded:
-                    # Commands ran fine; only the respond round timed out.
-                    # Store "Done." so the conversation loop closes properly,
-                    # then return so it gets synthesized and played.
-                    logger.warning("Respond round timed out after successful commands — returning 'Done.'")
-                    self.conversation_history.append({"role": "assistant", "content": "Done."})
+                if commands_executed:
+                    self.conversation_history.append(
+                        {"role": "assistant", "content": "Done."}
+                    )
                     self._trim_history()
-                    return ("Done.", False)
-                return _fail()
+                    return ChatResult("Done.", commands_executed)
+                return None
 
             tool_calls = [b for b in response.content if b.type == "tool_use"]
 
             if not tool_calls:
-                # Shouldn't happen with tool_choice=any — fall back gracefully
-                logger.warning("LLM returned no tool calls despite tool_choice=any")
-                text = "".join(b.text for b in response.content if b.type == "text").strip()
-                if text:
-                    self.conversation_history.append({"role": "assistant", "content": text})
-                    self._trim_history()
-                    return (text, False)
-                return _fail()
-
-            respond_call = next((b for b in tool_calls if b.name == "respond"), None)
-            command_calls = [b for b in tool_calls if b.name != "respond"]
-
-            if respond_call and not command_calls:
-                # Clean respond-only turn: store as plain text, skip the tool_use block
-                text = respond_call.input.get("text", "").strip()
-                await_followup = bool(respond_call.input.get("await_followup", False))
+                # Pure text response (tool_choice=auto, LLM chose not to use tools)
+                text = "".join(
+                    b.text for b in response.content if b.type == "text"
+                ).strip()
                 if not text:
-                    logger.warning("respond called with empty text")
-                    return _fail()
-                logger.info(f"LLM responded: '{text}' (await={await_followup})")
-                self.conversation_history.append({"role": "assistant", "content": text})
+                    logger.warning("LLM returned empty response")
+                    return None
+                self.conversation_history.append(
+                    {"role": "assistant", "content": text}
+                )
                 self._trim_history()
-                return (text, await_followup)
+                return ChatResult(text, commands_executed)
 
-            if command_calls:
-                # Store assistant turn, excluding the respond tool_use to keep history clean
-                serialized = self._serialize_content(response.content, exclude_names={"respond"})
-                self.conversation_history.append({"role": "assistant", "content": serialized})
+            # Capture any text the LLM sent alongside tool calls (e.g.
+            # "Let me set that for you" + [tool_use]).  Used in place of
+            # "Done." so the user hears the LLM's phrasing, not a generic ack.
+            accompanying_text = "".join(
+                b.text for b in response.content if b.type == "text"
+            ).strip()
 
-                def _exec_call(call):
-                    logger.info(f"Executing tool: {call.name}({call.input})")
-                    try:
-                        result = tool_executor(call.name, **call.input)
-                        logger.info(f"Tool '{call.name}' returned: {result}")
-                        return str(result), _is_tool_error(result)
-                    except Exception as e:
-                        logger.error(f"Tool '{call.name}' failed: {e}")
-                        return f"Error: {e}", True
+            # Execute tool calls
+            serialized = self._serialize_content(response.content)
+            self.conversation_history.append(
+                {"role": "assistant", "content": serialized}
+            )
 
-                any_tool_error = False
-                if len(command_calls) == 1:
-                    result_str, is_err = _exec_call(command_calls[0])
-                    if is_err:
-                        any_tool_error = True
-                    tool_results = [{"type": "tool_result", "tool_use_id": command_calls[0].id, "content": result_str}]
-                else:
-                    # Multiple independent commands — execute in parallel, preserve order
-                    futures = [(call, _executor.submit(_exec_call, call)) for call in command_calls]
-                    tool_results = []
-                    for call, fut in futures:
-                        try:
-                            result_str, is_err = fut.result(timeout=30.0)
-                        except Exception as e:
-                            logger.error(f"Tool '{call.name}' executor error: {e}")
-                            result_str, is_err = f"Error: {e}", True
-                        if is_err:
-                            any_tool_error = True
-                        tool_results.append({"type": "tool_result", "tool_use_id": call.id, "content": result_str})
+            tool_results = []
+            needs_narration = False
 
-                self.conversation_history.append({"role": "user", "content": tool_results})
+            def _exec_one(call):
+                logger.info(f"Executing tool: {call.name}({call.input})")
+                try:
+                    result = tool_executor(call.name, **call.input)
+                    logger.info(f"Tool '{call.name}' returned: {result}")
+                    return str(result)
+                except Exception as e:
+                    logger.error(f"Tool '{call.name}' failed: {e}")
+                    return f"Error: {e}"
 
-                if not any_tool_error:
-                    commands_succeeded = True
+            # Execute all tool calls via thread pool with timeout (even single
+            # calls — prevents indefinite hang if a command blocks).
+            futures = [
+                (call, _executor.submit(_exec_one, call))
+                for call in tool_calls
+            ]
+            for call, fut in futures:
+                try:
+                    result_str = fut.result(timeout=30.0)
+                except Exception as e:
+                    result_str = f"Error: {e}"
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": call.id,
+                    "content": result_str,
+                })
+                commands_executed.append(call.name)
+                if call.name in NARRATED_COMMANDS:
+                    needs_narration = True
 
-                # Short-circuit: if tools failed and there's no respond in this turn,
-                # skip the next LLM API call and surface the error immediately.
-                if any_tool_error and not respond_call:
-                    logger.warning("Tool error detected — skipping LLM response, surfacing error immediately")
-                    return _fail()
+            self.conversation_history.append(
+                {"role": "user", "content": tool_results}
+            )
 
-                if respond_call:
-                    # Commands + respond in same turn — take the respond result
-                    text = respond_call.input.get("text", "").strip()
-                    await_followup = bool(respond_call.input.get("await_followup", False))
-                    if text:
-                        logger.info(f"LLM responded: '{text}' (await={await_followup})")
-                        self.conversation_history.append({"role": "assistant", "content": text})
-                        self._trim_history()
-                        return (text, await_followup)
-                    # empty text with commands — fall through to next round
+            # Action commands: short-circuit without narration round.
+            # Use the LLM's text if it sent one, otherwise generic "Done."
+            if not needs_narration:
+                short_reply = accompanying_text or "Done."
+                self.conversation_history.append(
+                    {"role": "assistant", "content": short_reply}
+                )
+                self._trim_history()
+                return ChatResult(short_reply, commands_executed)
 
-                continue  # loop back for the respond call
+            # Narrated commands: loop back for LLM to read results and respond
+            continue
 
-        logger.error("LLM did not call respond within the round limit")
-        return _fail()
+        # Exhausted rounds
+        logger.warning("LLM exhausted round limit")
+        if commands_executed:
+            self.conversation_history.append(
+                {"role": "assistant", "content": "Done."}
+            )
+            self._trim_history()
+            return ChatResult("Done.", commands_executed)
+        return None
 
     def clear_history(self):
-        """Clear conversation history."""
+        """Clear conversation history (e.g. on explicit user request or /api/conversation/clear)."""
         self.conversation_history = []
         logger.info("Conversation history cleared")
 
     def get_history(self) -> List[Dict]:
-        """Get current conversation history."""
+        """Return a copy of current conversation history."""
         return self.conversation_history.copy()
 
     def get_history_snapshot(self) -> List[Dict]:
-        """Return a copy of conversation history for background summarization."""
+        """Return a copy of history for use by background threads (session summarizer).
+
+        Caller must not modify the returned list — it's a shallow copy of the
+        history at this point in time.
+        """
         return self.conversation_history.copy()
 
     def extract_memories(self, history_snapshot: List[Dict]) -> list:
-        """Lightweight bare API call to extract memorable facts from a conversation.
+        """Extract memorable facts from a completed conversation.
 
-        Returns list of (category, key, value) tuples, or [] on any failure.
-        Uses no tools — expects raw JSON back. Safe to call from a background thread.
+        Called in a background thread by the session summarizer after each
+        non-follow-up interaction.  Makes a bare API call (no tools) and expects
+        raw JSON back.  Conservative — only extracts clear, stable personal facts.
+
+        Returns:
+            List of (category, key, value) tuples, e.g.:
+            [("preferences", "coffee", "dark roast"), ("people", "sister", "Laura")]
+            Empty list on any failure or if nothing is worth saving.
         """
         if not history_snapshot:
             return []
 
+        # Build transcript from plain-text messages only (skip tool blocks)
         lines = []
         for msg in history_snapshot:
             content = msg.get("content", "")
@@ -444,6 +562,6 @@ class LLM:
             return []
 
     def set_history(self, history: List[Dict]):
-        """Set conversation history (for restoring from saved state)."""
+        """Restore conversation history from a saved state."""
         self.conversation_history = history
         logger.info(f"Conversation history restored ({len(history)} messages)")

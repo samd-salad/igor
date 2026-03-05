@@ -11,11 +11,11 @@ Read the file with:
 import json; print(json.dumps(json.loads(open('data/feedback.json').read()), indent=2))
 ```
 
-After fixing an item, update its status to `"resolved"` directly in the JSON, or remind the user to say "resolve feedback #N" to Dr. Butts.
+After fixing an item, update its status to `"resolved"` directly in the JSON, or remind the user to say "resolve feedback #N" to Igor.
 
 ## Project Overview
 
-Dr. Butts is a local voice assistant. A **Raspberry Pi** handles audio I/O; a **PC** handles compute (STT, LLM, TTS).
+Igor is a local voice assistant. A **Raspberry Pi** handles audio I/O; a **PC** handles compute (STT, LLM, TTS).
 
 - **STT**: Faster Whisper (`small` model, CPU)
 - **LLM**: Claude API (`claude-haiku-4-5-20251001`)
@@ -30,11 +30,13 @@ Pi (client/)                         PC (server/)
 ─────────────────────────────────    ─────────────────────────────
 OpenWakeWord wake word detection →   /api/process_interaction
 PyAudio VAD recording                  Whisper STT
-Flask callback server           ←      Claude LLM + tools
-  /api/play_audio                       Kokoro TTS
-  /api/hardware_control          →    /api/play_audio (timer alerts)
-  /api/play_beep                 →    /api/hardware_control (volume RPC)
-  /api/suppress_wakeword         →    (after TV commands)
+Flask callback server           ←      Quality Gate (reject garbage)
+  /api/play_audio                       Intent Router (Tier 1 direct)
+  /api/hardware_control          →      Claude LLM (Tier 2+, tool_choice=auto)
+  /api/play_beep                        Kokoro TTS
+  /api/suppress_wakeword         →    /api/play_audio (timer alerts)
+                                      /api/hardware_control (volume RPC)
+                                      (after TV commands)
 ```
 
 ## Directory Structure
@@ -52,10 +54,12 @@ smart_assistant/
 ├── server/          # PC
 │   ├── main.py
 │   ├── api.py       # FastAPI endpoints + rate limiter
-│   ├── orchestrator.py  # STT→LLM→TTS pipeline
+│   ├── orchestrator.py  # STT→Gate→Router→LLM→TTS pipeline
+│   ├── quality_gate.py  # Post-STT filter (hallucinations, TV dialogue, garbage)
+│   ├── intent_router.py # Tier 1 direct command matching (pause, lights off, etc.)
 │   ├── transcription.py
-│   ├── llm.py       # Claude API client
-│   ├── synthesis.py # Piper TTS
+│   ├── llm.py       # Claude API client (tool_choice=auto, ChatResult, 3-round max)
+│   ├── synthesis.py # Kokoro TTS
 │   ├── event_loop.py  # Timer thread
 │   ├── pi_callback.py # HTTP client → Pi
 │   ├── speaker_id.py  # Resemblyzer speaker identification (optional)
@@ -89,7 +93,7 @@ smart_assistant/
 ├── data/              # Persistent data: memory.json, benchmark.csv
 ├── setup_client.sh    # Pi setup script (deps + OWW base model download)
 ├── setup_server.sh    # PC setup script (deps + voice download)
-└── prompt.py          # LLM system prompt (Dr. Butts persona)
+└── prompt.py          # LLM system prompt (Igor persona)
 ```
 
 ## Command System
@@ -157,11 +161,17 @@ No other API keys needed. Weather uses Open-Meteo (free, no account). Smart home
 
 ## LLM / Conversation
 
+- **Tiered pipeline**: STT → Quality Gate → Intent Router (Tier 1) → LLM (Tier 2+) → TTS
+- **Quality gate** (`server/quality_gate.py`): rejects Whisper hallucinations, single non-command words, repetitive text, and long TV dialogue before LLM
+- **Intent router** (`server/intent_router.py`): maps unambiguous short phrases ("pause", "lights off", "mute") directly to commands — zero LLM latency
+- **LLM**: `tool_choice=auto`, no respond() tool, max 3 rounds. Action commands short-circuit with "Done." (1 API call); narrated commands (weather, timers) get a second call for LLM to read results
+- `ChatResult(text, commands_executed)` return type from `llm.chat()`
+- `NARRATED_COMMANDS` frozenset in `server/llm.py` controls which commands get a narration round
+- `await_followup` heuristic in orchestrator: `endswith('?') and not commands_executed and len(words) < 20`
 - History capped at `MAX_CONVERSATION_HISTORY` (10) messages
 - `_trim_history()` ensures history always starts with a plain-text user message — tool_result orphans are dropped to avoid Claude API role errors
-- `await_followup` bool on the respond tool: client listens again without wake word
 - Persistent memory injected into system prompt from `data/memory.json`
-- Session summarizer runs after each non-follow-up turn to auto-save facts to memory (skipped when TV is playing)
+- Session summarizer runs after each non-follow-up turn to auto-save facts to memory (skipped for Tier 1 and TV)
 - History overflow compresses dropped messages into `_history_summary` injected as `<prior_context>`
 
 ## Interaction Flows
@@ -172,9 +182,9 @@ No other API keys needed. Weather uses Open-Meteo (free, no account). Smart home
 3. `_beep("start")` → Sonos `/api/sonos_beep` → light flash if TV playing, else Sonos beep
 4. VAD records until silence, sends WAV to server `/api/process_interaction`
 5. `_beep("end")` on recording complete
-6. Server: STT → LLM (with tools) → Kokoro TTS → response back
+6. Server: STT → Quality Gate → Intent Router / LLM → Kokoro TTS → response back
 7. Pi plays local audio **or** server routes to Sonos (if `prefer_sonos_output=True`)
-8. If `await_followup=True`: client sleeps (tts_dur + 2s), checks suppression, listens again
+8. If `await_followup=True` (heuristic: response ends with `?`, no commands, short): client sleeps (tts_dur + 3.5s for Sonos lag), checks suppression, listens again
 
 ### Beep routing chain (USE_SONOS_OUTPUT=True)
 ```
@@ -187,12 +197,16 @@ _beep(type) → _sonos_beep(type) → POST /api/sonos_beep
 
 ### TV-playing path
 - `_last_tv_state` is polled every 5s via ADB (`dumpsys media_session`); up to 5s stale
-- When playing: non-critical TTS suppressed (tts_routed=True, no audio); `await_followup` forced False; session summarizer skipped; LLM context includes TV note
+- **Sticky state**: poller keeps last known good state on ADB failure — never overwrites with "unknown" (root cause of 2026-03-03 incident where assistant talked over TV for 5 min)
+- `_get_tv_playback_state()` returns "idle" when ADB works but no media session found (distinct from "unknown" which means ADB failed)
+- When playing: quality gate rejects long transcriptions (>40 words); non-critical TTS suppressed; `await_followup` forced False; session summarizer skipped; LLM context includes TV note
+- `_is_critical_response()` skips the `?` check when TV is playing — questions from the LLM during TV playback are reactions to ambient audio, not user-critical info
+- System prompt `<ambient_speech>` section teaches the LLM to recognize TV/media dialogue in transcriptions regardless of TV state detection
 - After any TV command: `suppress_wakeword(20s)` sent to Pi → `client/suppress.py` blocks detection
 
 ### Wake word suppression
 - Suppression state lives in `client/suppress.py` (module-level, thread-safe)
-- Pi Flask server at `/api/suppress_wakeword` sets it; checked at top of `_handle_interaction()` and inside detection loop
+- Pi Flask server at `/api/suppress_wakeword` sets it; checked at 4 points: top of `_handle_interaction()`, during warmup loop, after detection confirmed, and inside detection loop
 - Follow-up paths also check suppression before opening the mic
 
 ### Error beep rule
@@ -211,8 +225,35 @@ _beep(type) → _sonos_beep(type) → POST /api/sonos_beep
   3. PC: `python onnx_models/wakeword_creation/train_wakeword.py`
   4. Pi: `scp oww_models/igor.onnx pi:smart_assistant/oww_models/`
 
-## Todo
+## Todo — Polish (current priority)
 
+- [ ] commas and quotes not reading right in TTS
+- [ ] test tv speaking meaning no word response
+- [ ] better network scanning/testing
+- [ ] Multi-user voice interpretation
+
+## Roadmap — Future Features
+
+### Tier 1: High impact, buildable next
+- [ ] Reminders/scheduling — persistent scheduler (datetime targets + push via Pushover/Ntfy)
+- [ ] Calendar integration — Google Calendar API (read-only to start)
+- [ ] Shopping/todo list — shared with phone (Todoist, Google Keep, or self-hosted)
+- [ ] Spotify control (spotipy, needs free developer app registration)
+- [ ] "stop" wake word interrupt — detected in client, needs playback interruption logic
+
+### Tier 2: Learning and growing
+- [ ] Behavioral adaptation — auto-save correction rules to memory, reference at runtime
+- [ ] Proactive suggestions — routines.py pattern data + external APIs on a schedule
+- [ ] Richer memory model — category-based knowledge graph (people, preferences, schedule, home)
+
+### Tier 3: Ambitious / transformative
+- [ ] Web/API agent — browser or API calls for lookups, research, purchases
+- [ ] Multiple client support + bedroom Sonos as 2nd output
+- [ ] Visual awareness — Pi camera for package detection, door, occupancy
+- [ ] Web dashboard for monitoring
+- [ ] Puramax2 litterbox control
+
+### Old
 - [ ] Web dashboard for monitoring
 - [ ] multiple client support
 - [ ] add bedroom sonos as output for 2nd client
@@ -246,6 +287,6 @@ curl http://192.168.0.3:8080/api/health
 curl -X POST http://192.168.0.4:8000/api/conversation/clear
 
 # Logs (systemd)
-sudo journalctl -u drbutts-server -f
-sudo journalctl -u drbutts-client -f
+sudo journalctl -u igor-server -f
+sudo journalctl -u igor-client -f
 ```

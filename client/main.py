@@ -1,5 +1,31 @@
 #!/usr/bin/env python3
-"""Main entry point for Raspberry Pi client."""
+"""Main entry point for Raspberry Pi client.
+
+Responsibilities:
+  1. Run Flask callback server in background thread (receives audio/beep/hardware
+     commands from the PC server).
+  2. Listen for wake word using OpenWakeWord.
+  3. On wake word: record voice, send to PC server, play back response.
+  4. Handle follow-up turns without re-detecting wake word.
+  5. Route beeps and TTS through Sonos when USE_SONOS_OUTPUT=True.
+
+Wake word → response flow:
+  1. Stream mic audio through OpenWakeWord 80ms at a time.
+  2. If a model scores ≥ OWW_THRESHOLD for OWW_TRIGGER_FRAMES consecutive frames
+     → wake word confirmed.
+  3. RMS energy check: reject low-energy detections (TV audio, distant mic).
+  4. _beep("start") → Sonos or local beep.
+  5. VAD records until silence → WAV saved to TEMP_WAV.
+  6. _beep("end") signals recording complete.
+  7. POST audio to server /api/process_interaction.
+  8. If tts_routed=True: server played on Sonos; sleep tts_dur + 3.5s for startup lag.
+  9. If audio_base64: play locally via PyAudio.
+  10. If await_followup: stay in loop without re-triggering wake word.
+
+Error handling:
+  - consecutive_errors counter restarts audio subsystem after 5 failures.
+  - _beep("error") called on all failure paths (respects USE_SONOS_OUTPUT routing).
+"""
 import sys
 import logging
 import time
@@ -42,18 +68,23 @@ logger = setup_logging('client', level=logging.INFO)
 
 
 class PiClient:
-    """Main Pi client for Dr. Butts voice assistant."""
+    """Main Pi client for Igor voice assistant."""
 
     def __init__(self):
         self.audio = Audio()
         self.wakeword_detector: WakeWordDetector = None
         self.server_url = SERVER_URL
+        # Consecutive error counter — after max_consecutive_errors, audio is restarted
         self.consecutive_errors = 0
         self.max_consecutive_errors = 5
 
     def initialize(self) -> bool:
-        """Initialize all client components."""
-        logger.info("Initializing Dr. Butts Voice Assistant Client...")
+        """Initialize audio and wake word detection subsystems.
+
+        Returns:
+            True if all components ready, False if any critical init failed.
+        """
+        logger.info("Initializing Igor Voice Assistant Client...")
 
         logger.info("Loading audio system...")
         if not self.audio.initialize():
@@ -82,7 +113,14 @@ class PiClient:
         return True
 
     def run(self):
-        """Main client loop."""
+        """Main client loop.
+
+        Starts the Flask Pi callback server in a background daemon thread, then
+        runs the wake word detection → interaction loop forever.  Audio subsystem
+        is restarted after 5 consecutive failures to recover from PyAudio hangs.
+        """
+        # Flask Pi server — receives play_audio, hardware_control, play_beep,
+        # suppress_wakeword callbacks from the PC server.
         server_thread = threading.Thread(
             target=run_pi_server,
             args=(self.audio, CLIENT_HOST, CLIENT_PORT),
@@ -92,6 +130,7 @@ class PiClient:
         server_thread.start()
         logger.info(f"Pi server started on {CLIENT_HOST}:{CLIENT_PORT}")
 
+        # Brief pause to let Flask bind its port before we start sending beeps
         time.sleep(1)
 
         logger.info("Entering main loop. Listening for wake word...")
@@ -110,6 +149,8 @@ class PiClient:
                     logger.error(f"Interaction failed ({self.consecutive_errors}/{self.max_consecutive_errors}): {e}")
 
                     if self.consecutive_errors >= self.max_consecutive_errors:
+                        # Audio subsystem may be hung (e.g. ALSA buffer overrun).
+                        # Restart it to recover without rebooting the Pi.
                         logger.error("Too many consecutive errors, restarting audio...")
                         self._beep("error")
                         self.audio.cleanup()
@@ -127,7 +168,15 @@ class PiClient:
                 self.wakeword_detector.delete()
 
     def _sonos_beep(self, beep_type: str):
-        """Fire-and-forget beep via server Sonos endpoint (non-blocking)."""
+        """Fire-and-forget beep via server Sonos endpoint.
+
+        Sends a POST to /api/sonos_beep on the PC server, which plays the beep
+        through the Sonos soundbar (or flashes the indicator light if TV is playing).
+        Runs in a daemon thread so it never blocks the interaction loop.
+
+        Args:
+            beep_type: "start", "end", "error", or "alert".
+        """
         def _send():
             try:
                 requests.post(
@@ -136,23 +185,47 @@ class PiClient:
                     timeout=3,
                 )
             except Exception:
-                pass
+                pass  # Beep failure is non-critical; never raise
         threading.Thread(target=_send, daemon=True).start()
 
     def _beep(self, beep_type: str):
         """Play beep locally or via Sonos depending on output mode.
 
-        'start' = listening indicator; 'end' = recording stopped, processing;
-        'error' = something failed. No 'done' beep — the done chime is
-        embedded in the TTS WAV and plays naturally at end of speech.
+        When USE_SONOS_OUTPUT=True all audio goes through the Sonos soundbar
+        (including beeps), so local PyAudio beeps are bypassed entirely.
+
+        Beep semantics:
+          'start'  — listening, about to record
+          'end'    — recording stopped, sending to server
+          'error'  — something failed (routes via this method so Sonos mode works)
+          (no 'done' — the done chime is embedded in the TTS WAV itself)
+
+        Args:
+            beep_type: One of 'start', 'end', 'error', 'alert'.
         """
         if USE_SONOS_OUTPUT:
             self._sonos_beep(beep_type)
         else:
+            # Calls e.g. self.audio.beep_start(), self.audio.beep_error()
             getattr(self.audio, f"beep_{beep_type}")()
 
     def _handle_interaction(self):
-        """Handle a single voice interaction (may include follow-ups)."""
+        """Handle a single detection cycle: listen → wake word → record → respond.
+
+        Called in a tight loop from run().  Returns immediately if suppressed
+        (e.g. within 20s after a TV command) or if wake word is not detected.
+
+        Wake word detection details:
+          - Mic audio is read in 1280-byte chunks (~80ms at 16kHz 16-bit mono).
+          - Each chunk is fed to OWW; per-model confidence scores come back.
+          - A model must exceed OWW_THRESHOLD for OWW_TRIGGER_FRAMES *consecutive*
+            frames to confirm (avoids single-frame false positives).
+          - RMS energy filter: if the buffered audio is too quiet, it's likely
+            TV audio or distant room sound rather than close-mic speech.
+          - The rolling audio buffer (OWW_SAMPLE_BUFFER_SECONDS) captures the
+            wake word audio for saving as a training sample (auto-labeling).
+        """
+        # Skip entire cycle if wake word is currently suppressed
         if is_suppressed():
             logger.debug("Wake word suppressed — skipping detection cycle")
             time.sleep(0.1)
@@ -160,42 +233,60 @@ class PiClient:
 
         logger.debug("Listening for wake word...")
 
-        # Rolling buffer: keeps the last N chunks so we can save the detection audio
-        chunk_bytes = 1280
+        # Rolling buffer: keeps the last N chunks so we can save the detection audio.
+        # Only allocated if OWW_AUTO_SAVE_SAMPLES is enabled (saves disk I/O otherwise).
+        chunk_bytes = 1280  # 80ms at 16kHz, 16-bit mono
         buffer_chunks = int(OWW_SAMPLE_BUFFER_SECONDS * SAMPLE_RATE * 2 / chunk_bytes) + 1
         audio_buffer = deque(maxlen=buffer_chunks) if OWW_AUTO_SAVE_SAMPLES else None
 
         stream = self.audio.open_stream()
         try:
-            # Prime OWW's internal feature buffers with real audio so cold-start
-            # doesn't cause false positives. We do NOT reset() afterward — the
-            # detection loop's consecutive counter starts at 0 regardless, so
-            # warmup scores can't accumulate toward a trigger.
+            # Warmup: feed ~2s of real audio through OWW's feature extractor before
+            # starting the detection loop.  OWW's mel-spectrogram + embedding buffers
+            # need a few seconds to stabilize — without warmup the model starts with
+            # stale/zero features and can generate false positives on the first frames.
+            # We do NOT reset() afterward; the consecutive counter starts at 0 regardless
+            # so warmup scores can't accumulate toward a trigger.
+            #
+            # Suppression check inside warmup: a TV command's suppress_wakeword RPC
+            # can arrive while we're warming up.  Without this check, we'd warm up
+            # for 2s, start detecting, and immediately trigger on TV startup audio.
             WARMUP_CHUNKS = 25  # ~2s at 80ms/frame, 16 kHz
             for _ in range(WARMUP_CHUNKS):
+                if is_suppressed():
+                    logger.info("Wake word suppressed during warmup — aborting")
+                    self.wakeword_detector.reset()
+                    return
                 self.wakeword_detector.predict(
                     stream.read(chunk_bytes, exception_on_overflow=False)
                 )
 
             wake_word = None
-            consecutive: dict[str, int] = {}
+            consecutive: dict[str, int] = {}  # Per-model consecutive frame counter
             while not wake_word:
                 audio_bytes = stream.read(chunk_bytes, exception_on_overflow=False)
+
+                # Check mid-detection suppression (e.g. TV command triggered by another client)
                 if is_suppressed():
                     logger.info("Wake word suppressed mid-detection — resetting")
                     self.wakeword_detector.reset()
                     return
+
                 if audio_buffer is not None:
                     audio_buffer.append(audio_bytes)
+
                 predictions = self.wakeword_detector.predict(audio_bytes)
                 for name, score in predictions.items():
                     if score >= OWW_THRESHOLD:
                         consecutive[name] = consecutive.get(name, 0) + 1
                         if consecutive[name] >= OWW_TRIGGER_FRAMES:
+                            # Required consecutive frames reached → confirmed detection
                             wake_word = name
                             break
                     else:
+                        # Reset on any sub-threshold frame — must be *consecutive*
                         consecutive[name] = 0
+
         finally:
             stream.close()
 
@@ -203,7 +294,9 @@ class PiClient:
             logger.warning("Wake word detection failed")
             return
 
-        # RMS check: reject low-energy detections (TV/room audio vs close-mic speech)
+        # RMS energy check: reject low-energy detections.
+        # TV audio or room reflections can trigger OWW at low energy.
+        # Close-mic speech is significantly louder — threshold set in config.
         if OWW_MIN_RMS > 0 and audio_buffer:
             import numpy as np
             buf_audio = np.frombuffer(b"".join(audio_buffer), dtype=np.int16)
@@ -214,10 +307,21 @@ class PiClient:
                 return
 
         logger.info(f"Wake word detected: {wake_word}")
-        self.wakeword_detector.reset()
+        self.wakeword_detector.reset()  # Clear OWW's internal state for next detection
+
+        # Final suppression check after detection confirmed — catches the case where
+        # a TV command's suppress RPC arrived between the detection loop exit and here.
+        # Without this, TV startup audio can trigger a detection, pass the RMS check,
+        # and start an interaction before the suppression window takes effect.
+        if is_suppressed():
+            logger.info("Wake word suppressed after detection — discarding")
+            return
 
         if audio_buffer:
+            # Save buffered audio as a positive training sample for OWW retraining
             self._save_wake_sample(audio_buffer)
+
+        # Brief pause between wake word detection and start beep
         time.sleep(0.2)
 
         try:
@@ -225,11 +329,23 @@ class PiClient:
         except Exception as e:
             logger.warning(f"Start beep failed: {e}")
 
-        time.sleep(0.1)
+        # Wait for beep echo to decay before recording.  The Sonos soundbar is
+        # in the same room as the Pi's USB mic — without enough gap, the beep's
+        # acoustic reflection contaminates the first ~100ms of the recording and
+        # Whisper produces garbage for the first word.  0.4s is enough for room
+        # reflections to fall below the noise floor while still feeling responsive.
+        # The VAD recorder also flushes 3 frames on open (vad_recorder.py:50-52)
+        # which handles any remaining tail.
+        time.sleep(0.4)
         self._process_and_respond(wake_word, is_followup=False)
 
     def _save_wake_sample(self, audio_buffer: deque):
-        """Save the buffered detection audio as a positive training sample."""
+        """Save buffered detection audio as a positive training sample.
+
+        Auto-saved samples are named auto_NNNN.wav in WAKE_SAMPLES_DIR.
+        Used for incremental OWW model retraining to improve detection accuracy.
+        Failures are non-critical — sample saving never blocks the interaction.
+        """
         try:
             WAKE_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
             existing = len(list(WAKE_SAMPLES_DIR.glob("auto_*.wav")))
@@ -243,24 +359,52 @@ class PiClient:
         except Exception as e:
             logger.warning(f"Failed to save wake sample: {e}")
 
+    # Maximum follow-up depth to prevent infinite conversation loops
     MAX_FOLLOWUP_DEPTH = 5
 
     def _process_and_respond(self, wake_word: str, is_followup: bool = False):
-        """Record audio, send to server, play response, and handle follow-ups iteratively."""
+        """Record audio, send to server, play response, and handle follow-ups.
+
+        Iterative (not recursive) follow-up loop — depth tracked by counter.
+        Each iteration:
+          1. Record audio (VAD stops on silence, or FOLLOWUP_TIMEOUT for follow-ups).
+          2. POST to /api/process_interaction with audio + wake_word + prefer_sonos.
+          3. Route response:
+             a. tts_routed=True  → server played on Sonos; sleep for duration + 2s
+                (extra 2s covers Sonos TRANSITIONING→PLAYING startup lag).
+             b. audio_base64     → decode and play locally via PyAudio.
+          4. After audio ends: unsuppress() clears any TV-command suppression so the
+             user can immediately speak again without waiting the full 20s window.
+          5. If await_followup=True and under depth limit: stay in loop.
+
+        The 3.5s Sonos buffer is added because when the server calls play_uri() and
+        returns tts_duration_seconds, the Sonos device is still TRANSITIONING — audio
+        hasn't started yet.  Sonos devices (especially Ray/Beam) can take 1-3s to
+        transition from STOPPED → TRANSITIONING → PLAYING.  Without enough margin,
+        the follow-up microphone opens before speech finishes and captures the tail
+        of the TTS audio, which Whisper transcribes as garbage input.
+
+        Args:
+            wake_word: Detected wake word name (passed to server for context).
+            is_followup: True when continuing a conversation without re-triggering.
+        """
         depth = 0
         while True:
+            # Record audio (VAD-gated); follow-up uses shorter timeout
             if not self.audio.record(TEMP_WAV, timeout=FOLLOWUP_TIMEOUT if is_followup else None):
                 if is_followup:
                     logger.info("Follow-up timed out, ending conversation")
+                    self._beep("end")  # Signal: mic closed, conversation over
                     return
                 logger.error("Recording failed")
                 self._beep("error")
                 return
 
-            self._beep("end")
+            self._beep("end")  # Signal: processing started
             logger.info("Recording complete")
 
             try:
+                # Read WAV and encode to base64 for JSON transport
                 audio_bytes = read_wav_file(TEMP_WAV)
                 audio_b64 = encode_audio_base64(audio_bytes)
 
@@ -268,6 +412,7 @@ class PiClient:
                     audio_base64=audio_b64,
                     wake_word=wake_word,
                     timestamp=get_timestamp(),
+                    # Tell server to route TTS to Sonos instead of sending audio_base64
                     prefer_sonos_output=USE_SONOS_OUTPUT,
                 )
 
@@ -288,44 +433,59 @@ class PiClient:
                     return
 
                 transcription = result.get('transcription', '')
-                logger.info(f"Transcription: '{transcription}'")
+                log_t = transcription[:100] + ('...' if len(transcription) > 100 else '')
+                logger.info(f"Transcription: '{log_t}'")
 
                 if result.get('error'):
                     logger.error(f"Server reported error: {result['error']}")
                     self._beep("error")
                     return
 
+                # Quality gate rejection: server returns empty response with no error.
+                # Don't beep or confuse the user — just silently stop.
+                if not result.get('response_text') and not result.get('audio_base64') and not result.get('tts_routed'):
+                    logger.info("Server returned empty response (quality gate rejection)")
+                    return
+
                 if result.get('tts_routed'):
-                    # TTS playing on Sonos — no local audio playback
+                    # TTS is playing on Sonos — no local audio needed.
+                    # We must sleep for the TTS duration + 2s Sonos startup lag
+                    # before opening the follow-up microphone.
                     logger.info("TTS routed to Sonos")
                     if result.get('await_followup') and depth < self.MAX_FOLLOWUP_DEPTH:
                         logger.info("Bot is awaiting follow-up response (Sonos routed)")
                         tts_dur = result.get('tts_duration_seconds') or 5.0
-                        # +2.0s: Sonos startup latency (TRANSITIONING→PLAYING) means
-                        # audio hasn't started yet when server responds; without this
-                        # margin the follow-up listen window opens before speech ends.
+                        # +3.5s: Sonos startup latency (TRANSITIONING→PLAYING) means
+                        # audio hasn't started yet when server responds.  Sonos Ray/Beam
+                        # can take 1-3s to start; 3.5s margin ensures the mic doesn't
+                        # open until speech has fully finished playing.
                         # No start beep here — the chime embedded in the TTS audio is
                         # the listening signal; a second beep would double-trigger.
-                        time.sleep(tts_dur + 2.0)
-                        unsuppress()  # TTS done; clear TV command suppression
+                        time.sleep(tts_dur + 3.5)
+                        unsuppress()  # TTS done; clear any active TV-command suppression
                         depth += 1
                         is_followup = True
                         continue
                     else:
                         logger.info("Interaction complete")
                         tts_dur = result.get('tts_duration_seconds') or 5.0
-                        time.sleep(tts_dur + 2.0)
-                        unsuppress()  # TTS done; clear TV command suppression
+                        time.sleep(tts_dur + 3.5)
+                        unsuppress()  # TTS done; clear any active TV-command suppression
                         return
+
                 elif result.get('audio_base64'):
+                    # Server returned audio bytes — play locally via PyAudio
                     response_audio = decode_audio_base64(result['audio_base64'])
                     if not self.audio.play_audio_bytes(response_audio):
                         logger.error("Failed to play response audio")
                         self._beep("error")
                         return
 
-                    unsuppress()  # Audio playback done; clear any active suppression
+                    # Audio finished playing — clear any TV suppression so user can speak
+                    unsuppress()
+
                     if result.get('await_followup') and depth < self.MAX_FOLLOWUP_DEPTH:
+                        # Follow-up: stay in loop, play start beep to signal "listening"
                         logger.info("Bot is awaiting follow-up response")
                         time.sleep(0.3)
                         self._beep("start")
