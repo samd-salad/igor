@@ -59,7 +59,7 @@ def _get_synthesizer():
             raise RuntimeError("Failed to load Kokoro TTS model")
         # Pre-cache Tier 1 responses so cache-hit tests work
         from server.intent_router import get_cacheable_responses
-        cacheable = list(get_cacheable_responses()) + ["Done."]
+        cacheable = list(get_cacheable_responses()) + ["Done.", "Didn't catch that."]
         _synthesizer.pre_generate(cacheable)
         logger.info("Kokoro TTS loaded (lazy init)")
     return _synthesizer

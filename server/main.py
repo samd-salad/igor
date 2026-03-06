@@ -62,7 +62,7 @@ def initialize_services():
 
     # Pre-cache TTS for common short responses (zero-latency on Tier 1 commands)
     from server.intent_router import get_cacheable_responses
-    cacheable = list(get_cacheable_responses()) + ["Done."]
+    cacheable = list(get_cacheable_responses()) + ["Done.", "Didn't catch that."]
     synthesizer.pre_generate(cacheable)
 
     # Initialize Pi callback client
