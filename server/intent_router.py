@@ -71,6 +71,16 @@ _LIGHT_ATTRIBUTE_WORDS = frozenset({
     "color", "colour", "temperature", "temp", "percent", "low", "high",
 })
 
+# Room/zone words — when these appear with "light", the user likely wants a specific
+# room's lights. Bail to LLM since Tier 1 can't pass a label parameter.
+_ZONE_WORDS = frozenset({
+    "living", "bedroom", "kitchen", "bathroom", "office", "dining",
+    "hallway", "garage", "basement", "upstairs", "downstairs",
+})
+
+# Negation words — bail to LLM when present (user means the opposite of the command)
+_NEGATION_WORDS = frozenset({"don't", "dont", "not", "never", "stop"})
+
 
 def _pattern(fn: Callable[[str], Optional[Tier1Match]]):
     """Decorator to register a pattern matcher."""
@@ -82,11 +92,11 @@ def _pattern(fn: Callable[[str], Optional[Tier1Match]]):
 def _match_lights(text: str) -> Optional[Tier1Match]:
     """Match light on/off commands with filler words.
 
-    Examples that match: "turn the living room lights off",
-    "shut off the lights please", "kill the lights"
+    Examples that match: "turn the lights off please", "shut off the lights",
+    "kill the lights"
 
-    Examples that bail to LLM: "turn on the light blue",
-    "set the lights to 50", "lights on warm"
+    Examples that bail to LLM: "turn on the light blue", "set the lights to 50",
+    "lights on warm", "living room lights off" (needs label param)
     """
     words = text.split()
     has_light = any(w in ("light", "lights") for w in words)
@@ -96,6 +106,10 @@ def _match_lights(text: str) -> Optional[Tier1Match]:
     # Bail if any word suggests a color/brightness/temperature attribute —
     # the user wants more than a simple on/off toggle.
     if any(w in _LIGHT_ATTRIBUTE_WORDS for w in words):
+        return None
+
+    # Bail if a zone/room name is present — LLM needs to pass the label param
+    if any(w in _ZONE_WORDS for w in words):
         return None
 
     # Bail if a number is present (brightness level like "lights on 50")
@@ -157,8 +171,12 @@ def _match_mute(text: str) -> Optional[Tier1Match]:
     """Match mute/unmute with filler.
 
     Examples: "mute the tv", "unmute please", "mute the sound", "tv mute"
+    Bails on negation: "don't mute" falls through to LLM.
     """
     words = text.split()
+    # Bail on negation — "don't mute" means the opposite
+    if any(w in _NEGATION_WORDS for w in words):
+        return None
     core = [w for w in words if w not in _FILLER_WORDS]
     if not core:
         return None

@@ -196,6 +196,8 @@ class Orchestrator:
                 'timings': {},
                 'speaker': None,
                 'await_followup': False,
+                'tts_routed': False,
+                'tts_duration_seconds': 0.0,
                 'error': 'Audio file too large'
             }
 
@@ -238,6 +240,8 @@ class Orchestrator:
                 'timings': timings,
                 'speaker': None,
                 'await_followup': False,
+                'tts_routed': False,
+                'tts_duration_seconds': 0.0,
                 'error': 'Speech recognition failed'
             }
 
@@ -277,6 +281,8 @@ class Orchestrator:
                 'timings': timings,
                 'speaker': speaker_name,
                 'await_followup': False,
+                'tts_routed': False,
+                'tts_duration_seconds': 0.0,
                 'error': None,
             }
         transcription = filtered
@@ -292,9 +298,12 @@ class Orchestrator:
                         tier1.command, prefer_sonos=prefer_sonos, **tier1.params,
                     )
                     result = fut.result(timeout=30.0)
-                # Check if the command actually failed — don't mask with hardcoded text
-                result_lower = result.lower() if result else ""
-                if any(f in result_lower for f in ('error', 'failed', 'not found', 'not available', 'not connected', 'unknown')):
+                # Check if the command actually failed — don't mask with hardcoded text.
+                # Use startswith to avoid false positives on normal result text
+                # that happens to contain "error" or "unknown" as substrings.
+                result_lower = result.lower().strip() if result else ""
+                _error_prefixes = ('error', 'failed', 'not found', 'not available', 'not connected', 'unknown command')
+                if any(result_lower.startswith(p) for p in _error_prefixes):
                     response_text = result  # Surface the actual error to the user
                 else:
                     response_text = tier1.response
@@ -353,6 +362,8 @@ class Orchestrator:
                     'timings': timings,
                     'speaker': speaker_name,
                     'await_followup': False,
+                    'tts_routed': False,
+                    'tts_duration_seconds': 0.0,
                     'error': 'AI processing failed'
                 }
 
