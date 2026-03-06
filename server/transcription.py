@@ -55,7 +55,7 @@ class Transcriber:
             vad_filter=True,
             condition_on_previous_text=False,
             compression_ratio_threshold=2.4,
-            log_prob_threshold=-0.7,
+            log_prob_threshold=-1.0,  # permissive — per-segment filter below handles quality
         )
         segments = list(segments)
         if not segments:
@@ -82,12 +82,14 @@ class Transcriber:
             logger.warning(f"Transcription rejected: no_speech_prob={avg_no_speech:.2f}")
             return None
 
-        text = " ".join(seg.text for seg in segments).strip()
+        text = " ".join(seg.text.strip() for seg in segments).strip()
         if not text:
             logger.warning("Transcription resulted in empty text")
             return None
 
-        logger.info(f"Transcribed: '{text}'")
+        # Debug level — orchestrator logs the authoritative truncated version at INFO
+        logger.debug(f"Transcribed ({len(segments)} segments): '{text[:100]}'")
+
         return text
 
     def transcribe(self, audio_path: str) -> Optional[str]:
