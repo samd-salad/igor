@@ -7,6 +7,9 @@ Two matching passes:
   1. Exact match — normalized phrase looked up in _DIRECT_COMMANDS dict.
   2. Pattern match — keyword-based matchers (OVOS Adapt-style) for common variations
      like "can you pause", "volume to 50", "turn the living room lights off please".
+
+Safety rule: pattern matchers must bail out when extra context words suggest the user
+wants something more nuanced (color, brightness, zone, etc.) that only the LLM can handle.
 """
 import logging
 import re
@@ -41,6 +44,12 @@ _DIRECT_COMMANDS = {
     "unmute":              ("sonos_mute", {"state": "off"}, "Unmuted."),
 }
 
+# Playback-only subset of _DIRECT_COMMANDS — used by _match_playback_filler
+# to avoid matching "mute"/"unmute"/"lights on"/etc. through the wrong matcher.
+_PLAYBACK_COMMANDS = frozenset({
+    "pause", "play", "resume", "stop", "next", "skip", "previous",
+})
+
 
 # ---------------------------------------------------------------------------
 # Pattern matchers — second pass when exact match fails.
@@ -54,6 +63,14 @@ _FILLER_WORDS = frozenset({
     "would", "hey", "igor", "just",
 })
 
+# Words that signal the user wants a light attribute (color, brightness, temp)
+# rather than a simple on/off toggle. Bail out to LLM when any of these appear.
+_LIGHT_ATTRIBUTE_WORDS = frozenset({
+    "blue", "red", "green", "yellow", "orange", "purple", "pink", "white",
+    "warm", "cool", "cold", "dim", "bright", "brighter", "dimmer",
+    "color", "colour", "temperature", "temp", "percent", "low", "high",
+})
+
 
 def _pattern(fn: Callable[[str], Optional[Tier1Match]]):
     """Decorator to register a pattern matcher."""
@@ -65,12 +82,24 @@ def _pattern(fn: Callable[[str], Optional[Tier1Match]]):
 def _match_lights(text: str) -> Optional[Tier1Match]:
     """Match light on/off commands with filler words.
 
-    Examples: "turn the living room lights off", "shut off the lights please",
-    "kill the lights", "switch on the light"
+    Examples that match: "turn the living room lights off",
+    "shut off the lights please", "kill the lights"
+
+    Examples that bail to LLM: "turn on the light blue",
+    "set the lights to 50", "lights on warm"
     """
     words = text.split()
     has_light = any(w in ("light", "lights") for w in words)
     if not has_light:
+        return None
+
+    # Bail if any word suggests a color/brightness/temperature attribute —
+    # the user wants more than a simple on/off toggle.
+    if any(w in _LIGHT_ATTRIBUTE_WORDS for w in words):
+        return None
+
+    # Bail if a number is present (brightness level like "lights on 50")
+    if re.search(r'\b\d+\b', text):
         return None
 
     if any(w in ("off", "kill", "shut") for w in words):
@@ -85,16 +114,19 @@ def _match_playback_filler(text: str) -> Optional[Tier1Match]:
     """Match playback commands with filler words.
 
     Examples: "can you pause", "please resume", "go ahead and play"
+
+    Only matches playback verbs (pause/play/resume/stop/next/skip/previous),
+    not mute/lights — those have their own dedicated matchers.
     """
     words = text.split()
     core = [w for w in words if w not in _FILLER_WORDS]
     if len(core) != 1:
         return None
-    match = _DIRECT_COMMANDS.get(core[0])
-    if match:
-        cmd_name, params, response = match
-        return Tier1Match(cmd_name, params, response)
-    return None
+    # Only match playback commands, not mute/lights/other entries
+    if core[0] not in _PLAYBACK_COMMANDS:
+        return None
+    cmd_name, params, response = _DIRECT_COMMANDS[core[0]]
+    return Tier1Match(cmd_name, params, response)
 
 
 @_pattern
@@ -102,9 +134,14 @@ def _match_volume_set(text: str) -> Optional[Tier1Match]:
     r"""Match "volume to N" / "set volume at N" / "volume N".
 
     Only matches when a number 0-100 is present alongside "volume".
+    Bails to LLM when a zone name is present (e.g. "bedroom volume to 40")
+    since the Tier 1 path can't pass a zone parameter.
     """
     words = text.split()
     if "volume" not in words:
+        return None
+    # Bail if a zone name is present — LLM needs to route to the right zone
+    if any(w in ("bedroom", "kitchen", "bathroom", "office", "dining") for w in words):
         return None
     m = re.search(r'\b(\d{1,3})\b', text)
     if not m:
@@ -119,16 +156,16 @@ def _match_volume_set(text: str) -> Optional[Tier1Match]:
 def _match_mute(text: str) -> Optional[Tier1Match]:
     """Match mute/unmute with filler.
 
-    Examples: "mute the tv", "unmute please", "mute the sound"
+    Examples: "mute the tv", "unmute please", "mute the sound", "tv mute"
     """
     words = text.split()
     core = [w for w in words if w not in _FILLER_WORDS]
-    # Allow "mute" + optional non-filler words like "tv", "sound", "speakers"
     if not core:
         return None
-    if core[0] == "unmute":
+    # Check anywhere in core, not just first position ("tv mute" should match)
+    if "unmute" in core:
         return Tier1Match("sonos_mute", {"state": "off"}, "Unmuted.")
-    if core[0] == "mute":
+    if "mute" in core:
         return Tier1Match("sonos_mute", {"state": "on"}, "Muted.")
     return None
 
