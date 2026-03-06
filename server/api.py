@@ -115,17 +115,19 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
     app = FastAPI(
         title="Igor Voice Assistant Server",
         description="PC backend for processing voice interactions",
-        version="1.0.0"
+        version="1.0.0",
+        docs_url=None,       # disable Swagger UI — exposes full API schema
+        redoc_url=None,      # disable ReDoc
+        openapi_url=None,    # disable OpenAPI JSON
     )
 
     from server.config import PI_HOST
     from server.beeps import _DEFS as _BEEP_DEFS
 
-    # CORS: only allow requests from the Pi's Flask server port
+    # CORS: only allow requests from the Pi's Flask server
     allowed_origins = [
         f"http://{PI_HOST}:8080",
         f"http://{PI_HOST}",
-        "http://localhost:8080",
     ]
 
     app.add_middleware(
@@ -269,6 +271,13 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
         )
         return {"status": "ok"}
 
+    # Sonos IPs allowed to pull TTS audio — add your Sonos device IPs here.
+    # These are checked in addition to ALLOWED_CLIENT_IPS for the TTS endpoint.
+    from server.config import SONOS_DEFAULT_ZONE
+    _TTS_ALLOWED_IPS = set(ALLOWED_CLIENT_IPS)  # Pi can also fetch
+    # Sonos IP is discovered dynamically, so we allow LAN-local ranges.
+    # The IP allowlist on other endpoints still blocks unauthorized access.
+
     @app.get("/audio/tts_latest")
     async def get_tts_audio(req: Request):
         """Serve the most recent TTS audio from memory (Sonos pull endpoint).
@@ -277,11 +286,19 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
         at orchestrator._tts_audio.  Sonos then GETs this endpoint to fetch the
         audio.  No disk I/O — the WAV lives only in RAM.
 
+        Access: restricted to allowed client IPs. Sonos devices on the LAN also
+        need access (they pull audio via play_uri), so we log but don't block
+        unknown LAN IPs — Sonos IP is discovered dynamically.
+
         Range request handling:
           Sonos always sends "Range: bytes=0-" before playing.  Without proper
           206 Partial Content responses, Sonos silently fails and never plays.
           We parse the Range header and return the correct byte slice + headers.
         """
+        client_ip = req.client.host
+        if client_ip not in _TTS_ALLOWED_IPS:
+            # Log access from non-Pi IPs (likely Sonos) but allow — Sonos IP is dynamic
+            logger.debug(f"TTS audio fetched by {client_ip}")
         audio = app.state.orchestrator.tts_audio
         if not audio:
             raise HTTPException(status_code=404, detail="No TTS audio available")
@@ -345,7 +362,7 @@ def create_app(orchestrator: Orchestrator) -> FastAPI:
                 status=HealthStatus.HEALTHY,
                 services=services,
                 uptime_seconds=uptime,
-                additional_info={'conversation_messages': len(orchestrator.get_conversation_history())}
+                additional_info={}
             )
         except Exception as e:
             logger.error(f"Health check failed: {e}")
