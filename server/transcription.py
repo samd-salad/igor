@@ -55,12 +55,27 @@ class Transcriber:
             vad_filter=True,
             condition_on_previous_text=False,
             compression_ratio_threshold=2.4,
-            log_prob_threshold=-1.0,
+            log_prob_threshold=-0.7,
         )
         segments = list(segments)
         if not segments:
             logger.warning("Transcription: no speech detected")
             return None
+
+        # Per-segment confidence filtering — reject high-confidence garbage
+        filtered_segments = []
+        for seg in segments:
+            if seg.no_speech_prob > 0.7:
+                logger.debug(f"Dropping segment (no_speech={seg.no_speech_prob:.2f}): '{seg.text[:50]}'")
+                continue
+            if seg.avg_logprob < -0.8:
+                logger.debug(f"Dropping segment (logprob={seg.avg_logprob:.2f}): '{seg.text[:50]}'")
+                continue
+            filtered_segments.append(seg)
+        if not filtered_segments:
+            logger.warning("All segments rejected by confidence filter")
+            return None
+        segments = filtered_segments
 
         avg_no_speech = sum(s.no_speech_prob for s in segments) / len(segments)
         if avg_no_speech > 0.6:

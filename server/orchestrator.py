@@ -142,6 +142,9 @@ class Orchestrator:
         # Values: "playing", "paused", "stopped", "unknown"
         self._last_tv_state: str = "unknown"
         self._tv_state_lock = threading.Lock()
+        # ADB circuit breaker — exponential backoff on consecutive failures
+        self._adb_consecutive_failures: int = 0
+        self._adb_backoff_interval: float = 5.0
         self._tv_poll_thread = threading.Thread(target=self._poll_tv_state, daemon=True, name="TVStatePoll")
         self._tv_poll_thread.start()
 
@@ -392,7 +395,7 @@ class Orchestrator:
 
         # Step 3: Text-to-Speech
         start = time.time()
-        audio_data = self.synthesizer.synthesize(_strip_markdown(response_text))
+        audio_data = self.synthesizer.synthesize_fast(_strip_markdown(response_text))
         timings['tts'] = time.time() - start
 
         if not audio_data:
@@ -699,11 +702,14 @@ class Orchestrator:
             return False
 
     def _poll_tv_state(self):
-        """Background thread: poll TV playback state every 5s via ADB.
+        """Background thread: poll TV playback state via ADB with circuit breaker.
 
         Calls _get_tv_playback_state() from adb_cmd.py which runs
-        'adb shell dumpsys media_session'.  State can be up to 5s stale
-        — acceptable for the routing decisions made here.
+        'adb shell dumpsys media_session'.
+
+        Circuit breaker: after consecutive failures, backs off exponentially
+        (5s → 30s → 60s → 120s) to stop hammering a dead ADB connection.
+        Resets to 5s on any successful poll.
 
         Sticky state on failure: if ADB returns 'unknown' (connection timeout,
         device unreachable), we keep the last known good state rather than
@@ -722,17 +728,33 @@ class Orchestrator:
                     prev = self._last_tv_state
                     if state == "unknown":
                         # ADB failed — keep last known state (sticky).
-                        # Don't overwrite a valid 'playing' state just because
-                        # ADB was slow; the TV may still be playing.
+                        self._adb_consecutive_failures += 1
+                        n = self._adb_consecutive_failures
+                        if n >= 10 and self._adb_backoff_interval < 120:
+                            self._adb_backoff_interval = 120.0
+                            logger.warning(f"ADB circuit breaker: {n} failures, backing off to 120s")
+                        elif n >= 6 and self._adb_backoff_interval < 60:
+                            self._adb_backoff_interval = 60.0
+                            logger.warning(f"ADB circuit breaker: {n} failures, backing off to 60s")
+                        elif n >= 3 and self._adb_backoff_interval < 30:
+                            self._adb_backoff_interval = 30.0
+                            logger.warning(f"ADB circuit breaker: {n} failures, backing off to 30s")
                         if prev != "unknown":
                             logger.debug(f"TV state poll returned 'unknown' — keeping '{prev}'")
                     else:
+                        if self._adb_consecutive_failures > 0:
+                            logger.info(
+                                f"ADB recovered after {self._adb_consecutive_failures} failures, "
+                                f"resuming 5s polling"
+                            )
+                            self._adb_consecutive_failures = 0
+                            self._adb_backoff_interval = 5.0
                         if state != prev:
                             logger.info(f"TV state: {prev} → {state}")
                         self._last_tv_state = state
             except Exception as e:
                 logger.debug(f"TV state poll failed: {e}")
-            time.sleep(5)
+            time.sleep(self._adb_backoff_interval)
 
     def _flash_light_indicator(self, beep_type: str, light_name: str):
         """Flash a LIFX light as a silent visual indicator (runs in background thread).

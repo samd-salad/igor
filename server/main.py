@@ -60,6 +60,11 @@ def initialize_services():
         logger.error("Failed to initialize Kokoro TTS")
         sys.exit(1)
 
+    # Pre-cache TTS for common short responses (zero-latency on Tier 1 commands)
+    from server.intent_router import get_cacheable_responses
+    cacheable = list(get_cacheable_responses()) + ["Done."]
+    synthesizer.pre_generate(cacheable)
+
     # Initialize Pi callback client
     pi_url = f"http://{PI_HOST}:{PI_PORT}"
     logger.info(f"Pi client URL: {pi_url}")
