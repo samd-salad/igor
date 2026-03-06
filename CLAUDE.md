@@ -91,10 +91,30 @@ smart_assistant/
 ├── record_samples.py  # Pi recording script (run on Pi before training)
 ├── kokoro/            # Kokoro ONNX model files (PC only): kokoro-v1.0.onnx, voices-v1.0.bin
 ├── data/              # Persistent data: memory.json, benchmark.csv
+├── mcp_server.py      # MCP server for Claude Code (commands + pipeline testing)
+├── .mcp.json          # MCP server config (auto-loaded by Claude Code)
 ├── setup_client.sh    # Pi setup script (deps + OWW base model download)
 ├── setup_server.sh    # PC setup script (deps + voice download)
 └── prompt.py          # LLM system prompt (Igor persona)
 ```
+
+## MCP Testing Tools
+
+`mcp_server.py` exposes Igor commands and pipeline testing tools to Claude Code.
+Heavy models (Whisper, Kokoro) are lazy-loaded on first use.
+
+| MCP Tool | What it does |
+|----------|-------------|
+| `list_commands` | List all auto-discovered voice commands |
+| `run_command` | Execute any command by name + JSON args |
+| `get_command_schema` | Return a command's parameter schema |
+| `test_intent_router` | Probe Tier 1 routing — returns match/fallthrough |
+| `test_quality_gate` | Probe quality gate — returns accept/reject + reason |
+| `test_tts` | Synthesize text, report timing/cache hit/duration |
+| `test_transcription` | Run Whisper on a WAV file, return per-segment confidence |
+| `test_pipeline` | Full gate→router→LLM→TTS with timings per stage |
+| `run_benchmark` | Batch test suite with CSV logging to `data/benchmark.csv` |
+| `tail_logs` | Read recent server log lines with level filtering |
 
 ## Command System
 
