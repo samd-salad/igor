@@ -163,7 +163,7 @@ def _match_volume_set(text: str) -> Optional[Tier1Match]:
     level = int(m.group(1))
     if not 0 <= level <= 100:
         return None
-    return Tier1Match("set_sonos_volume", {"level": level}, "Done.")
+    return Tier1Match("set_sonos_volume", {"level": level}, f"Volume {level}.")
 
 
 @_pattern
