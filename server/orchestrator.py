@@ -940,6 +940,12 @@ class Orchestrator:
             from server.commands.memory_cmd import _load_memories, _save_memories, _sanitize
             from server.commands.memory_cmd import _lock as _mem_lock
 
+            # Only allow auto-save to these categories — prevents adversarial
+            # conversation content from writing to "behavior" (system prompt rules).
+            _ALLOWED_AUTO_CATEGORIES = frozenset({
+                "preferences", "schedule", "people", "personal", "home", "other",
+            })
+
             saved = []
             with _mem_lock:
                 memories = _load_memories()
@@ -949,6 +955,9 @@ class Orchestrator:
                     key = _sanitize(key, max_len=50).lower().strip().replace(" ", "_")
                     val = _sanitize(val, max_len=500)
                     if not (cat and key and val):
+                        continue
+                    if cat not in _ALLOWED_AUTO_CATEGORIES:
+                        logger.debug(f"Session summarizer rejected category '{cat}'")
                         continue
                     if cat in memories and key in memories[cat]:
                         continue  # Don't overwrite known facts — user must explicit save

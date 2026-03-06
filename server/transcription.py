@@ -13,10 +13,22 @@ logger = logging.getLogger(__name__)
 
 
 def _wav_to_float32(audio_bytes: bytes) -> np.ndarray:
-    """Decode WAV bytes to float32 mono array at native sample rate."""
+    """Decode WAV bytes to float32 mono array at native sample rate.
+
+    Validates WAV header to prevent pathological allocations (e.g. a header
+    claiming billions of frames with only a few bytes of data).
+    """
     with wave.open(io.BytesIO(audio_bytes)) as wf:
-        raw = wf.readframes(wf.getnframes())
+        n_frames = wf.getnframes()
+        rate = wf.getframerate()
         channels = wf.getnchannels()
+        # Sanity: reject files claiming > 5 min at any reasonable sample rate,
+        # or rates outside the plausible range for speech audio.
+        if n_frames > 5 * 60 * 48000:
+            raise ValueError(f"WAV claims {n_frames} frames — too large")
+        if rate < 8000 or rate > 48000:
+            raise ValueError(f"WAV sample rate {rate} Hz outside valid range")
+        raw = wf.readframes(n_frames)
     samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
     if channels == 2:
         samples = samples.reshape(-1, 2).mean(axis=1)
