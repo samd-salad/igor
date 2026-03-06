@@ -441,10 +441,12 @@ class PiClient:
                     self._beep("error")
                     return
 
-                # Quality gate rejection: server returns empty response with no error.
-                # Don't beep or confuse the user — just silently stop.
+                # Quality gate rejection during TV playback: server returns empty
+                # response with no error (silence is correct — don't interrupt TV).
+                # Non-TV rejections now return "Didn't catch that." as audio, so
+                # this branch only fires for TV-silent rejections.
                 if not result.get('response_text') and not result.get('audio_base64') and not result.get('tts_routed'):
-                    logger.info("Server returned empty response (quality gate rejection)")
+                    logger.info("Server returned empty response (quality gate rejection, TV silent)")
                     return
 
                 if result.get('tts_routed'):
