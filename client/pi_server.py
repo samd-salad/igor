@@ -235,7 +235,7 @@ def create_pi_app(audio_system, start_time: float) -> Flask:
     return app
 
 
-def run_pi_server(audio_system, host: str = '0.0.0.0', port: int = 8080):
+def run_pi_server(audio_system, host: str = None, port: int = None):
     """Start the Pi callback server (blocking — run in a daemon thread).
 
     Uses Waitress instead of Flask's dev server for production stability.
@@ -244,9 +244,12 @@ def run_pi_server(audio_system, host: str = '0.0.0.0', port: int = 8080):
 
     Args:
         audio_system: Audio instance to use for playback.
-        host: Interface to bind on (default 0.0.0.0 = all interfaces).
-        port: Port to listen on (default 8080).
+        host: Interface to bind on (default from CLIENT_HOST config).
+        port: Port to listen on (default from CLIENT_PORT config).
     """
+    from client.config import CLIENT_HOST, CLIENT_PORT
+    host = host or CLIENT_HOST
+    port = port or CLIENT_PORT
     start_time = time.time()
     app = create_pi_app(audio_system, start_time)
     logger.info(f"Starting Pi server on {host}:{port}")

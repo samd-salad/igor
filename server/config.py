@@ -2,8 +2,8 @@
 import os
 from pathlib import Path
 
-# Server network settings
-SERVER_HOST = "0.0.0.0"  # Listen on all interfaces
+# Server network settings — bind to LAN IP only (not 0.0.0.0)
+SERVER_HOST = os.getenv("SERVER_HOST", "192.168.0.4")
 SERVER_PORT = 8000
 
 # Pi client settings (for callbacks)

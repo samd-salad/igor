@@ -7,8 +7,8 @@ SERVER_HOST = os.getenv("SERVER_HOST", "192.168.0.4")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "8000"))
 SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 
-# Pi server settings (for callbacks from PC)
-CLIENT_HOST = "0.0.0.0"
+# Pi server settings (for callbacks from PC) — bind to LAN IP only (not 0.0.0.0)
+CLIENT_HOST = os.getenv("CLIENT_HOST", "192.168.0.3")
 CLIENT_PORT = 8080
 
 # Audio hardware settings
