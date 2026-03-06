@@ -89,10 +89,14 @@ class PlayAudioRequest(BaseModel):
     @field_validator('audio_base64')
     @classmethod
     def validate_base64(cls, v: str) -> str:
-        """Validate that audio is proper base64 encoding."""
+        """Validate base64 encoding and decoded size."""
         try:
-            base64.b64decode(v, validate=True)
+            decoded = base64.b64decode(v, validate=True)
+            if len(decoded) > 15_000_000:  # ~15 MB decoded max
+                raise ValueError("Decoded audio exceeds maximum size (15 MB)")
             return v
+        except ValueError:
+            raise
         except Exception as e:
             raise ValueError(f"Invalid base64 encoding: {e}")
 

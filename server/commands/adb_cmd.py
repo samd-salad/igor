@@ -76,7 +76,13 @@ def _get_signer() -> "PythonRSASigner":
 
 
 def _adb_shell(command: str, auth_timeout: float = 5.0, cmd_timeout: float = 10.0) -> tuple:
-    """Run a shell command on the TV via ADB. Returns (output, error_str)."""
+    """Run a shell command on the TV via ADB. Returns (output, error_str).
+
+    SECURITY: This executes a raw shell command on the TV's Android OS.
+    All callers MUST sanitize user-controlled values with shlex.quote()
+    before interpolating into the command string. Never pass unsanitized
+    LLM parameters directly.
+    """
     if not _ADB_AVAILABLE:
         return "", "adb-shell not installed. Run: pip install adb-shell"
     device = None
