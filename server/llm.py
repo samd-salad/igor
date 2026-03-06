@@ -448,8 +448,14 @@ class LLM:
             )
 
             # Action commands: short-circuit without narration round.
-            # Use the LLM's text if it sent one, otherwise generic "Done."
-            if not needs_narration:
+            # Check for errors first — if any tool returned an error, let the LLM
+            # see the results and narrate the failure instead of saying "Done." when
+            # something actually broke.  This prevents the user hearing "Done." for
+            # a timer that was never set or a light that didn't respond.
+            has_tool_error = any(
+                r["content"].startswith("Error:") for r in tool_results
+            )
+            if not needs_narration and not has_tool_error:
                 short_reply = accompanying_text or "Done."
                 self.conversation_history.append(
                     {"role": "assistant", "content": short_reply}

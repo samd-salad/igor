@@ -273,6 +273,27 @@ class Orchestrator:
         filtered = filter_transcription(transcription, tv_playing=tv_playing)
         if filtered is None:
             logger.info("Quality gate rejected transcription")
+            # When TV is playing, silence is correct — the rejection is likely TV
+            # dialogue and any audio response would interrupt viewing.
+            # When TV is NOT playing, the user actually spoke but was unclear.
+            # Return a brief TTS nudge so they know to try again (pre-cached,
+            # zero synthesis latency).
+            if not tv_playing:
+                nudge_audio = self.synthesizer.synthesize("Didn't catch that.")
+                if nudge_audio:
+                    import base64
+                    return {
+                        'transcription': transcription,
+                        'response_text': "Didn't catch that.",
+                        'audio_base64': base64.b64encode(nudge_audio).decode(),
+                        'commands_executed': [],
+                        'timings': timings,
+                        'speaker': speaker_name,
+                        'await_followup': False,
+                        'tts_routed': False,
+                        'tts_duration_seconds': 0.0,
+                        'error': None,
+                    }
             return {
                 'transcription': transcription,
                 'response_text': '',
@@ -323,10 +344,16 @@ class Orchestrator:
             tools = commands.get_tools()
             persistent_memory = load_persistent_memory()
 
-            def tool_executor(name: str, **kwargs) -> str:
-                """Wrapper: execute command, track name in commands_executed list."""
-                commands_executed.append(name)
-                return self._execute_command(name, prefer_sonos=prefer_sonos, **kwargs)
+            def tool_executor(command_name: str, **kwargs) -> str:
+                """Wrapper: execute command, track in commands_executed list.
+
+                IMPORTANT: first arg must NOT be called 'name' — several tools
+                (set_timer, cancel_timer) pass 'name' as a keyword argument.
+                Python raises "got multiple values for argument 'name'" if the
+                positional and keyword arg collide.
+                """
+                commands_executed.append(command_name)
+                return self._execute_command(command_name, prefer_sonos=prefer_sonos, **kwargs)
 
             patterns = get_patterns()
 
