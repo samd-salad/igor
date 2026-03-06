@@ -424,15 +424,17 @@ class Orchestrator:
 
         # Step 4: Route TTS to Sonos or return as base64 for Pi local playback
         tts_routed = False
+        tts_suppressed = False
         if prefer_sonos and SONOS_TTS_OUTPUT:
-            if self._is_critical_response(response_text, commands_executed, await_followup, tv_playing=(tv_state == "playing")):
+            if self._is_critical_response(response_text, commands_executed, await_followup, tv_playing=tv_playing):
                 # Critical responses always play (timers, weather, commands with info)
                 tts_routed = self._route_tts_to_sonos(audio_data, await_followup=await_followup)
             else:
                 # Non-critical: suppress when TV is playing (pure action acknowledgments)
-                if tv_state == "playing":
+                if tv_playing:
                     logger.info("TV is playing — suppressing non-critical Sonos TTS")
                     tts_routed = True  # tell client to skip local playback too
+                    tts_suppressed = True
                 else:
                     tts_routed = self._route_tts_to_sonos(audio_data, await_followup=await_followup)
 
@@ -440,8 +442,15 @@ class Orchestrator:
         from shared.utils import encode_audio_base64
         # If Sonos handled it, return empty audio_base64 (Pi won't play locally)
         audio_base64 = "" if tts_routed else encode_audio_base64(audio_data)
-        # Duration used by Pi to know how long to sleep before opening follow-up mic
-        tts_duration_seconds = self._wav_duration(self.get_tts_audio()) if tts_routed else self._wav_duration(audio_data)
+        # Duration used by Pi to know how long to sleep before opening follow-up mic.
+        # When TTS is suppressed (TV playing), use 0 — nothing is playing.
+        # When Sonos routed, use the Sonos buffer. Otherwise use the local audio.
+        if tts_suppressed:
+            tts_duration_seconds = 0.0
+        elif tts_routed:
+            tts_duration_seconds = self._wav_duration(self.get_tts_audio())
+        else:
+            tts_duration_seconds = self._wav_duration(audio_data)
 
         timings['total'] = timings.get('stt', 0) + timings.get('llm', 0) + timings.get('tts', 0)
 
@@ -753,7 +762,21 @@ class Orchestrator:
                             logger.info(f"TV state: {prev} → {state}")
                         self._last_tv_state = state
             except Exception as e:
+                # Exception (import error, unexpected crash) counts as a failure
+                # for circuit breaker purposes — same as "unknown" return.
                 logger.debug(f"TV state poll failed: {e}")
+                with self._tv_state_lock:
+                    self._adb_consecutive_failures += 1
+                    n = self._adb_consecutive_failures
+                    if n >= 10 and self._adb_backoff_interval < 120:
+                        self._adb_backoff_interval = 120.0
+                        logger.warning(f"ADB circuit breaker: {n} failures, backing off to 120s")
+                    elif n >= 6 and self._adb_backoff_interval < 60:
+                        self._adb_backoff_interval = 60.0
+                        logger.warning(f"ADB circuit breaker: {n} failures, backing off to 60s")
+                    elif n >= 3 and self._adb_backoff_interval < 30:
+                        self._adb_backoff_interval = 30.0
+                        logger.warning(f"ADB circuit breaker: {n} failures, backing off to 30s")
             time.sleep(self._adb_backoff_interval)
 
     def _flash_light_indicator(self, beep_type: str, light_name: str):
