@@ -4,7 +4,7 @@ import io
 import logging
 import re
 import wave
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -45,6 +45,18 @@ def _preprocess_text(text: str) -> str:
     text = re.sub(r' +', ' ', text)
 
     return text.strip()
+
+
+def _samples_to_wav(samples: np.ndarray, sample_rate: int) -> bytes:
+    """Pack float32 samples into WAV bytes, clipping to int16 range."""
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        pcm = np.clip(samples * 32767, -32768, 32767).astype(np.int16)
+        wf.writeframes(pcm.tobytes())
+    return buf.getvalue()
 
 
 class Synthesizer:
@@ -89,7 +101,7 @@ class Synthesizer:
             cleaned = _preprocess_text(raw_text)
             if not cleaned or cleaned in self._tts_cache:
                 continue
-            audio = self.synthesize(cleaned)
+            audio = self._synthesize_cleaned(cleaned)
             if audio:
                 self._tts_cache[cleaned] = audio
                 count += 1
@@ -97,7 +109,11 @@ class Synthesizer:
         return count
 
     def synthesize(self, text: str) -> Optional[bytes]:
-        """Synthesize text to speech and return WAV bytes."""
+        """Synthesize text to speech and return WAV bytes.
+
+        Public API — preprocesses text before synthesis. For already-cleaned
+        text, use _synthesize_cleaned() internally.
+        """
         if not text:
             logger.warning("Empty text provided for synthesis")
             return None
@@ -107,6 +123,10 @@ class Synthesizer:
             logger.warning("Text empty after preprocessing")
             return None
 
+        return self._synthesize_cleaned(text)
+
+    def _synthesize_cleaned(self, text: str) -> Optional[bytes]:
+        """Synthesize already-preprocessed text. Checks cache, then Kokoro."""
         if text in self._tts_cache:
             logger.debug(f"TTS cache hit: '{text}'")
             return self._tts_cache[text]
@@ -127,14 +147,7 @@ class Synthesizer:
                 logger.error("Kokoro returned empty audio")
                 return None
 
-            buf = io.BytesIO()
-            with wave.open(buf, 'wb') as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(sample_rate)
-                wf.writeframes((samples * 32767).astype(np.int16).tobytes())
-
-            audio_bytes = buf.getvalue()
+            audio_bytes = _samples_to_wav(samples, sample_rate)
             logger.info(f"Synthesized {len(audio_bytes)} bytes of audio")
             return audio_bytes
 
@@ -147,7 +160,7 @@ class Synthesizer:
 
         For text >= 80 chars, uses Kokoro's create_stream() which yields audio
         at phoneme batch boundaries — overlapping inference of batch N+1 with
-        post-processing of batch N. Falls back to synthesize() on any error.
+        post-processing of batch N. Falls back to sync on any error.
         """
         if not text:
             return None
@@ -163,7 +176,7 @@ class Synthesizer:
 
         # Short text — no streaming benefit (single phoneme batch)
         if len(cleaned) < 80:
-            return self.synthesize(cleaned)
+            return self._synthesize_cleaned(cleaned)
 
         if not self._kokoro:
             logger.error("Synthesizer not initialized")
@@ -172,36 +185,35 @@ class Synthesizer:
         try:
             loop = asyncio.new_event_loop()
             try:
-                chunks = loop.run_until_complete(self._stream_collect(cleaned))
+                chunks, stream_sr = loop.run_until_complete(
+                    self._stream_collect(cleaned)
+                )
             finally:
                 loop.close()
 
             if not chunks:
                 logger.warning("Streaming TTS returned no chunks, falling back")
-                return self.synthesize(cleaned)
+                return self._synthesize_cleaned(cleaned)
 
             all_samples = np.concatenate(chunks)
-            buf = io.BytesIO()
-            with wave.open(buf, 'wb') as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(self.sample_rate)
-                wf.writeframes((all_samples * 32767).astype(np.int16).tobytes())
-
-            audio_bytes = buf.getvalue()
-            logger.info(f"Synthesized (stream) {len(audio_bytes)} bytes from {len(chunks)} chunks")
+            audio_bytes = _samples_to_wav(all_samples, stream_sr)
+            logger.info(
+                f"Synthesized (stream) {len(audio_bytes)} bytes from {len(chunks)} chunks"
+            )
             return audio_bytes
 
         except Exception as e:
             logger.warning(f"Streaming TTS failed ({type(e).__name__}), falling back to sync")
-            return self.synthesize(cleaned)
+            return self._synthesize_cleaned(cleaned)
 
-    async def _stream_collect(self, text: str) -> List[np.ndarray]:
-        """Collect all chunks from create_stream into a list."""
+    async def _stream_collect(self, text: str) -> Tuple[List[np.ndarray], int]:
+        """Collect all chunks from create_stream. Returns (chunks, sample_rate)."""
         chunks = []
-        async for samples, _sr in self._kokoro.create_stream(
+        sample_rate = self.sample_rate  # fallback
+        async for samples, sr in self._kokoro.create_stream(
             text, voice=self.voice, speed=self.speed, lang="en-us"
         ):
             if samples is not None and len(samples) > 0:
                 chunks.append(samples)
-        return chunks
+                sample_rate = sr  # use Kokoro's actual rate
+        return chunks, sample_rate
