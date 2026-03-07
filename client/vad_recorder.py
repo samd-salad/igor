@@ -4,7 +4,12 @@ Adaptive silence detection: the silence duration required to end recording
 scales with how much speech has been captured.  Short utterances (< 1s of
 speech, like "pause") end after 0.6s of silence.  Longer utterances ramp
 up to the full SILENCE_END_DURATION to avoid cutting off mid-thought pauses.
+
+Ambient noise calibration: before each recording, the noise floor is measured
+from a few frames of room audio.  The speech/silence threshold is set relative
+to this floor so that VAD works regardless of mic gain or room noise level.
 """
+import logging
 import numpy as np
 import pyaudio
 import wave
@@ -14,6 +19,8 @@ from client.config import (
     SILENCE_END_DURATION, RMS_SILENCE_THRESHOLD
 )
 
+logger = logging.getLogger(__name__)
+
 # Adaptive silence: short commands end faster, long speech gets more patience.
 # Speech under SHORT_SPEECH_THRESHOLD seconds uses SILENCE_SHORT.
 # Speech over LONG_SPEECH_THRESHOLD seconds uses the full SILENCE_END_DURATION.
@@ -21,6 +28,13 @@ from client.config import (
 SILENCE_SHORT = 0.6           # seconds of silence to end a short command
 SHORT_SPEECH_THRESHOLD = 1.0  # speech duration (s) considered "short"
 LONG_SPEECH_THRESHOLD = 3.0   # speech duration (s) where full patience kicks in
+
+# Ambient noise calibration: multiplier applied to the measured noise floor
+# to derive the effective speech/silence threshold.  2.0x means speech must be
+# at least twice as loud as the room noise to count.  This handles varying mic
+# gains and noisy environments automatically.
+NOISE_FLOOR_MULTIPLIER = 2.0
+CALIBRATION_FRAMES = 5        # frames to sample for noise floor (~400ms at 16kHz/1280)
 
 
 class VADState(Enum):
@@ -61,9 +75,24 @@ class VADRecorder:
             input_device_index=self.device_index
         )
 
-        # Flush initial frames to clear residual audio from buffers
-        for _ in range(3):
-            stream.read(self.chunk_size, exception_on_overflow=False)
+        # Calibrate ambient noise floor from a few frames of room audio.
+        # These frames also flush residual audio from the buffer.
+        ambient_rms_samples = []
+        for _ in range(CALIBRATION_FRAMES):
+            cal_bytes = stream.read(self.chunk_size, exception_on_overflow=False)
+            cal_audio = np.frombuffer(cal_bytes, dtype=np.int16)
+            ambient_rms_samples.append(self.calculate_rms(cal_audio))
+
+        ambient_rms = float(np.median(ambient_rms_samples))
+        # Effective threshold: whichever is higher — the configured floor or
+        # the measured ambient noise scaled up.  This ensures VAD works even
+        # when room noise exceeds the static RMS_SILENCE_THRESHOLD.
+        effective_threshold = max(RMS_SILENCE_THRESHOLD, ambient_rms * NOISE_FLOOR_MULTIPLIER)
+        logger.info(
+            f"VAD calibration: ambient_rms={ambient_rms:.0f}, "
+            f"effective_threshold={effective_threshold:.0f} "
+            f"(config={RMS_SILENCE_THRESHOLD})"
+        )
 
         state = VADState.WAITING_FOR_SPEECH
         frames = []
@@ -90,7 +119,7 @@ class VADRecorder:
                 audio = np.frombuffer(audio_bytes, dtype=np.int16)
                 rms = self.calculate_rms(audio)
 
-                is_speech = rms > RMS_SILENCE_THRESHOLD
+                is_speech = rms > effective_threshold
 
                 if state == VADState.WAITING_FOR_SPEECH:
                     waiting_frames += 1

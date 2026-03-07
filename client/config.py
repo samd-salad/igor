@@ -39,14 +39,16 @@ WAKE_SAMPLES_DIR = BASE_DIR / "wakeword_samples" / "positive"
 
 # Voice Activity Detection (VAD) settings
 #
-# Tradeoff: low threshold stops recording faster (catches quiet pauses) but
-# may truncate speech in noisy rooms.  High threshold keeps recording longer
-# but picks up more TV audio.  1000 is a compromise — true silence is ~200-400
-# RMS, breathy pauses are ~600-1000, normal speech is ~800-4000.
+# RMS_SILENCE_THRESHOLD is the MINIMUM floor — the VAD also calibrates ambient
+# noise at the start of each recording and uses whichever is higher:
+#   effective = max(RMS_SILENCE_THRESHOLD, ambient_rms * 2.0)
+# This auto-adapts to mic gain and room noise.  The static value below is a
+# safety net for unusually quiet environments.
 #
 # SILENCE_END_DURATION: consecutive seconds below threshold to end recording.
 # 1.5s catches natural sentence endings without cutting off mid-thought pauses
 # (most inter-phrase pauses are 0.3-0.8s; 1.5s requires sustained silence).
+# Short commands (<1s speech) use 0.6s instead (see vad_recorder.py).
 SILENCE_END_DURATION = 1.5
 RMS_SILENCE_THRESHOLD = 1000
 MIN_RECORDING = 0.7
