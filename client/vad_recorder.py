@@ -30,11 +30,20 @@ SHORT_SPEECH_THRESHOLD = 1.0  # speech duration (s) considered "short"
 LONG_SPEECH_THRESHOLD = 3.0   # speech duration (s) where full patience kicks in
 
 # Ambient noise calibration: multiplier applied to the measured noise floor
-# to derive the effective speech/silence threshold.  2.0x means speech must be
-# at least twice as loud as the room noise to count.  This handles varying mic
+# to derive the effective speech/silence threshold.  1.8x means speech must be
+# almost twice as loud as the room noise to count.  This handles varying mic
 # gains and noisy environments automatically.
-NOISE_FLOOR_MULTIPLIER = 2.0
+NOISE_FLOOR_MULTIPLIER = 1.8
 CALIBRATION_FRAMES = 5        # frames to sample for noise floor (~400ms at 16kHz/1280)
+# Hard ceiling on the effective threshold.  Even in noisy rooms or with beep
+# echo contamination, the threshold must never exceed this.  Normal close-mic
+# speech at 16kHz/16-bit is typically 2000-6000 RMS; 3000 catches all but
+# whispers while preventing contaminated calibration from killing detection.
+MAX_EFFECTIVE_THRESHOLD = 3000
+# Safety timeout: max seconds to wait for speech even without an explicit
+# timeout.  Prevents the VAD from hanging forever if calibration sets the
+# threshold too high and speech is never detected.
+WAITING_TIMEOUT = 10.0
 
 
 class VADState(Enum):
@@ -85,13 +94,17 @@ class VADRecorder:
 
         ambient_rms = float(np.median(ambient_rms_samples))
         # Effective threshold: whichever is higher — the configured floor or
-        # the measured ambient noise scaled up.  This ensures VAD works even
-        # when room noise exceeds the static RMS_SILENCE_THRESHOLD.
-        effective_threshold = max(RMS_SILENCE_THRESHOLD, ambient_rms * NOISE_FLOOR_MULTIPLIER)
+        # the measured ambient noise scaled up.  Capped at MAX_EFFECTIVE_THRESHOLD
+        # to prevent contaminated calibration (beep echo, early speech) from
+        # setting an impossibly high threshold that blocks all detection.
+        effective_threshold = min(
+            max(RMS_SILENCE_THRESHOLD, ambient_rms * NOISE_FLOOR_MULTIPLIER),
+            MAX_EFFECTIVE_THRESHOLD,
+        )
         logger.info(
             f"VAD calibration: ambient_rms={ambient_rms:.0f}, "
             f"effective_threshold={effective_threshold:.0f} "
-            f"(config={RMS_SILENCE_THRESHOLD})"
+            f"(config={RMS_SILENCE_THRESHOLD}, cap={MAX_EFFECTIVE_THRESHOLD})"
         )
 
         state = VADState.WAITING_FOR_SPEECH
@@ -109,6 +122,9 @@ class VADRecorder:
         short_speech_frames = int(SHORT_SPEECH_THRESHOLD * frames_per_second)
         long_speech_frames = int(LONG_SPEECH_THRESHOLD * frames_per_second)
         initial_timeout_frames = int(initial_timeout * frames_per_second) if initial_timeout else None
+        # Safety timeout: even without an explicit timeout, don't wait forever.
+        # This catches the case where calibration sets the threshold too high.
+        waiting_safety_frames = int(WAITING_TIMEOUT * frames_per_second)
 
         # Count frames where speech was detected (not just total frames recorded)
         speech_frames = 0
@@ -126,6 +142,12 @@ class VADRecorder:
                     # Check for initial timeout (e.g., follow-up mode)
                     if initial_timeout_frames and waiting_frames >= initial_timeout_frames:
                         state = VADState.DONE  # Timeout, no speech detected
+                    elif waiting_frames >= waiting_safety_frames:
+                        logger.warning(
+                            f"VAD safety timeout: no speech detected in {WAITING_TIMEOUT}s "
+                            f"(threshold={effective_threshold:.0f})"
+                        )
+                        state = VADState.DONE
                     elif is_speech:
                         state = VADState.RECORDING
                         frames.append(audio_bytes)
