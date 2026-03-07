@@ -1,4 +1,10 @@
-"""RMS-based Voice Activity Detection and Recording Module."""
+"""RMS-based Voice Activity Detection and Recording Module.
+
+Adaptive silence detection: the silence duration required to end recording
+scales with how much speech has been captured.  Short utterances (< 1s of
+speech, like "pause") end after 0.6s of silence.  Longer utterances ramp
+up to the full SILENCE_END_DURATION to avoid cutting off mid-thought pauses.
+"""
 import numpy as np
 import pyaudio
 import wave
@@ -7,6 +13,14 @@ from client.config import (
     SAMPLE_RATE, MIN_RECORDING, MAX_RECORDING,
     SILENCE_END_DURATION, RMS_SILENCE_THRESHOLD
 )
+
+# Adaptive silence: short commands end faster, long speech gets more patience.
+# Speech under SHORT_SPEECH_THRESHOLD seconds uses SILENCE_SHORT.
+# Speech over LONG_SPEECH_THRESHOLD seconds uses the full SILENCE_END_DURATION.
+# In between, linearly interpolated.
+SILENCE_SHORT = 0.6           # seconds of silence to end a short command
+SHORT_SPEECH_THRESHOLD = 1.0  # speech duration (s) considered "short"
+LONG_SPEECH_THRESHOLD = 3.0   # speech duration (s) where full patience kicks in
 
 
 class VADState(Enum):
@@ -61,8 +75,14 @@ class VADRecorder:
         frames_per_second = self.sample_rate / self.chunk_size
         min_frames = int(MIN_RECORDING * frames_per_second)
         max_frames = int(MAX_RECORDING * frames_per_second)
-        silence_threshold_frames = int(SILENCE_END_DURATION * frames_per_second)
+        silence_max_frames = int(SILENCE_END_DURATION * frames_per_second)
+        silence_short_frames = int(SILENCE_SHORT * frames_per_second)
+        short_speech_frames = int(SHORT_SPEECH_THRESHOLD * frames_per_second)
+        long_speech_frames = int(LONG_SPEECH_THRESHOLD * frames_per_second)
         initial_timeout_frames = int(initial_timeout * frames_per_second) if initial_timeout else None
+
+        # Count frames where speech was detected (not just total frames recorded)
+        speech_frames = 0
 
         try:
             while state != VADState.DONE:
@@ -81,17 +101,29 @@ class VADRecorder:
                         state = VADState.RECORDING
                         frames.append(audio_bytes)
                         total_frames = 1
+                        speech_frames = 1
 
                 elif state == VADState.RECORDING:
                     frames.append(audio_bytes)
                     total_frames += 1
 
-                    if not is_speech:
-                        silence_frames += 1
-                        if silence_frames >= silence_threshold_frames and total_frames >= min_frames:
-                            state = VADState.DONE
-                    else:
+                    if is_speech:
+                        speech_frames += 1
                         silence_frames = 0
+                    else:
+                        silence_frames += 1
+                        # Adaptive silence threshold: short commands end fast,
+                        # longer speech gets more patience for mid-thought pauses.
+                        if speech_frames <= short_speech_frames:
+                            needed = silence_short_frames
+                        elif speech_frames >= long_speech_frames:
+                            needed = silence_max_frames
+                        else:
+                            # Linear ramp between short and long
+                            ratio = (speech_frames - short_speech_frames) / (long_speech_frames - short_speech_frames)
+                            needed = int(silence_short_frames + ratio * (silence_max_frames - silence_short_frames))
+                        if silence_frames >= needed and total_frames >= min_frames:
+                            state = VADState.DONE
 
                     if total_frames >= max_frames:
                         state = VADState.DONE
