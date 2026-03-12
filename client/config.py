@@ -29,6 +29,15 @@ TEMP_WAV = str(BASE_DIR / "data" / "recording.wav")  # local path avoids /tmp ra
 OWW_MODEL_DIR = BASE_DIR / "oww_models"
 OWW_MODEL_PATHS = [str(p) for p in sorted(OWW_MODEL_DIR.glob("*.onnx"))]
 OWW_THRESHOLD = 0.75  # Detection threshold (0–1). Higher = fewer false positives.
+                       # If using a verifier model, scores are more conservative —
+                       # you may need to lower this to 0.5-0.6.
+
+# Custom verifier model (second-stage speaker-specific filter).
+# Train with: python train_verifier.py (on PC, after training the base ONNX model).
+# Deploy: scp oww_models/igor_verifier.pkl pi:smart_assistant/oww_models/
+# Set to None to disable. Retrain if you retrain the base ONNX model.
+OWW_VERIFIER_PATH = next(OWW_MODEL_DIR.glob("*_verifier.pkl"), None)
+OWW_VERIFIER_THRESHOLD = 0.3  # Base score must exceed this to trigger verifier
 OWW_TRIGGER_FRAMES = 5  # Consecutive frames above threshold required to trigger.
                          # Each frame is ~80ms (1280 samples at 16kHz).
                          # Increase to suppress false positives from brief noisy spikes.

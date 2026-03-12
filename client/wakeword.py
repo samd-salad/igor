@@ -11,17 +11,33 @@ from openwakeword.model import Model
 
 
 class WakeWordDetector:
-    def __init__(self, model_paths: List[str], threshold: float = 0.5):
+    def __init__(self, model_paths: List[str], threshold: float = 0.5,
+                 verifier_path: str = None, verifier_threshold: float = 0.3):
         """
         Args:
-            model_paths: Paths to trained .onnx wakeword model files.
-            threshold:   Detection score threshold (0–1). Higher = fewer false positives.
+            model_paths:        Paths to trained .onnx wakeword model files.
+            threshold:          Detection score threshold (0–1). Higher = fewer false positives.
+            verifier_path:      Path to a custom verifier .pkl (speaker-specific second stage).
+            verifier_threshold: Base score must exceed this to trigger verifier.
         """
         if not model_paths:
             raise ValueError("At least one model path is required")
 
         self._threshold = threshold
-        self._model = Model(wakeword_models=model_paths, inference_framework="onnx")
+
+        # Build verifier dict: maps each model stem to the verifier .pkl
+        custom_verifier_models = {}
+        if verifier_path:
+            for p in model_paths:
+                custom_verifier_models[Path(p).stem] = verifier_path
+
+        self._model = Model(
+            wakeword_models=model_paths,
+            inference_framework="onnx",
+            vad_threshold=0.5,  # Silero VAD pre-filter: non-speech audio never reaches classifier
+            custom_verifier_models=custom_verifier_models or None,
+            custom_verifier_threshold=verifier_threshold,
+        )
 
         # Friendly names: model stem with underscores → spaces
         self._stems = {Path(p).stem: Path(p).stem.replace("_", " ") for p in model_paths}

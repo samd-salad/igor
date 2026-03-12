@@ -47,6 +47,8 @@ from client.config import (
     SAMPLE_RATE,
     OWW_MODEL_PATHS,
     OWW_THRESHOLD,
+    OWW_VERIFIER_PATH,
+    OWW_VERIFIER_THRESHOLD,
     OWW_TRIGGER_FRAMES,
     OWW_MIN_RMS,
     OWW_AUTO_SAVE_SAMPLES,
@@ -103,6 +105,8 @@ class PiClient:
             self.wakeword_detector = WakeWordDetector(
                 model_paths=OWW_MODEL_PATHS,
                 threshold=OWW_THRESHOLD,
+                verifier_path=str(OWW_VERIFIER_PATH) if OWW_VERIFIER_PATH else None,
+                verifier_threshold=OWW_VERIFIER_THRESHOLD,
             )
             keywords = [Path(p).stem.replace("_", " ") for p in OWW_MODEL_PATHS]
             logger.info(f"Wake word detection initialized. Keywords: {keywords}")

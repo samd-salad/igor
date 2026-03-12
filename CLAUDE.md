@@ -296,25 +296,47 @@ USE_SONOS_OUTPUT=True + INDICATOR_LIGHT=None:
 - [ ] better network scanning/testing
 - [ ] Multi-user voice interpretation
 
+## Wakeword Improvement Plan
+
+**Quick wins (do now):**
+1. Enable Silero VAD pre-filter — add `vad_threshold=0.5` to `Model()` in `wakeword.py`. Non-speech audio never reaches the classifier.
+2. Train a custom verifier model — OWW v0.6.0 built-in speaker-specific logistic regression. Needs ~10s speech + false activation clips. Cuts 95% of false alarms.
+3. Retrain with real negatives — already have hundreds of TV/speech/silence samples in `wakeword_samples/negative/`.
+
+**Next (2-3 hours):**
+4. Synthetic positive generation with Kokoro — generate thousands of "Igor" samples with varied voices/speeds, mix with noise/reverb. Biggest single accuracy boost per OWW community.
+
+**Not worth pursuing:** Whisper-based wake word (too heavy for Pi), Snowboy (dead), SpeechBrain (research toolkit), always-on ASR, few-shot approaches. OpenWakeWord is the right engine — augment, don't replace.
+
 ## Roadmap — Future Features
+
+### "Alive House" Stack (build in order, compounds)
+- [ ] Automation Choreography — "movie time" = dim lights + TV on + Sonos vol 30. `data/scenes.yaml`, Tier 1 intent routing, sequential step execution
+- [ ] Proactive Intelligence — routines.py pattern detection + scheduler thread + Claude Haiku call (~$0.01/check). Max 2 proactive messages/hr, never during TV
+- [ ] Room-to-Room Intercom — "tell the bedroom dinner's ready". TTS via Kokoro, deliver to target room's Pi/Sonos. Broadcast mode for all rooms
 
 ### Tier 1: High impact, buildable next
 - [ ] Reminders/scheduling — persistent scheduler (datetime targets + push via Pushover/Ntfy)
+- [ ] Local LLM fallback — Ollama + Qwen3 4B, try/except on Claude API error, auto-recovery
+- [ ] "stop" wake word interrupt — second OWW model, playback interruption logic
+- [ ] Spotify control (spotipy, needs free developer app registration)
 - [ ] Calendar integration — Google Calendar API (read-only to start)
 - [ ] Shopping/todo list — shared with phone (Todoist, Google Keep, or self-hosted)
-- [ ] Spotify control (spotipy, needs free developer app registration)
-- [ ] "stop" wake word interrupt — detected in client, needs playback interruption logic
 
 ### Tier 2: Learning and growing
+- [ ] Emotional voice adaptation — librosa pitch/energy extraction, mood hint in system prompt, adaptive TTS speed
+- [ ] Circadian lighting + soundscapes — auto color temp by time of day, ambient audio from Sonos
 - [ ] Behavioral adaptation — auto-save correction rules to memory, reference at runtime
-- [ ] Proactive suggestions — routines.py pattern data + external APIs on a schedule
 - [ ] Richer memory model — category-based knowledge graph (people, preferences, schedule, home)
 
-### Tier 3: Ambitious / transformative
+### Tier 3: Ambitious / transformative (hardware needed)
+- [ ] mmWave presence + follow-me audio — $8/room (LD2410B + ESP32), music follows between Sonos zones, auto-lights on enter/leave
+- [ ] Visual intelligence — Pi AI Camera ($70, on-chip inference), package detection, visitor recognition, OCR
+- [ ] Streaming ASR — WebSocket audio chunks, latency drops from ~3s to ~1.5s
 - [ ] Web/API agent — browser or API calls for lookups, research, purchases
 - [x] Multiple client support + bedroom Sonos as 2nd output
-- [ ] Visual awareness — Pi camera for package detection, door, occupancy
 - [ ] Web dashboard for monitoring
+- [ ] Entertainment host — trivia night, D&D dungeon master, scorekeeping, sound effects
 - [ ] Puramax2 litterbox control
 
 ## Quick Reference
