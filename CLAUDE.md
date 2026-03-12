@@ -4,14 +4,16 @@ Guidance for Claude Code when working in this repository.
 
 ## Dev Session Workflow
 
-At the start of every session, check `data/feedback.json` for open change requests and proactively offer to fix them. Example: "You have 2 open items: response verbosity after light commands, and Sonos reconnect on stale cache. Want me to work through them?"
+At the start of every session, check `data/brain.json` for open feedback entries and proactively offer to fix them. Example: "You have 2 open items: response verbosity after light commands, and Sonos reconnect on stale cache. Want me to work through them?"
 
-Read the file with:
+Read feedback with:
 ```python
-import json; print(json.dumps(json.loads(open('data/feedback.json').read()), indent=2))
+from server.brain import init_brain; from server.config import BRAIN_FILE
+brain = init_brain(BRAIN_FILE)
+for e in brain.list_feedback("open"): print(f"#{e['data']['id']}: {e['data']['issue']}")
 ```
 
-After fixing an item, update its status to `"resolved"` directly in the JSON, or remind the user to say "resolve feedback #N" to Igor.
+After fixing an item, call `brain.resolve_feedback(N)`, or remind the user to say "resolve feedback #N" to Igor.
 
 ## Project Overview
 
@@ -78,6 +80,7 @@ smart_assistant/
 │   ├── enroll_speaker.py  # CLI tool for enrolling speaker voice profiles
 │   ├── pair_google_tv.py  # CLI tool for TV pairing (androidtvremote2)
 │   ├── beeps.py       # Generate beep WAV files for Sonos output
+│   ├── brain.py       # Unified Brain Store (memory, routines, feedback, reminders, summaries)
 │   ├── routines.py    # Command usage pattern logging
 │   ├── config.py
 │   └── commands/    # Auto-discovered LLM tools
@@ -105,7 +108,7 @@ smart_assistant/
 ├── onnx_models/wakeword_creation/train_wakeword.py  # PC training script
 ├── record_samples.py  # Pi recording script (run on Pi before training)
 ├── kokoro/            # Kokoro ONNX model files (PC only): kokoro-v1.0.onnx, voices-v1.0.bin
-├── data/              # Persistent data: memory.json, benchmark.csv, rooms.yaml
+├── data/              # Persistent data: brain.json, benchmark.csv, rooms.yaml
 │   └── rooms.yaml.example  # Template for multi-room configuration
 ├── mcp_server.py      # MCP server for Claude Code (commands + pipeline testing)
 ├── .mcp.json          # MCP server config (auto-loaded by Claude Code)
@@ -186,8 +189,15 @@ class MyCommand(Command):
 **`client/config.py`** — update `SERVER_HOST`, `AUDIO_DEVICE`, `OWW_THRESHOLD`; set `CLIENT_ID`/`ROOM_ID` for multi-client
 **`shared/protocol.py`** — endpoint path constants only (no IPs)
 
-Environment variables required:
-- `ANTHROPIC_API_KEY` — server only
+Environment variables:
+- `ANTHROPIC_API_KEY` (required) — server only
+- `SERVER_HOST` / `PI_HOST` / `PI_PORT` — network defaults (192.168.0.4, .3, 8080)
+- `SERVER_EXTERNAL_HOST` — PC's LAN IP for Sonos TTS fetch (default: 192.168.0.4)
+- `TRUSTED_IPS` — comma-separated additional IPs (VPN, admin)
+- `CLIENT_ID` / `ROOM_ID` — multi-client identity (default: "default")
+- `GOOGLE_TV_HOST` — TV IP for ADB/remote (default: 192.168.0.20)
+- `KOKORO_VOICE` / `KOKORO_SPEED` — TTS voice and speed (default: am_onyx, 1.0)
+- `DEFAULT_LOCATION` — weather city (default: Arlington, VA)
 
 No other API keys needed. Weather uses Open-Meteo (free, no account). Smart home uses local LAN only.
 
@@ -211,8 +221,8 @@ No other API keys needed. Weather uses Open-Meteo (free, no account). Smart home
 - `await_followup` heuristic in orchestrator: `endswith('?') and not commands_executed and len(words) < 20`
 - History capped at `MAX_CONVERSATION_HISTORY` (10) messages
 - `_trim_history()` ensures history always starts with a plain-text user message — tool_result orphans are dropped to avoid Claude API role errors
-- Persistent memory injected into system prompt from `data/memory.json`
-- Session summarizer runs after each non-follow-up turn to auto-save facts to memory (skipped for Tier 1 and TV)
+- Persistent memory stored in unified Brain Store (`data/brain.json`); behavior rules injected into cached base prompt, relevant memories into dynamic block
+- Session summarizer runs after each non-follow-up turn to auto-save facts to memory and store conversation summary (skipped for Tier 1 and TV)
 - History overflow compresses dropped messages into `_history_summary` injected as `<prior_context>`
 
 ## Multi-Client Architecture
@@ -333,7 +343,7 @@ USE_SONOS_OUTPUT=True + INDICATOR_LIGHT=None:
 - [ ] Room-to-Room Intercom — "tell the bedroom dinner's ready". TTS via Kokoro, deliver to target room's Pi/Sonos. Broadcast mode for all rooms
 
 ### Tier 1: High impact, buildable next
-- [ ] Reminders/scheduling — persistent scheduler (datetime targets + push via Pushover/Ntfy)
+- [x] Reminders/scheduling — persistent reminders via Brain Store (timers survive restart)
 - [ ] Local LLM fallback — Ollama + Qwen3 4B, try/except on Claude API error, auto-recovery
 - [ ] "stop" wake word interrupt — second OWW model, playback interruption logic
 - [ ] Spotify control (spotipy, needs free developer app registration)
@@ -343,8 +353,8 @@ USE_SONOS_OUTPUT=True + INDICATOR_LIGHT=None:
 ### Tier 2: Learning and growing
 - [ ] Emotional voice adaptation — librosa pitch/energy extraction, mood hint in system prompt, adaptive TTS speed
 - [ ] Circadian lighting + soundscapes — auto color temp by time of day, ambient audio from Sonos
-- [ ] Behavioral adaptation — auto-save correction rules to memory, reference at runtime
-- [ ] Richer memory model — category-based knowledge graph (people, preferences, schedule, home)
+- [x] Behavioral adaptation — feedback resolved → behavior memory, injected into prompt at runtime
+- [x] Richer memory model — unified Brain Store with typed entries, tag-based retrieval, contextual defaults
 
 ### Tier 3: Ambitious / transformative (hardware needed)
 - [ ] mmWave presence + follow-me audio — $8/room (LD2410B + ESP32), music follows between Sonos zones, auto-lights on enter/leave

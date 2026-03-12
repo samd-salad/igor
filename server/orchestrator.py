@@ -304,9 +304,10 @@ class Orchestrator:
                     tts_routed = False
                     tts_duration = 0.0
                     if prefer_sonos and SONOS_TTS_OUTPUT:
-                        tts_routed = self._route_tts_to_sonos(nudge_audio)
+                        room_id = ctx.room.room_id if ctx else "default"
+                        tts_routed = self._route_tts_to_sonos(nudge_audio, room_id=room_id)
                         if tts_routed:
-                            tts_duration = self._wav_duration(self.get_tts_audio())
+                            tts_duration = self._wav_duration(self.get_tts_audio(room_id))
                     import base64
                     return {
                         'transcription': transcription,
@@ -508,10 +509,11 @@ class Orchestrator:
         # Step 4: Route TTS to Sonos or return as base64 for Pi local playback
         tts_routed = False
         tts_suppressed = False
+        room_id = ctx.room.room_id if ctx else "default"
         if prefer_sonos and SONOS_TTS_OUTPUT:
             if self._is_critical_response(response_text, commands_executed, await_followup, tv_playing=tv_playing):
                 # Critical responses always play (timers, weather, commands with info)
-                tts_routed = self._route_tts_to_sonos(audio_data)
+                tts_routed = self._route_tts_to_sonos(audio_data, room_id=room_id)
             else:
                 # Non-critical: suppress when TV is playing (pure action acknowledgments)
                 if tv_playing:
@@ -519,7 +521,7 @@ class Orchestrator:
                     tts_routed = True  # tell client to skip local playback too
                     tts_suppressed = True
                 else:
-                    tts_routed = self._route_tts_to_sonos(audio_data)
+                    tts_routed = self._route_tts_to_sonos(audio_data, room_id=room_id)
 
         # Pack response for transmission
         from shared.utils import encode_audio_base64
@@ -531,7 +533,7 @@ class Orchestrator:
         if tts_suppressed:
             tts_duration_seconds = 0.0
         elif tts_routed:
-            tts_duration_seconds = self._wav_duration(self.get_tts_audio())
+            tts_duration_seconds = self._wav_duration(self.get_tts_audio(room_id))
         else:
             tts_duration_seconds = self._wav_duration(audio_data)
 

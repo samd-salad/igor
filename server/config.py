@@ -43,10 +43,8 @@ KOKORO_VOICES_FILE = str(BASE_DIR / "kokoro" / "voices-v1.0.bin")
 KOKORO_VOICE = os.getenv("KOKORO_VOICE", "am_onyx")  # am_onyx, am_michael, am_fenrir, af_heart, af_bella
 KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.0"))
 KOKORO_SAMPLE_RATE = 24000
-MEMORY_FILE = DATA_DIR / "memory.txt"  # Migration detection only; actual storage is memory.json (derived via .with_suffix in memory_cmd.py)
 KNOWN_DEVICES_FILE = DATA_DIR / "known_devices.json"
 BENCHMARK_FILE = DATA_DIR / "benchmark.csv"
-ROUTINES_FILE = DATA_DIR / "routines.json"
 BRAIN_FILE = DATA_DIR / "brain.json"
 
 # Speaker identification
