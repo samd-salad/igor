@@ -65,6 +65,19 @@ def _get_synthesizer():
     return _synthesizer
 
 
+def _ensure_brain():
+    """Initialize BrainStore if not already done (MCP server runs independently)."""
+    from server.brain import get_brain, init_brain
+    try:
+        return get_brain()
+    except RuntimeError:
+        from server.config import BRAIN_FILE
+        brain = init_brain(BRAIN_FILE)
+        brain.migrate_legacy_files(BRAIN_FILE.parent)
+        logger.info("BrainStore initialized (lazy init)")
+        return brain
+
+
 @mcp.tool()
 def list_commands() -> str:
     """List all available Igor commands and their parameter schemas."""
@@ -365,12 +378,11 @@ def test_pipeline(text: str, tv_playing: bool = False) -> str:
     t0 = time.perf_counter()
     try:
         from server.llm import LLM
-        from server.brain import get_brain
         import server.commands as commands
 
         llm = LLM()
         tools = commands.get_tools()
-        brain = get_brain()
+        brain = _ensure_brain()
         behavior_rules = brain.get_behavior_rules()
         relevant = brain.retrieve_relevant(cleaned)
         relevant_memories = brain.format_relevant(relevant)

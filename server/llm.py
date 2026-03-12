@@ -25,7 +25,7 @@ History management:
 
 Prompt caching:
   - _get_system_prompt() returns (base, dynamic) tuple.
-  - base = persona + persistent_memory — stable between save_memory calls,
+  - base = persona + behavior_rules — stable between save_memory calls,
     marked cache_control=ephemeral so Anthropic reuses the KV cache (~2000-4000 tokens).
   - dynamic = current time, speaker, patterns — changes every call, never cached.
   - Last tool schema is also marked cacheable — stable all session.
