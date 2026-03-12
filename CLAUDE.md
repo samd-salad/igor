@@ -317,21 +317,6 @@ USE_SONOS_OUTPUT=True + INDICATOR_LIGHT=None:
 - [ ] Web dashboard for monitoring
 - [ ] Puramax2 litterbox control
 
-### Old
-- [ ] Web dashboard for monitoring
-- [x] multiple client support
-- [x] add bedroom sonos as output for 2nd client
-- [ ] "stop" wake word interrupt — detected in client, needs playback interruption logic
-- [ ] Spotify control (spotipy, needs free developer app registration)
-- [ ] Calendar, shopping list
-- [ ] Puramax2 litterbox control
-- [ ] commas and quotes not reading right in TTS
-- [ ] Multi-user voice interpretation
-- [ ] better network scanning/testing
-- [ ] reminder capability
-- [ ] todo list capability - integrated with phone and reminder capability?
-- [ ] test tv speaking meaning no word response
-
 ## Quick Reference
 
 ```bash
