@@ -1,0 +1,28 @@
+# Room configuration for Igor multi-client support.
+# Copy to data/rooms.yaml and edit for your setup.
+# If rooms.yaml doesn't exist, a default room is auto-generated from server/config.py.
+
+rooms:
+  living_room:
+    display_name: "Living Room"
+    sonos_zone: "Living Room"        # Sonos player name (from soco discovery)
+    indicator_light: "corner lamp"   # LIFX light label for beep flashes (null to disable)
+    tv_host: "192.168.0.20"          # Google TV IP for ADB/androidtvremote2 (null if no TV)
+    light_group:                     # LIFX bulbs in this room
+      - "corner lamp"
+      - "table lamp"
+      - "tall lamp"
+    default_volume_target: "sonos"   # "sonos" or "local" — what "volume up" means
+
+  bedroom:
+    display_name: "Bedroom"
+    sonos_zone: "Bedroom"
+    indicator_light: null
+    tv_host: null
+    light_group:
+      - "bedroom lamp"
+    default_volume_target: "local"
+
+  phone:
+    display_name: "Phone"
+    text_only: true                  # No audio I/O — text endpoint only

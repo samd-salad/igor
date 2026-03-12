@@ -39,13 +39,13 @@ KEY_MAP = {
 }
 
 
-async def _connect() -> tuple:
+async def _connect(host: str = None) -> tuple:
     """Connect and wait for is_on to populate. Returns (remote, error_str)."""
     remote = AndroidTVRemote(
         client_name=GOOGLE_TV_CLIENT_NAME,
         certfile=GOOGLE_TV_CERT_FILE,
         keyfile=GOOGLE_TV_KEY_FILE,
-        host=GOOGLE_TV_HOST,
+        host=host or GOOGLE_TV_HOST,
     )
     await remote.async_generate_cert_if_missing()
     try:
@@ -61,9 +61,9 @@ async def _connect() -> tuple:
     return remote, None
 
 
-async def _async_power(state: str) -> str:
+async def _async_power(state: str, host: str = None) -> str:
     """Smart power: uses is_on to avoid toggling in the wrong direction."""
-    remote, err = await _connect()
+    remote, err = await _connect(host)
     if err:
         return err
     try:
@@ -85,8 +85,8 @@ async def _async_power(state: str) -> str:
             pass
 
 
-async def _async_send_key(keycode: str) -> str:
-    remote, err = await _connect()
+async def _async_send_key(keycode: str, host: str = None) -> str:
+    remote, err = await _connect(host)
     if err:
         return err
     try:
@@ -119,12 +119,20 @@ def _run_tv(coro) -> str:
             return f"TV command error: {e}"
 
 
-def _tv_available() -> str | None:
+def _get_tv_host(_ctx=None) -> str:
+    """Get TV host from context or fall back to config."""
+    if _ctx and hasattr(_ctx, 'room') and _ctx.room.tv_host:
+        return _ctx.room.tv_host
+    return GOOGLE_TV_HOST
+
+
+def _tv_available(_ctx=None) -> str | None:
     """Return an error string if TV is unusable, None if ready."""
     if not _ATV_AVAILABLE:
         return "Google TV unavailable: androidtvremote2 not installed"
-    if not GOOGLE_TV_HOST or "0.X" in GOOGLE_TV_HOST:
-        return "Google TV unavailable: set GOOGLE_TV_HOST in server/config.py"
+    host = _get_tv_host(_ctx)
+    if not host or "0.X" in host:
+        return "Google TV unavailable: set GOOGLE_TV_HOST in server/config.py or rooms.yaml"
     return None
 
 
@@ -141,14 +149,14 @@ class TvPowerCommand(Command):
             }
         }
 
-    def execute(self, state: str) -> str:
-        err = _tv_available()
+    def execute(self, state: str, _ctx=None) -> str:
+        err = _tv_available(_ctx)
         if err:
             return err
         state_lower = state.lower().strip()
         if state_lower not in ("on", "off", "toggle"):
             return f"Unknown state '{state}'. Use: on, off, or toggle."
-        return _run_tv(_async_power(state_lower))
+        return _run_tv(_async_power(state_lower, host=_get_tv_host(_ctx)))
 
 
 
@@ -172,8 +180,8 @@ class TvKeyCommand(Command):
             }
         }
 
-    def execute(self, key: str) -> str:
-        err = _tv_available()
+    def execute(self, key: str, _ctx=None) -> str:
+        err = _tv_available(_ctx)
         if err:
             return err
         key_lower = key.lower().strip()
@@ -181,4 +189,4 @@ class TvKeyCommand(Command):
         if not keycode:
             valid = ", ".join(sorted(KEY_MAP))
             return f"Unknown key '{key}'. Valid keys: {valid}"
-        return _run_tv(_async_send_key(keycode))
+        return _run_tv(_async_send_key(keycode, host=_get_tv_host(_ctx)))

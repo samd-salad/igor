@@ -2,6 +2,8 @@
 
 # Server (PC) endpoints
 PROCESS_INTERACTION_ENDPOINT = "/api/process_interaction"
+TEXT_INTERACTION_ENDPOINT = "/api/text_interaction"
+REGISTER_CLIENT_ENDPOINT = "/api/register"
 SERVER_HEALTH_ENDPOINT = "/api/health"
 SONOS_BEEP_ENDPOINT = "/api/sonos_beep"
 

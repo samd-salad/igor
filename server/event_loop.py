@@ -36,6 +36,7 @@ class Timer:
     name: str
     fire_at: float  # Unix timestamp when this timer should fire
     callback: Optional[Callable[[str], None]] = None  # Optional post-alert hook
+    room_id: Optional[str] = None  # Room where the timer was set (for delivery routing)
 
 
 class EventLoop:
@@ -57,7 +58,28 @@ class EventLoop:
         self._running = False
         self._pi_client = pi_client
         self._synthesizer = synthesizer
+        # Optional Sonos TTS routing — set via set_sonos_tts_func() after
+        # orchestrator is created.  When set, timer alert TTS routes through
+        # Sonos instead of Pi local playback.
+        self._sonos_tts_func: Optional[Callable[[bytes], bool]] = None
+        # Optional client registry for room-aware timer delivery
+        self._client_registry = None
         logger.info("EventLoop initialized")
+
+    def set_client_registry(self, registry):
+        """Set the client registry for room-aware timer delivery."""
+        self._client_registry = registry
+        logger.info("EventLoop: client registry set for room-aware delivery")
+
+    def set_sonos_tts_func(self, func: Callable[[bytes], bool]):
+        """Set Sonos TTS routing function (called after orchestrator init).
+
+        Args:
+            func: Callable(audio_bytes) -> bool. Returns True if Sonos
+                  accepted the audio, False to fall back to Pi playback.
+        """
+        self._sonos_tts_func = func
+        logger.info("EventLoop: Sonos TTS routing enabled for timer alerts")
 
     def start(self):
         """Start the background polling thread (idempotent — safe to call twice)."""
@@ -115,6 +137,19 @@ class EventLoop:
                 name=f"Timer-{timer.name}",
             ).start()
 
+    def _get_pi_client_for_timer(self, timer: Timer):
+        """Get the appropriate Pi client for a timer's room.
+
+        If the timer has a room_id and the client registry is available,
+        looks up the audio client for that room. Falls back to legacy pi_client.
+        """
+        if timer.room_id and self._client_registry:
+            callback_url = self._client_registry.get_callback_url_for_room(timer.room_id)
+            if callback_url:
+                from server.pi_callback import PiCallbackClient
+                return PiCallbackClient(callback_url)
+        return self._pi_client
+
     def _fire_timer(self, timer: Timer):
         """Handle a fired timer: play alert beep, synthesize and deliver TTS.
 
@@ -125,42 +160,49 @@ class EventLoop:
         Fallback chain:
           1. Beep first (immediate audio signal even before speech is ready).
           2. Synthesize "X timer is done".
-          3. Send WAV to Pi.
+          3. Send WAV to Pi (room-aware if timer has room_id).
           4. If synthesis fails → second beep as fallback (requires pi_client).
         """
-        logger.info(f"Timer fired: {timer.name}")
+        logger.info(f"Timer fired: {timer.name} (room={timer.room_id or 'default'})")
+
+        # Get the correct Pi client for this timer's room
+        pi_client = self._get_pi_client_for_timer(timer)
 
         try:
             # Step 1: Alert beep — gives immediate audio feedback while TTS synthesizes
-            if self._pi_client:
-                self._pi_client.play_beep("alert")
+            if pi_client:
+                pi_client.play_beep("alert")
                 time.sleep(0.3)  # Brief gap between beep and speech
 
             # Step 2: Generate TTS message
             message = f"{timer.name} timer is done"
 
-            # Step 3: Synthesize and deliver audio to Pi
-            if self._synthesizer and self._pi_client:
+            # Step 3: Synthesize and deliver audio (Sonos preferred, Pi fallback)
+            if self._synthesizer:
                 logger.debug(f"Synthesizing timer alert: '{message}'")
                 audio_data = self._synthesizer.synthesize(message)
 
                 if audio_data:
-                    # Send synthesized WAV to Pi for speaker playback
-                    success = self._pi_client.play_audio(
-                        audio_data,
-                        message,
-                        priority="alert"
-                    )
-                    if success:
-                        logger.info(f"Timer alert sent to Pi: {timer.name}")
+                    # Try Sonos first, fall back to Pi local playback
+                    if self._sonos_tts_func and self._sonos_tts_func(audio_data):
+                        logger.info(f"Timer alert routed to Sonos: {timer.name}")
+                    elif pi_client:
+                        success = pi_client.play_audio(
+                            audio_data, message, priority="alert"
+                        )
+                        if success:
+                            logger.info(f"Timer alert sent to Pi: {timer.name}")
+                        else:
+                            logger.error(f"Failed to send timer alert to Pi: {timer.name}")
                     else:
-                        logger.error(f"Failed to send timer alert to Pi: {timer.name}")
+                        logger.warning(f"No output available for timer alert: {timer.name}")
                 else:
                     logger.error(f"Failed to synthesize timer alert: {timer.name}")
                     # Fallback: extra beep so user knows the timer fired even without speech
-                    self._pi_client.play_beep("alert")
+                    if pi_client:
+                        pi_client.play_beep("alert")
             else:
-                logger.warning(f"No synthesizer or Pi client - cannot play timer alert: {timer.name}")
+                logger.warning(f"No synthesizer - cannot play timer alert: {timer.name}")
 
             # Step 4: Optional per-timer custom callback (for future extensibility)
             if timer.callback:
@@ -172,7 +214,8 @@ class EventLoop:
         except Exception as e:
             logger.error(f"Error firing timer '{timer.name}': {e}", exc_info=True)
 
-    def add_timer(self, name: str, seconds: float, callback: Optional[Callable[[str], None]] = None) -> bool:
+    def add_timer(self, name: str, seconds: float, callback: Optional[Callable[[str], None]] = None,
+                  room_id: Optional[str] = None) -> bool:
         """Add a timer that fires after `seconds` seconds.
 
         Timer names are unique — attempting to add a second timer with the same
@@ -183,6 +226,7 @@ class EventLoop:
             name: Unique timer label (e.g. "pasta", "laundry").
             seconds: Duration until firing.
             callback: Optional callable(name) invoked after audio playback.
+            room_id: Room where the timer was set (for delivery routing).
 
         Returns:
             True on success, False if name already exists.
@@ -196,7 +240,8 @@ class EventLoop:
             self._timers[name] = Timer(
                 name=name,
                 fire_at=fire_at,
-                callback=callback
+                callback=callback,
+                room_id=room_id,
             )
 
         logger.info(f"Timer added: {name} ({seconds}s)")

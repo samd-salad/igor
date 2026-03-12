@@ -365,10 +365,33 @@ def test_pipeline(text: str, tv_playing: bool = False) -> str:
     t0 = time.perf_counter()
     try:
         from server.llm import LLM
+        from server.commands.memory_cmd import load_persistent_memory
+        import server.commands as commands
+
         llm = LLM()
-        chat_result = llm.chat(cleaned, tv_playing=tv_playing)
-        llm_text = chat_result.text
-        llm_commands = chat_result.commands_executed
+        tools = commands.get_tools()
+        persistent_memory = load_persistent_memory()
+        llm_commands = []
+
+        def tool_executor(command_name: str, **kwargs) -> str:
+            llm_commands.append(command_name)
+            return commands.execute(command_name, **kwargs)
+
+        patterns = ""
+        if tv_playing:
+            patterns = (
+                "TV is currently playing. Extract only clear, direct commands "
+                "and ignore everything else."
+            )
+
+        chat_result = llm.chat(
+            user_text=cleaned,
+            tools=tools,
+            tool_executor=tool_executor,
+            persistent_memory=persistent_memory,
+            patterns=patterns,
+        )
+        llm_text = chat_result.text if chat_result else "LLM returned no result"
     except Exception as e:
         llm_text = f"LLM error: {e}"
         llm_commands = []

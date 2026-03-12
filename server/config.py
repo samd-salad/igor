@@ -10,8 +10,13 @@ SERVER_PORT = 8000
 PI_HOST = os.getenv("PI_HOST", "192.168.0.3")
 PI_PORT = int(os.getenv("PI_PORT", "8080"))
 
-# IP allowlist for sensitive server endpoints — add more Pi IPs here when scaling
+# IP allowlist — legacy fallback for single-client deployments.
+# Multi-client setups use ClientRegistry (dynamic registration via /api/register).
 ALLOWED_CLIENT_IPS: set = {PI_HOST}
+
+# Trusted IPs that are always allowed regardless of client registration
+# (e.g. Tailscale VPN IPs, admin machines). Added to ClientRegistry.all_client_ips().
+TRUSTED_IPS: set = set(filter(None, os.getenv("TRUSTED_IPS", "").split(",")))
 
 # LLM configuration - Claude API
 CLAUDE_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
@@ -38,10 +43,9 @@ KOKORO_VOICES_FILE = str(BASE_DIR / "kokoro" / "voices-v1.0.bin")
 KOKORO_VOICE = os.getenv("KOKORO_VOICE", "am_onyx")  # am_onyx, am_michael, am_fenrir, af_heart, af_bella
 KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.0"))
 KOKORO_SAMPLE_RATE = 24000
-MEMORY_FILE = DATA_DIR / "memory.txt"  # Legacy path; memory_cmd.py uses memory.json (derived via .with_suffix)
+MEMORY_FILE = DATA_DIR / "memory.txt"  # Migration detection only; actual storage is memory.json (derived via .with_suffix in memory_cmd.py)
 KNOWN_DEVICES_FILE = DATA_DIR / "known_devices.json"
 BENCHMARK_FILE = DATA_DIR / "benchmark.csv"
-CONVERSATION_STATE_FILE = DATA_DIR / "conversation_state.json"
 ROUTINES_FILE = DATA_DIR / "routines.json"
 
 # Speaker identification

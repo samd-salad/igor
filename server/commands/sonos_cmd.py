@@ -45,22 +45,31 @@ def _get_devices(force: bool = False) -> list:
         return list(_cache)
 
 
-def _resolve_target(zone: str) -> list:
+def _resolve_target(zone: str, _ctx=None) -> list:
     devices = _get_devices()
     if not devices:
         return []
-    target = (zone.strip() if zone.strip() else SONOS_DEFAULT_ZONE).lower()
+    # Default zone: prefer room context, fall back to config
+    if zone and zone.strip():
+        target = zone.strip().lower()
+    elif _ctx and hasattr(_ctx, 'room') and _ctx.room.sonos_zone:
+        target = _ctx.room.sonos_zone.lower()
+    else:
+        target = SONOS_DEFAULT_ZONE.lower()
     if target == "all":
         return devices
     return [d for d in devices if d.player_name.lower() == target]
 
 
-def _apply_to_targets(zone: str, action, action_desc: str) -> str:
+def _apply_to_targets(zone: str, action, action_desc: str, _ctx=None) -> str:
     if not _SOCO_AVAILABLE:
         return "Sonos unavailable: soco not installed"
-    targets = _resolve_target(zone)
+    targets = _resolve_target(zone, _ctx=_ctx)
     if not targets:
-        effective = zone.strip() if zone.strip() else SONOS_DEFAULT_ZONE
+        effective = zone.strip() if zone.strip() else (
+            _ctx.room.sonos_zone if _ctx and hasattr(_ctx, 'room') and _ctx.room.sonos_zone
+            else SONOS_DEFAULT_ZONE
+        )
         return f"No Sonos devices found for zone '{effective}'"
     errors = []
     for device in targets:
@@ -99,7 +108,7 @@ class SetSonosVolumeCommand(Command):
     def required_parameters(self) -> list:
         return ["level"]
 
-    def execute(self, level, zone: str = "") -> str:
+    def execute(self, level, zone: str = "", _ctx=None) -> str:
         level_str = str(level).lower().strip()
         word_val = parse_volume_word(level_str)
         if word_val is not None:
@@ -113,7 +122,7 @@ class SetSonosVolumeCommand(Command):
         def action(device):
             device.volume = level_int
 
-        return _apply_to_targets(zone, action, f"Set Sonos volume to {level_int}% on")
+        return _apply_to_targets(zone, action, f"Set Sonos volume to {level_int}% on", _ctx=_ctx)
 
 
 class AdjustSonosVolumeCommand(Command):
@@ -145,7 +154,7 @@ class AdjustSonosVolumeCommand(Command):
     def required_parameters(self) -> list:
         return ["direction"]
 
-    def execute(self, direction: str, amount: str = "medium", zone: str = "") -> str:
+    def execute(self, direction: str, amount: str = "medium", zone: str = "", _ctx=None) -> str:
         d = parse_direction_updown(direction)
         if d is None:
             return f"Unknown direction '{direction}'. Use 'up'/'louder' or 'down'/'quieter'."
@@ -158,7 +167,7 @@ class AdjustSonosVolumeCommand(Command):
             device.set_relative_volume(delta)
 
         desc = f"{'Increased' if up else 'Decreased'} Sonos volume by {step}% on"
-        return _apply_to_targets(zone, action, desc)
+        return _apply_to_targets(zone, action, desc, _ctx=_ctx)
 
 
 class SonosMuteCommand(Command):
@@ -185,7 +194,7 @@ class SonosMuteCommand(Command):
     def required_parameters(self) -> list:
         return ["state"]
 
-    def execute(self, state: str, zone: str = "") -> str:
+    def execute(self, state: str, zone: str = "", _ctx=None) -> str:
         state_lower = state.lower().strip()
         if state_lower not in ("on", "off", "toggle"):
             return f"Unknown mute state '{state}'. Use: on, off, or toggle."
@@ -197,9 +206,12 @@ class SonosMuteCommand(Command):
             device.mute = new_mute
             final_state.append(device.mute)
 
-        targets = _resolve_target(zone)
+        targets = _resolve_target(zone, _ctx=_ctx)
         if not targets:
-            effective = zone.strip() if zone.strip() else SONOS_DEFAULT_ZONE
+            effective = zone.strip() if zone.strip() else (
+                _ctx.room.sonos_zone if _ctx and hasattr(_ctx, 'room') and _ctx.room.sonos_zone
+                else SONOS_DEFAULT_ZONE
+            )
             return f"No Sonos devices found for zone '{effective}'"
 
         errors = []

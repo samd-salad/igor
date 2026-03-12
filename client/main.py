@@ -42,6 +42,8 @@ from client.config import (
     SERVER_URL,
     CLIENT_HOST,
     CLIENT_PORT,
+    CLIENT_ID,
+    ROOM_ID,
     SAMPLE_RATE,
     OWW_MODEL_PATHS,
     OWW_THRESHOLD,
@@ -60,7 +62,7 @@ from client.audio import Audio
 from client.wakeword import WakeWordDetector
 from client.pi_server import run_pi_server
 from client.suppress import is_suppressed, unsuppress
-from shared.protocol import PROCESS_INTERACTION_ENDPOINT, SONOS_BEEP_ENDPOINT
+from shared.protocol import PROCESS_INTERACTION_ENDPOINT, SONOS_BEEP_ENDPOINT, REGISTER_CLIENT_ENDPOINT
 from shared.models import ProcessInteractionRequest
 from shared.utils import setup_logging, read_wav_file, encode_audio_base64, decode_audio_base64, get_timestamp
 
@@ -133,6 +135,9 @@ class PiClient:
         # Brief pause to let Flask bind its port before we start sending beeps
         time.sleep(1)
 
+        # Register with server for multi-client routing
+        self._register_with_server()
+
         logger.info("Entering main loop. Listening for wake word...")
         logger.info(f"Server URL: {self.server_url}")
 
@@ -166,6 +171,31 @@ class PiClient:
             self.audio.cleanup()
             if self.wakeword_detector:
                 self.wakeword_detector.delete()
+
+    def _register_with_server(self):
+        """Register this client with the server for multi-client routing.
+
+        Non-critical — if registration fails, the server falls back to
+        legacy ALLOWED_CLIENT_IPS behavior.
+        """
+        callback_url = f"http://{CLIENT_HOST}:{CLIENT_PORT}"
+        try:
+            resp = requests.post(
+                f"{self.server_url}{REGISTER_CLIENT_ENDPOINT}",
+                json={
+                    "client_id": CLIENT_ID,
+                    "room_id": ROOM_ID,
+                    "client_type": "audio",
+                    "callback_url": callback_url,
+                },
+                timeout=5,
+            )
+            if resp.ok:
+                logger.info(f"Registered with server as '{CLIENT_ID}' in room '{ROOM_ID}'")
+            else:
+                logger.warning(f"Server registration returned {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Failed to register with server (non-critical): {e}")
 
     def _sonos_beep(self, beep_type: str):
         """Fire-and-forget beep via server Sonos endpoint.
@@ -370,19 +400,17 @@ class PiClient:
           1. Record audio (VAD stops on silence, or FOLLOWUP_TIMEOUT for follow-ups).
           2. POST to /api/process_interaction with audio + wake_word + prefer_sonos.
           3. Route response:
-             a. tts_routed=True  → server played on Sonos; sleep for duration + 2s
-                (extra 2s covers Sonos TRANSITIONING→PLAYING startup lag).
+             a. tts_routed=True  → Sonos played it; sleep for duration + 3.5s.
              b. audio_base64     → decode and play locally via PyAudio.
-          4. After audio ends: unsuppress() clears any TV-command suppression so the
-             user can immediately speak again without waiting the full 20s window.
-          5. If await_followup=True and under depth limit: stay in loop.
+          4. After audio ends: unsuppress() clears any TV-command suppression.
+          5. If await_followup=True and under depth limit: play start beep, stay in loop.
 
-        The 3.5s Sonos buffer is added because when the server calls play_uri() and
-        returns tts_duration_seconds, the Sonos device is still TRANSITIONING — audio
-        hasn't started yet.  Sonos devices (especially Ray/Beam) can take 1-3s to
-        transition from STOPPED → TRANSITIONING → PLAYING.  Without enough margin,
-        the follow-up microphone opens before speech finishes and captures the tail
-        of the TTS audio, which Whisper transcribes as garbage input.
+        Follow-up beep: both Sonos and local paths play a start beep via _beep()
+        before re-recording.  _beep() routes through the configured output mode
+        (local sox, Sonos play_uri, or LIFX flash).
+
+        The 3.5s Sonos buffer covers TRANSITIONING→PLAYING startup lag (1-3s on
+        Ray/Beam).  Without it, the follow-up mic opens before speech finishes.
 
         Args:
             wake_word: Detected wake word name (passed to server for context).
@@ -412,8 +440,9 @@ class PiClient:
                     audio_base64=audio_b64,
                     wake_word=wake_word,
                     timestamp=get_timestamp(),
-                    # Tell server to route TTS to Sonos instead of sending audio_base64
                     prefer_sonos_output=USE_SONOS_OUTPUT,
+                    client_id=CLIENT_ID,
+                    room_id=ROOM_ID,
                 )
 
                 audio_size_kb = len(audio_bytes) / 1024
@@ -451,28 +480,25 @@ class PiClient:
 
                 if result.get('tts_routed'):
                     # TTS is playing on Sonos — no local audio needed.
-                    # We must sleep for the TTS duration + 2s Sonos startup lag
-                    # before opening the follow-up microphone.
+                    # Sleep for TTS duration + Sonos startup lag before proceeding.
                     logger.info("TTS routed to Sonos")
+                    tts_dur = result.get('tts_duration_seconds') or 5.0
+                    # +3.5s: Sonos startup latency (TRANSITIONING→PLAYING) means
+                    # audio hasn't started yet when server responds.  Sonos Ray/Beam
+                    # can take 1-3s to start; 3.5s margin ensures we don't proceed
+                    # until speech has fully finished playing.
+                    time.sleep(tts_dur + 3.5)
+                    unsuppress()  # TTS done; clear any active TV-command suppression
+
                     if result.get('await_followup') and depth < self.MAX_FOLLOWUP_DEPTH:
                         logger.info("Bot is awaiting follow-up response (Sonos routed)")
-                        tts_dur = result.get('tts_duration_seconds') or 5.0
-                        # +3.5s: Sonos startup latency (TRANSITIONING→PLAYING) means
-                        # audio hasn't started yet when server responds.  Sonos Ray/Beam
-                        # can take 1-3s to start; 3.5s margin ensures the mic doesn't
-                        # open until speech has fully finished playing.
-                        # No start beep here — the chime embedded in the TTS audio is
-                        # the listening signal; a second beep would double-trigger.
-                        time.sleep(tts_dur + 3.5)
-                        unsuppress()  # TTS done; clear any active TV-command suppression
+                        self._beep("start")  # Signal: listening for follow-up
+                        time.sleep(0.4)       # Echo decay before recording
                         depth += 1
                         is_followup = True
                         continue
                     else:
                         logger.info("Interaction complete")
-                        tts_dur = result.get('tts_duration_seconds') or 5.0
-                        time.sleep(tts_dur + 3.5)
-                        unsuppress()  # TTS done; clear any active TV-command suppression
                         return
 
                 elif result.get('audio_base64'):
@@ -491,7 +517,7 @@ class PiClient:
                         logger.info("Bot is awaiting follow-up response")
                         time.sleep(0.3)
                         self._beep("start")
-                        time.sleep(0.1)
+                        time.sleep(0.4)  # Echo decay before recording
                         depth += 1
                         is_followup = True
                         continue

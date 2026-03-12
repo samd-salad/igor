@@ -11,6 +11,11 @@ SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 CLIENT_HOST = os.getenv("CLIENT_HOST", "192.168.0.3")
 CLIENT_PORT = 8080
 
+# Multi-client identity — used for room-aware routing on the server.
+# CLIENT_ID must be unique across all clients. ROOM_ID maps to rooms.yaml.
+CLIENT_ID = os.getenv("CLIENT_ID", "default")
+ROOM_ID = os.getenv("ROOM_ID", "default")
+
 # Audio hardware settings
 SAMPLE_RATE = 16000
 AUDIO_DEVICE = "plughw:2,0"  # Run 'arecord -L' to find yours
@@ -62,8 +67,13 @@ MAX_RECORDING = 15
 FOLLOWUP_TIMEOUT = 10.0
 
 # Audio output routing
-USE_SONOS_OUTPUT = False  # Set True to route TTS through Sonos instead of Pi speaker
-INDICATOR_LIGHT = None    # LIFX light label to flash as listening indicator when TV is playing (e.g. "corner lamp")
+# USE_SONOS_OUTPUT: Route TTS and beeps through Sonos instead of Pi speaker.
+# INDICATOR_LIGHT: LIFX light label to flash for start/end/error signals.
+#   When set, LIFX flash replaces Sonos audio beeps (instant vs 1-3s Sonos lag).
+#   When None, beeps play through Sonos (audible but slower startup).
+#   No effect when USE_SONOS_OUTPUT=False (beeps always local via sox).
+USE_SONOS_OUTPUT = False
+INDICATOR_LIGHT = None    # e.g. "corner lamp"
 
 # Request timeouts
 REQUEST_TIMEOUT = 60.0

@@ -76,7 +76,12 @@ def _get_signer() -> "PythonRSASigner":
 
 
 def _adb_shell(command: str, auth_timeout: float = 5.0, cmd_timeout: float = 10.0) -> tuple:
-    """Run a shell command on the TV via ADB. Returns (output, error_str).
+    """Run a shell command on the default TV via ADB. Returns (output, error_str)."""
+    return _adb_shell_for_host(GOOGLE_TV_HOST, command, auth_timeout=auth_timeout, cmd_timeout=cmd_timeout)
+
+
+def _adb_shell_for_host(host: str, command: str, auth_timeout: float = 5.0, cmd_timeout: float = 10.0) -> tuple:
+    """Run a shell command on a specific TV host via ADB. Returns (output, error_str).
 
     SECURITY: This executes a raw shell command on the TV's Android OS.
     All callers MUST sanitize user-controlled values with shlex.quote()
@@ -88,7 +93,7 @@ def _adb_shell(command: str, auth_timeout: float = 5.0, cmd_timeout: float = 10.
     device = None
     try:
         signer = _get_signer()
-        device = AdbDeviceTcp(GOOGLE_TV_HOST, ADB_PORT)
+        device = AdbDeviceTcp(host, ADB_PORT)
         # transport_timeout_s gates the TCP socket connect; without it the call can block indefinitely
         device.connect(
             rsa_keys=[signer],
@@ -108,16 +113,29 @@ def _adb_shell(command: str, auth_timeout: float = 5.0, cmd_timeout: float = 10.
                 pass
 
 
-def _tv_adb_available() -> str | None:
+def _get_tv_host(_ctx=None) -> str:
+    """Get TV host from context or fall back to config."""
+    if _ctx and hasattr(_ctx, 'room') and _ctx.room.tv_host:
+        return _ctx.room.tv_host
+    return GOOGLE_TV_HOST
+
+
+def _tv_adb_available(_ctx=None) -> str | None:
     if not _ADB_AVAILABLE:
         return "adb-shell not installed. Run: pip install adb-shell"
-    if not GOOGLE_TV_HOST or "0.X" in GOOGLE_TV_HOST:
-        return "GOOGLE_TV_HOST not configured in server/config.py"
+    host = _get_tv_host(_ctx)
+    if not host or "0.X" in host:
+        return "TV host not configured in server/config.py or rooms.yaml"
     return None
 
 
 def _get_tv_playback_state() -> str:
-    """Query ADB for current media playback state.
+    """Query ADB for current media playback state using the default TV host."""
+    return _get_tv_playback_state_for_host(GOOGLE_TV_HOST)
+
+
+def _get_tv_playback_state_for_host(host: str) -> str:
+    """Query ADB for current media playback state on a specific TV host.
 
     Returns 'playing', 'paused', 'stopped', 'idle', or 'unknown'.
 
@@ -134,9 +152,9 @@ def _get_tv_playback_state() -> str:
     frequent 'unknown' returns that silently disabled all TV-aware protections
     (TTS suppression, await_followup override, LLM context note).
     """
-    if not _ADB_AVAILABLE or not GOOGLE_TV_HOST or "0.X" in GOOGLE_TV_HOST:
+    if not _ADB_AVAILABLE or not host or "0.X" in host:
         return "unknown"
-    out, err = _adb_shell("dumpsys media_session", cmd_timeout=5.0)
+    out, err = _adb_shell_for_host(host, "dumpsys media_session", cmd_timeout=5.0)
     if err or not out:
         return "unknown"
     # STATE_PLAYING=3, STATE_PAUSED=2, STATE_STOPPED=1
@@ -162,12 +180,13 @@ class TvAdbConnectCommand(Command):
     def parameters(self) -> dict:
         return {}
 
-    def execute(self, **_) -> str:
-        err = _tv_adb_available()
+    def execute(self, _ctx=None, **_) -> str:
+        err = _tv_adb_available(_ctx)
         if err:
             return err
         # Use longer auth timeout for initial approval dialog
-        out, err = _adb_shell("echo ok", auth_timeout=30.0)
+        host = _get_tv_host(_ctx)
+        out, err = _adb_shell_for_host(host, "echo ok", auth_timeout=30.0)
         if err:
             return f"ADB connection failed: {err}"
         return "ADB connected to TV successfully"
@@ -190,8 +209,8 @@ class TvLaunchCommand(Command):
             }
         }
 
-    def execute(self, app: str) -> str:
-        err = _tv_adb_available()
+    def execute(self, app: str, _ctx=None) -> str:
+        err = _tv_adb_available(_ctx)
         if err:
             return err
         app_lower = app.lower().strip()
@@ -205,7 +224,8 @@ class TvLaunchCommand(Command):
             f"am start -n $(cmd package resolve-activity --brief {quoted} | tail -n 1) "
             f"2>/dev/null || monkey -p {quoted} -c android.intent.category.LAUNCHER 1"
         )
-        out, err = _adb_shell(cmd)
+        host = _get_tv_host(_ctx)
+        out, err = _adb_shell_for_host(host, cmd)
         if err:
             return f"Failed to launch {app}: {err}"
         return f"Launched {app} on TV"
@@ -227,8 +247,8 @@ class TvPlaybackCommand(Command):
             }
         }
 
-    def execute(self, action: str) -> str:
-        err = _tv_adb_available()
+    def execute(self, action: str, _ctx=None) -> str:
+        err = _tv_adb_available(_ctx)
         if err:
             return err
         action_lower = action.lower().strip()
@@ -236,7 +256,8 @@ class TvPlaybackCommand(Command):
         if keycode is None:
             valid = ", ".join(sorted(PLAYBACK_KEYS))
             return f"Unknown action '{action}'. Use: {valid}"
-        out, err = _adb_shell(f"input keyevent {keycode}")
+        host = _get_tv_host(_ctx)
+        out, err = _adb_shell_for_host(host, f"input keyevent {keycode}")
         if err:
             return f"Playback command failed: {err}"
         return f"TV playback: {action}"
@@ -266,8 +287,8 @@ class TvSkipCommand(Command):
     def required_parameters(self) -> list:
         return ["direction"]
 
-    def execute(self, direction: str, seconds: int = 30) -> str:
-        err = _tv_adb_available()
+    def execute(self, direction: str, seconds: int = 30, _ctx=None) -> str:
+        err = _tv_adb_available(_ctx)
         if err:
             return err
         direction = direction.lower().strip()
@@ -284,7 +305,8 @@ class TvSkipCommand(Command):
             return f"Invalid seconds value '{seconds}'. Use a number."
         presses = max(1, min(120, round(seconds / 5)))  # cap at 120 (~10 min)
         cmd = " && ".join(f"input keyevent {keycode}" for _ in range(presses))
-        out, err = _adb_shell(cmd)
+        host = _get_tv_host(_ctx)
+        out, err = _adb_shell_for_host(host, cmd)
         if err:
             return f"Skip failed: {err}"
         actual = presses * 5
@@ -307,8 +329,8 @@ class TvSearchYouTubeCommand(Command):
             }
         }
 
-    def execute(self, query: str) -> str:
-        err = _tv_adb_available()
+    def execute(self, query: str, _ctx=None) -> str:
+        err = _tv_adb_available(_ctx)
         if err:
             return err
         cmd = (
@@ -316,7 +338,8 @@ class TvSearchYouTubeCommand(Command):
             f"-n com.google.android.youtube.tv/com.google.android.apps.youtube.tv.activity.ShellActivity "
             f"--es query {shlex.quote(query)}"
         )
-        out, err = _adb_shell(cmd)
+        host = _get_tv_host(_ctx)
+        out, err = _adb_shell_for_host(host, cmd)
         if err:
             return f"YouTube search failed: {err}"
         return f"Searching YouTube for '{query}'"

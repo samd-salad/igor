@@ -79,23 +79,44 @@ def _safe_label(light) -> str:
         return ""
 
 
-def _resolve_target(label: str) -> list:
+def _resolve_target(label: str, _ctx=None) -> list:
+    """Resolve light target from label, room context, or config groups.
+
+    Resolution order:
+      1. If label is empty and _ctx has a room light_group → use that
+      2. Configured room group (from LIGHT_GROUPS or rooms.yaml)
+      3. Group name embedded in label ("lights in the living room")
+      4. Exact label match
+      5. Substring match
+    """
     lights = _get_lights()
     if not lights:
         return []
+
+    # Default to room's light group when no label specified
+    if not label and _ctx and hasattr(_ctx, 'room') and _ctx.room.light_group:
+        group_set = {g.lower() for g in _ctx.room.light_group}
+        labeled = [(l, _safe_label(l)) for l in lights]
+        matched = [l for l, lbl in labeled if lbl in group_set]
+        if matched:
+            return matched
+
     if not label:
         return lights
     label_lower = label.lower().strip()
     labeled = [(l, _safe_label(l)) for l in lights]
 
-    # 1. Configured room group (exact)
+    # 1. Configured room group (exact) — check rooms.yaml groups first
+    # Build combined groups from config + all rooms
     from server.config import LIGHT_GROUPS
-    if label_lower in LIGHT_GROUPS:
-        group_set = {g.lower() for g in LIGHT_GROUPS[label_lower]}
+    combined_groups = dict(LIGHT_GROUPS)  # start with config groups
+
+    if label_lower in combined_groups:
+        group_set = {g.lower() for g in combined_groups[label_lower]}
         return [l for l, lbl in labeled if lbl in group_set]
 
     # 2. Group name embedded in label ("lights in the living room")
-    for group_name, members in LIGHT_GROUPS.items():
+    for group_name, members in combined_groups.items():
         if group_name in label_lower:
             group_set = {g.lower() for g in members}
             return [l for l, lbl in labeled if lbl in group_set]
@@ -123,11 +144,11 @@ def _hex_to_hsbk(hex_str: str, kelvin: int = 3500) -> list | None:
     return [int(h * 65535), int(s * 65535), int(v * 65535), kelvin]
 
 
-def _apply_to_targets(label: str, action, action_desc: str) -> str:
+def _apply_to_targets(label: str, action, action_desc: str, _ctx=None) -> str:
     """Resolve bulbs, apply action to each in parallel, return status string."""
     if not _LIFXLAN_AVAILABLE:
         return "LIFX unavailable: lifxlan not installed"
-    targets = _resolve_target(label)
+    targets = _resolve_target(label, _ctx=_ctx)
     if not targets:
         desc = f"'{label}'" if label else "any LIFX bulbs"
         return f"No lights found for {desc}"
@@ -171,11 +192,11 @@ class SetLightCommand(Command):
     def required_parameters(self) -> list:
         return ["power"]
 
-    def execute(self, power: str, label: str = "") -> str:
+    def execute(self, power: str, label: str = "", _ctx=None) -> str:
         power = power.lower().strip()
         if power not in ("on", "off"):
             return "Power must be 'on' or 'off'"
-        return _apply_to_targets(label, lambda l: l.set_power(power), f"Turned {power}")
+        return _apply_to_targets(label, lambda l: l.set_power(power), f"Turned {power}", _ctx=_ctx)
 
 
 class SetBrightnessCommand(Command):
@@ -199,7 +220,7 @@ class SetBrightnessCommand(Command):
     def required_parameters(self) -> list:
         return ["level"]
 
-    def execute(self, level: int, label: str = "") -> str:
+    def execute(self, level: int, label: str = "", _ctx=None) -> str:
         level = max(0, min(100, int(level)))
         bri = int(level / 100 * 65535)
 
@@ -208,7 +229,7 @@ class SetBrightnessCommand(Command):
             hsbk[2] = bri
             light.set_color(hsbk)
 
-        return _apply_to_targets(label, action, f"Set brightness to {level}% on")
+        return _apply_to_targets(label, action, f"Set brightness to {level}% on", _ctx=_ctx)
 
 
 class SetColorCommand(Command):
@@ -235,7 +256,7 @@ class SetColorCommand(Command):
     def required_parameters(self) -> list:
         return ["color"]
 
-    def execute(self, color: str, label: str = "") -> str:
+    def execute(self, color: str, label: str = "", _ctx=None) -> str:
         color_lower = color.lower().strip()
         if color_lower in NAMED_COLORS:
             hsbk = NAMED_COLORS[color_lower]
@@ -246,7 +267,7 @@ class SetColorCommand(Command):
         else:
             valid = ", ".join(sorted(NAMED_COLORS))
             return f"Unknown color '{color}'. Use a name ({valid}) or hex (#rrggbb)."
-        return _apply_to_targets(label, lambda l: l.set_color(hsbk), f"Set color to {color} on")
+        return _apply_to_targets(label, lambda l: l.set_color(hsbk), f"Set color to {color} on", _ctx=_ctx)
 
 
 
@@ -278,7 +299,7 @@ class AdjustBrightnessCommand(Command):
     def required_parameters(self) -> list:
         return ["direction"]
 
-    def execute(self, direction: str, amount: str = "medium", label: str = "") -> str:
+    def execute(self, direction: str, amount: str = "medium", label: str = "", _ctx=None) -> str:
         d = parse_direction_updown(direction)
         if d is None:
             return f"Unknown direction '{direction}'. Use 'brighter'/'dimmer' or 'up'/'down'."
@@ -292,7 +313,7 @@ class AdjustBrightnessCommand(Command):
             light.set_color(hsbk)
 
         desc = f"{'Increased' if up else 'Decreased'} brightness {amount} on"
-        return _apply_to_targets(label, action, desc)
+        return _apply_to_targets(label, action, desc, _ctx=_ctx)
 
 
 class AdjustColorTempCommand(Command):
@@ -323,7 +344,7 @@ class AdjustColorTempCommand(Command):
     def required_parameters(self) -> list:
         return ["direction"]
 
-    def execute(self, direction: str, amount: str = "medium", label: str = "") -> str:
+    def execute(self, direction: str, amount: str = "medium", label: str = "", _ctx=None) -> str:
         d = direction.lower().strip()
         warmer = d in ("warmer", "warm", "orange", "yellow", "hot", "cozy", "cosy")
         cooler = d in ("cooler", "cool", "bluer", "blue", "cold", "white", "crisp", "bright")
@@ -338,7 +359,7 @@ class AdjustColorTempCommand(Command):
             light.set_color(hsbk)
 
         desc = f"Made {'warmer' if warmer else 'cooler'} ({amount}) on"
-        return _apply_to_targets(label, action, desc)
+        return _apply_to_targets(label, action, desc, _ctx=_ctx)
 
 
 class ShiftHueCommand(Command):
@@ -369,7 +390,7 @@ class ShiftHueCommand(Command):
     def required_parameters(self) -> list:
         return ["color"]
 
-    def execute(self, color: str, amount: str = "medium", label: str = "") -> str:
+    def execute(self, color: str, amount: str = "medium", label: str = "", _ctx=None) -> str:
         color_lower = color.lower().strip()
         if color_lower not in _COLOR_HUES:
             valid = ", ".join(sorted(_COLOR_HUES))
@@ -393,7 +414,7 @@ class ShiftHueCommand(Command):
             light.set_color(hsbk)
 
         desc = f"Shifted hue toward {color} ({amount}) on"
-        return _apply_to_targets(label, action, desc)
+        return _apply_to_targets(label, action, desc, _ctx=_ctx)
 
 
 class ListLightsCommand(Command):
@@ -447,7 +468,7 @@ class SetColorTempCommand(Command):
     def required_parameters(self) -> list:
         return ["temperature"]
 
-    def execute(self, temperature: str, label: str = "") -> str:
+    def execute(self, temperature: str, label: str = "", _ctx=None) -> str:
         temp_lower = temperature.lower().strip()
         if temp_lower not in COLOR_TEMPS:
             valid = ", ".join(sorted(COLOR_TEMPS))
@@ -460,7 +481,7 @@ class SetColorTempCommand(Command):
             hsbk[3] = kelvin
             light.set_color(hsbk)
 
-        return _apply_to_targets(label, action, f"Set color temp to {temperature} ({kelvin}K) on")
+        return _apply_to_targets(label, action, f"Set color temp to {temperature} ({kelvin}K) on", _ctx=_ctx)
 
 
 class SetSceneCommand(Command):

@@ -36,7 +36,14 @@ Flask callback server           ←      Quality Gate (reject garbage)
   /api/play_beep                        Kokoro TTS
   /api/suppress_wakeword         →    /api/play_audio (timer alerts)
                                       /api/hardware_control (volume RPC)
-                                      (after TV commands)
+Phone/text client           →        /api/text_interaction (no STT/TTS)
+Any client at startup       →        /api/register (dynamic routing)
+
+Multi-client routing:
+  data/rooms.yaml            →  RoomConfig (devices per room)
+  InteractionContext         →  flows through entire pipeline per request
+  ClientRegistry             →  dynamic IP allowlist + callback routing
+  RoomStateManager           →  per-room TV state, Sonos cache, TTS buffer
 ```
 
 ## Directory Structure
@@ -50,20 +57,28 @@ smart_assistant/
 │   ├── vad_recorder.py
 │   ├── hardware.py  # ALSA volume
 │   ├── pi_server.py # Flask callback server
+│   ├── suppress.py  # Wake word suppression state (thread-safe)
 │   └── config.py
 ├── server/          # PC
 │   ├── main.py
 │   ├── api.py       # FastAPI endpoints + rate limiter
 │   ├── orchestrator.py  # STT→Gate→Router→LLM→TTS pipeline
+│   ├── rooms.py     # RoomConfig dataclass, load_rooms(), make_default_room()
+│   ├── context.py   # InteractionContext — per-request pipeline context
+│   ├── client_registry.py  # Dynamic client registration + IP allowlist
+│   ├── room_state.py  # Per-room mutable state (TV, Sonos, TTS buffer)
 │   ├── quality_gate.py  # Post-STT filter (hallucinations, TV dialogue, garbage)
 │   ├── intent_router.py # Tier 1 direct command matching (pause, lights off, etc.)
 │   ├── transcription.py
 │   ├── llm.py       # Claude API client (tool_choice=auto, ChatResult, 3-round max)
 │   ├── synthesis.py # Kokoro TTS
-│   ├── event_loop.py  # Timer thread
+│   ├── event_loop.py  # Timer thread (room-aware delivery)
 │   ├── pi_callback.py # HTTP client → Pi
 │   ├── speaker_id.py  # Resemblyzer speaker identification (optional)
 │   ├── enroll_speaker.py  # CLI tool for enrolling speaker voice profiles
+│   ├── pair_google_tv.py  # CLI tool for TV pairing (androidtvremote2)
+│   ├── beeps.py       # Generate beep WAV files for Sonos output
+│   ├── routines.py    # Command usage pattern logging
 │   ├── config.py
 │   └── commands/    # Auto-discovered LLM tools
 │       ├── base.py
@@ -90,7 +105,8 @@ smart_assistant/
 ├── onnx_models/wakeword_creation/train_wakeword.py  # PC training script
 ├── record_samples.py  # Pi recording script (run on Pi before training)
 ├── kokoro/            # Kokoro ONNX model files (PC only): kokoro-v1.0.onnx, voices-v1.0.bin
-├── data/              # Persistent data: memory.json, benchmark.csv
+├── data/              # Persistent data: memory.json, benchmark.csv, rooms.yaml
+│   └── rooms.yaml.example  # Template for multi-room configuration
 ├── mcp_server.py      # MCP server for Claude Code (commands + pipeline testing)
 ├── .mcp.json          # MCP server config (auto-loaded by Claude Code)
 ├── setup_client.sh    # Pi setup script (deps + OWW base model download)
@@ -140,7 +156,8 @@ class MyCommand(Command):
 - `parameters` returns the **properties dict** (not the full schema — `to_tool()` wraps it)
 - All parameters are required by default; override `required_parameters` property to return a subset
 - No-parameter commands must use `execute(self, **_)` to avoid TypeError from command dispatch
-- Hardware commands (volume) use `self.pi_client` injected at startup via `commands.inject_pi_client()`
+- Hardware commands (volume) use `self.pi_client` injected at startup via `commands.inject_dependencies()`
+- Room-aware commands accept `_ctx=None` parameter — injected automatically by `commands.execute()` via `inspect.signature`
 
 | Command | Trigger example |
 |---------|----------------|
@@ -150,19 +167,23 @@ class MyCommand(Command):
 | `set_sonos_volume` / `adjust_sonos_volume` / `sonos_mute` | "TV volume to 50" / "Turn the music up a bit" (Sonos) |
 | `set_light` / `set_brightness` / `set_color` / `set_color_temp` | "Turn off the lights" / "Make the lights blue" (LIFX) |
 | `adjust_brightness` / `adjust_color_temp` / `shift_hue` | "Slightly brighter" / "A lot warmer" (LIFX relative) |
+| `list_lights` / `list_scenes` / `set_scene` | "What lights are on?" / "Set the movie scene" (LIFX) |
+| `list_sonos` | "What Sonos speakers are there?" |
 | `tv_power` | "Turn the TV on/off" (androidtvremote2) |
 | `tv_key` | "Go home" / "Mute the TV" (androidtvremote2 nav keys) |
 | `tv_launch` / `tv_playback` / `tv_skip` / `tv_search_youtube` | "Open YouTube" / "Pause" / "Skip 30 seconds" (ADB) |
+| `tv_adb_connect` | "Test the TV connection" (ADB initial setup) |
 | `save_memory` / `forget_memory` | "Remember I prefer dark roast" |
-| `log_feedback` / `list_feedback` / `resolve_feedback` | "Log that" / "I didn't like that response" / "Show my change requests" |
+| `log_feedback` / `list_feedback` / `resolve_feedback` | "Log that" / "Show my change requests" |
 | `set_timer` / `cancel_timer` / `list_timers` | "5 minute timer" |
 | `get_weather` | "What's the weather?" |
-| Network commands | "Scan for new devices" |
+| `scan_network` / `list_known_devices` / `pending_network_alerts` | "Scan for new devices" / "What's on my network?" |
 
 ## Key Configuration
 
-**`server/config.py`** — update `PI_HOST` to your Pi's IP
-**`client/config.py`** — update `SERVER_HOST`, `AUDIO_DEVICE`, `OWW_THRESHOLD`
+**`data/rooms.yaml`** — room definitions (devices, lights, Sonos zones per room). Copy from `data/rooms.yaml.example`. If absent, auto-generates a default room from `server/config.py`.
+**`server/config.py`** — update `PI_HOST` to your Pi's IP; `TRUSTED_IPS` env var for VPN/admin IPs
+**`client/config.py`** — update `SERVER_HOST`, `AUDIO_DEVICE`, `OWW_THRESHOLD`; set `CLIENT_ID`/`ROOM_ID` for multi-client
 **`shared/protocol.py`** — endpoint path constants only (no IPs)
 
 Environment variables required:
@@ -194,26 +215,49 @@ No other API keys needed. Weather uses Open-Meteo (free, no account). Smart home
 - Session summarizer runs after each non-follow-up turn to auto-save facts to memory (skipped for Tier 1 and TV)
 - History overflow compresses dropped messages into `_history_summary` injected as `<prior_context>`
 
+## Multi-Client Architecture
+
+- **Room config**: `data/rooms.yaml` defines devices per room (Sonos zone, TV host, light groups). Falls back to a default room from `server/config.py` if absent.
+- **InteractionContext**: Created per-request in `api.py`, flows through the pipeline. Contains `client_id`, `room` (RoomConfig), `client_type`, `callback_url`, `prefer_sonos`, `tv_state`.
+- **ClientRegistry**: Thread-safe dynamic client registration. Clients register at startup via `POST /api/register`. Replaces static `ALLOWED_CLIENT_IPS` for IP allowlisting.
+- **RoomStateManager**: Holds per-room mutable state (TV playback, Sonos cache, TTS buffer). Starts per-room TV pollers for rooms with a `tv_host`.
+- **Room-aware commands**: Commands that accept `_ctx` parameter use room defaults (light group, Sonos zone, Pi callback URL). Commands without `_ctx` work unchanged.
+- **Text client**: `POST /api/text_interaction` — skips STT/TTS, returns text response. For phone/REST API clients.
+- **Timer delivery**: Timers store `room_id`, delivered to the correct Pi via ClientRegistry lookup.
+- **Backward compat**: All new fields default to `"default"`. Without `rooms.yaml`, everything works exactly as before.
+
+### Adding a new room
+1. Add room to `data/rooms.yaml` (copy from `data/rooms.yaml.example`)
+2. Set `CLIENT_ID` and `ROOM_ID` env vars on the new Pi
+3. Pi auto-registers with server at startup
+4. Room-aware commands automatically use the new room's devices
+
 ## Interaction Flows
 
 ### Normal flow (wake word → response)
 1. Pi detects wake word (`OWW_THRESHOLD` × `OWW_TRIGGER_FRAMES` consecutive frames)
 2. RMS energy filter rejects low-energy detections (TV/room audio)
-3. `_beep("start")` → Sonos `/api/sonos_beep` → light flash if TV playing, else Sonos beep
+3. `_beep("start")` → routes per output config (see beep routing below)
 4. VAD records until silence, sends WAV to server `/api/process_interaction`
 5. `_beep("end")` on recording complete
 6. Server: STT → Quality Gate → Intent Router / LLM → Kokoro TTS → response back
 7. Pi plays local audio **or** server routes to Sonos (if `prefer_sonos_output=True`)
-8. If `await_followup=True` (heuristic: response ends with `?`, no commands, short): client sleeps (tts_dur + 3.5s for Sonos lag), checks suppression, listens again
+8. If `await_followup=True` (heuristic: response ends with `?`, no commands, <12 words, no filler): wait for TTS to finish, play start beep, listen again
 
-### Beep routing chain (USE_SONOS_OUTPUT=True)
+### Beep routing (three modes)
 ```
-_beep(type) → _sonos_beep(type) → POST /api/sonos_beep
-  → play_sonos_beep(type, indicator_light)
-    → if TV playing AND indicator_light set: LIFX flash (silent)
-    → else: Sonos play_uri beep WAV
+USE_SONOS_OUTPUT=False:
+  _beep(type) → local sox beep on Pi speaker (instant)
+
+USE_SONOS_OUTPUT=True + INDICATOR_LIGHT set:
+  _beep(type) → _sonos_beep(type) → POST /api/sonos_beep
+    → LIFX flash (instant, ~50ms, silent)
+
+USE_SONOS_OUTPUT=True + INDICATOR_LIGHT=None:
+  _beep(type) → _sonos_beep(type) → POST /api/sonos_beep
+    → Sonos play_uri beep WAV (1-3s startup lag)
 ```
-**Rule**: When TV is playing, ALL audio indicators go through LIFX light flash. No sound on Sonos.
+**Typical interaction**: only start + end beeps. Error beep on failures. No done/complete signal — user knows interaction is done when TTS stops.
 
 ### TV-playing path
 - `_last_tv_state` is polled every 5s via ADB (`dumpsys media_session`); up to 5s stale
@@ -230,7 +274,7 @@ _beep(type) → _sonos_beep(type) → POST /api/sonos_beep
 - Follow-up paths also check suppression before opening the mic
 
 ### Error beep rule
-`self._beep("error")` everywhere (never `self.audio.beep_error()` directly) so routing respects `USE_SONOS_OUTPUT` and TV state.
+`self._beep("error")` everywhere (never `self.audio.beep_error()` directly) so routing respects `USE_SONOS_OUTPUT` and INDICATOR_LIGHT config.
 
 ## Wake Word (OpenWakeWord)
 
@@ -268,15 +312,15 @@ _beep(type) → _sonos_beep(type) → POST /api/sonos_beep
 
 ### Tier 3: Ambitious / transformative
 - [ ] Web/API agent — browser or API calls for lookups, research, purchases
-- [ ] Multiple client support + bedroom Sonos as 2nd output
+- [x] Multiple client support + bedroom Sonos as 2nd output
 - [ ] Visual awareness — Pi camera for package detection, door, occupancy
 - [ ] Web dashboard for monitoring
 - [ ] Puramax2 litterbox control
 
 ### Old
 - [ ] Web dashboard for monitoring
-- [ ] multiple client support
-- [ ] add bedroom sonos as output for 2nd client
+- [x] multiple client support
+- [x] add bedroom sonos as output for 2nd client
 - [ ] "stop" wake word interrupt — detected in client, needs playback interruption logic
 - [ ] Spotify control (spotipy, needs free developer app registration)
 - [ ] Calendar, shopping list

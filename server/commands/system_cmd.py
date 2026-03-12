@@ -4,6 +4,20 @@ from ._utils import parse_amount, parse_direction_updown, parse_volume_word
 _VOL_S, _VOL_M, _VOL_L = 5, 15, 30
 
 
+def _get_pi_client(cmd, _ctx=None):
+    """Get the PiCallbackClient for the current context or legacy fallback.
+
+    Checks ctx.callback_url first (room-aware), then falls back to
+    the pi_client injected via inject_dependencies().
+    """
+    if _ctx and _ctx.callback_url:
+        from server.pi_callback import PiCallbackClient
+        return PiCallbackClient(_ctx.callback_url)
+    if hasattr(cmd, 'pi_client') and cmd.pi_client:
+        return cmd.pi_client
+    return None
+
+
 class VolumeCommand(Command):
     name = "set_volume"
     description = (
@@ -20,7 +34,7 @@ class VolumeCommand(Command):
             }
         }
 
-    def execute(self, level) -> str:
+    def execute(self, level, _ctx=None) -> str:
         level_str = str(level).lower().strip()
         word_val = parse_volume_word(level_str)
         if word_val is not None:
@@ -30,9 +44,10 @@ class VolumeCommand(Command):
                 level = max(0, min(100, int(float(level_str.rstrip("%")))))
             except ValueError:
                 return f"Couldn't understand volume level '{level}'. Try a number or: quiet, low, medium, loud, max."
-        if hasattr(self, 'pi_client') and self.pi_client:
+        pi = _get_pi_client(self, _ctx)
+        if pi:
             try:
-                result = self.pi_client.hardware_control("set_volume", {"level": level})
+                result = pi.hardware_control("set_volume", {"level": level})
                 return result if result else f"Failed to set volume to {level}%"
             except Exception as e:
                 return f"Error setting volume: {e}"
@@ -63,8 +78,9 @@ class AdjustVolumeCommand(Command):
     def required_parameters(self) -> list:
         return ["direction"]
 
-    def execute(self, direction: str, amount: str = "medium") -> str:
-        if not (hasattr(self, 'pi_client') and self.pi_client):
+    def execute(self, direction: str, amount: str = "medium", _ctx=None) -> str:
+        pi = _get_pi_client(self, _ctx)
+        if not pi:
             return "Volume control not available (Pi not connected)"
 
         d = parse_direction_updown(direction)
@@ -74,14 +90,14 @@ class AdjustVolumeCommand(Command):
         step = parse_amount(amount, _VOL_S, _VOL_M, _VOL_L)
 
         try:
-            current_result = self.pi_client.hardware_control("get_volume", {})
+            current_result = pi.hardware_control("get_volume", {})
             current = int(''.join(filter(str.isdigit, current_result or "50")) or 50)
         except Exception:
             current = 50
 
         new_level = max(0, min(100, current + (step if up else -step)))
         try:
-            result = self.pi_client.hardware_control("set_volume", {"level": new_level})
+            result = pi.hardware_control("set_volume", {"level": new_level})
             return result if result else f"Volume {'increased' if up else 'decreased'} to {new_level}%"
         except Exception as e:
             return f"Error adjusting volume: {e}"
@@ -95,10 +111,11 @@ class GetVolumeCommand(Command):
     def parameters(self) -> dict:
         return {}
 
-    def execute(self, **_) -> str:
-        if hasattr(self, 'pi_client') and self.pi_client:
+    def execute(self, _ctx=None, **_) -> str:
+        pi = _get_pi_client(self, _ctx)
+        if pi:
             try:
-                result = self.pi_client.hardware_control("get_volume", {})
+                result = pi.hardware_control("get_volume", {})
                 return result if result else "Could not retrieve volume"
             except Exception as e:
                 return f"Error getting volume: {e}"

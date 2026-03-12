@@ -40,6 +40,8 @@ class ProcessInteractionRequest(BaseModel):
     wake_word: str = Field(..., max_length=50, description="Wake word that was detected")
     timestamp: float = Field(..., ge=0, description="Unix timestamp when interaction started")
     prefer_sonos_output: bool = Field(False, description="If true, client wants TTS routed to Sonos instead of returned as audio")
+    client_id: str = Field("default", max_length=100, description="Client identifier for multi-client routing")
+    room_id: str = Field("default", max_length=100, description="Room this client belongs to")
 
     @field_validator('wake_word')
     @classmethod
@@ -64,6 +66,29 @@ class ProcessInteractionRequest(BaseModel):
             return v
         except Exception as e:
             raise ValueError(f"Invalid base64 encoding: {e}")
+
+
+class TextInteractionRequest(BaseModel):
+    """Request for text-only interaction (phone client, REST API)."""
+    client_id: str = Field(..., max_length=100, description="Client identifier")
+    text: str = Field(..., min_length=1, max_length=10_000, description="User's text input")
+    room_id: str = Field("default", max_length=100, description="Room this client belongs to")
+
+
+class TextInteractionResponse(BaseModel):
+    """Response to a text-only interaction."""
+    response_text: str = Field(..., max_length=50_000, description="LLM's text response")
+    commands_executed: List[str] = Field(default_factory=list, max_length=50, description="List of command names executed")
+    await_followup: bool = Field(False, description="If true, bot is expecting a follow-up")
+    error: Optional[str] = Field(None, max_length=1000, description="Error message if processing failed")
+
+
+class ClientRegistrationRequest(BaseModel):
+    """Request from a client to register with the server."""
+    client_id: str = Field(..., max_length=100, description="Unique client identifier")
+    room_id: str = Field(..., max_length=100, description="Room this client belongs to")
+    client_type: str = Field(..., pattern="^(audio|text)$", description="Client type: 'audio' or 'text'")
+    callback_url: Optional[str] = Field(None, max_length=500, description="HTTP callback URL (e.g. 'http://192.168.0.3:8080')")
 
 
 class ProcessInteractionResponse(BaseModel):

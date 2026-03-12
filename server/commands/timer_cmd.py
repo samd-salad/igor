@@ -122,7 +122,7 @@ class SetTimerCommand(Command):
             }
         }
 
-    def execute(self, name: str, duration: str) -> str:
+    def execute(self, name: str, duration: str, _ctx=None) -> str:
         name = name.strip()
         if not name:
             return "Timer name is required"
@@ -134,8 +134,9 @@ class SetTimerCommand(Command):
             return "Maximum timer duration is 24 hours"
 
         event_loop = get_event_loop()
+        room_id = _ctx.room.room_id if _ctx and hasattr(_ctx, 'room') else None
 
-        if not event_loop.add_timer(name, seconds):
+        if not event_loop.add_timer(name, seconds, room_id=room_id):
             return f"A timer named '{name}' already exists. Cancel it first or use a different name."
 
         # Format duration for confirmation

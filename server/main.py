@@ -16,6 +16,9 @@ from server.pi_callback import PiCallbackClient
 from server.orchestrator import Orchestrator
 from server.api import create_app
 from server.event_loop import initialize_event_loop
+from server.rooms import load_rooms
+from server.client_registry import ClientRegistry
+from server.room_state import RoomStateManager
 import server.commands as commands
 from server.beeps import write_beep_files
 from server.config import (
@@ -26,7 +29,9 @@ from server.config import (
     CLAUDE_API_KEY,
     KOKORO_VOICE,
     PI_HOST,
-    PI_PORT
+    PI_PORT,
+    DATA_DIR,
+    TRUSTED_IPS,
 )
 from shared.utils import setup_logging
 
@@ -41,6 +46,15 @@ if not CLAUDE_API_KEY:
 def initialize_services():
     """Initialize all services required by the server."""
     logger.info("Initializing Igor Voice Assistant Server...")
+
+    # Load room configuration
+    rooms_yaml = DATA_DIR / "rooms.yaml"
+    rooms = load_rooms(rooms_yaml)
+    logger.info(f"Rooms: {', '.join(rooms.keys())}")
+
+    # Create client registry and room state manager
+    registry = ClientRegistry(trusted_ips=TRUSTED_IPS)
+    room_state_mgr = RoomStateManager(rooms)
 
     # Initialize Transcriber
     logger.info(f"Loading Whisper model: {WHISPER_MODEL}")
@@ -65,41 +79,69 @@ def initialize_services():
     cacheable = list(get_cacheable_responses()) + ["Done.", "Didn't catch that."]
     synthesizer.pre_generate(cacheable)
 
-    # Initialize Pi callback client
+    # Initialize Pi callback client (legacy singleton)
     pi_url = f"http://{PI_HOST}:{PI_PORT}"
     logger.info(f"Pi client URL: {pi_url}")
     pi_client = PiCallbackClient(pi_url)
 
-    # Inject pi_client into hardware commands
-    commands.inject_pi_client(pi_client)
+    # Auto-register the legacy Pi client
+    registry.register(
+        client_id="default",
+        room_id="default",
+        client_type="audio",
+        callback_url=pi_url,
+        ip=PI_HOST,
+    )
+
+    # Inject dependencies into commands
+    commands.inject_dependencies(
+        registry=registry,
+        room_state_mgr=room_state_mgr,
+        pi_client=pi_client,
+    )
 
     # Initialize Event Loop (for timers with Pi callbacks)
     logger.info("Starting event loop for timers")
     event_loop = initialize_event_loop(pi_client, synthesizer)
+    event_loop.set_client_registry(registry)
 
     # Initialize Orchestrator
     orchestrator = Orchestrator(
         transcriber=transcriber,
         llm=llm,
         synthesizer=synthesizer,
-        pi_client=pi_client
+        pi_client=pi_client,
+        room_state_mgr=room_state_mgr,
     )
+
+    # Start per-room TV pollers
+    room_state_mgr.start_tv_pollers()
+
+    # Wire Sonos TTS routing into event loop for timer alerts
+    from server.config import SONOS_TTS_OUTPUT
+    if SONOS_TTS_OUTPUT:
+        event_loop.set_sonos_tts_func(orchestrator.route_tts_to_sonos)
 
     # Pre-generate beep WAV files for Sonos output
     write_beep_files()
 
     logger.info("All services initialized successfully")
-    return orchestrator
+    return orchestrator, registry, room_state_mgr, rooms
 
 
 def main():
     """Main entry point."""
     try:
         # Initialize services
-        orchestrator = initialize_services()
+        orchestrator, registry, room_state_mgr, rooms = initialize_services()
 
         # Create FastAPI app
-        app = create_app(orchestrator)
+        app = create_app(
+            orchestrator=orchestrator,
+            registry=registry,
+            room_state_mgr=room_state_mgr,
+            rooms=rooms,
+        )
 
         # Start server
         logger.info(f"Starting server on {SERVER_HOST}:{SERVER_PORT}")
