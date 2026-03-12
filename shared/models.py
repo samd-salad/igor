@@ -90,6 +90,28 @@ class ClientRegistrationRequest(BaseModel):
     client_type: str = Field(..., pattern="^(audio|text)$", description="Client type: 'audio' or 'text'")
     callback_url: Optional[str] = Field(None, max_length=500, description="HTTP callback URL (e.g. 'http://192.168.0.3:8080')")
 
+    @field_validator('callback_url')
+    @classmethod
+    def validate_callback_url(cls, v: Optional[str]) -> Optional[str]:
+        """Validate callback URL: must be http:// to a private LAN IP (RFC 1918)."""
+        if v is None:
+            return v
+        import ipaddress
+        from urllib.parse import urlparse
+        parsed = urlparse(v)
+        if parsed.scheme != 'http':
+            raise ValueError("callback_url must use http:// scheme")
+        hostname = parsed.hostname
+        if not hostname:
+            raise ValueError("callback_url must include a hostname")
+        try:
+            addr = ipaddress.ip_address(hostname)
+        except ValueError:
+            raise ValueError("callback_url hostname must be an IP address, not a DNS name")
+        if not addr.is_private or addr.is_loopback or addr.is_link_local:
+            raise ValueError("callback_url must point to a private LAN IP (RFC 1918)")
+        return v
+
 
 class ProcessInteractionResponse(BaseModel):
     """Response from PC to Pi with processed results."""

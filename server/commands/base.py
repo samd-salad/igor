@@ -18,6 +18,14 @@ class Command(ABC):
         """List of required parameter names. Override to make some optional."""
         return list(self.parameters.keys())
 
+    def get_defaults(self, brain, hour: int) -> dict:
+        """Return learned default parameters for this command at the given hour.
+
+        Override in subclasses to enable contextual defaults.
+        Returns empty dict by default.
+        """
+        return {}
+
     @abstractmethod
     def execute(self, **kwargs) -> str:
         """Execute the command and return a response string."""

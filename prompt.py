@@ -36,7 +36,7 @@ No "anything else?" after completing tasks.
 If I say "ask about me", ask questions to fill gaps. Never weaponize memory.
 
 <persistent_memory>
-{persistent_memory}
+{behavior_rules}
 </persistent_memory>
 </memory>
 

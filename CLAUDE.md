@@ -310,6 +310,23 @@ USE_SONOS_OUTPUT=True + INDICATOR_LIGHT=None:
 
 ## Roadmap — Future Features
 
+### Jarvis Ideas: Scored Reference
+
+| # | Idea | WOW | Feasible | Utility | Key Insight |
+|---|------|-----|----------|---------|-------------|
+| 1 | Proactive Intelligence | 9 | 8 | 10 | routines.py already tracks patterns — connect the last wire |
+| 2 | mmWave Presence + Follow-Me Audio | 9 | 7 | 9 | $8/room (LD2410B + ESP32), music follows between Sonos zones |
+| 3 | Automation Choreography ("movie time") | 8 | 9 | 8 | Every command exists — just need orchestration layer |
+| 4 | Emotional Voice Adaptation | 8 | 7 | 7 | librosa pitch/energy → mood hint in system prompt |
+| 5 | Visual Intelligence (Pi Camera) | 9 | 6 | 6 | Pi AI Camera ($70) runs inference on-chip |
+| 6 | Room-to-Room Intercom | 7 | 9 | 8 | Multi-room infra exists — new command on top |
+| 7 | Local LLM Fallback | 6 | 8 | 7 | Ollama + Qwen3 4B, try/except on API error |
+| 8 | Circadian Lighting + Soundscapes | 8 | 7 | 7 | Auto color temp by time of day + ambient audio |
+| 9 | Streaming ASR | 6 | 6 | 8 | WebSocket chunks → latency from ~3s to ~1.5s |
+| 10 | Entertainment Host (trivia/DM) | 8 | 8 | 5 | Party trick that makes guests lose their minds |
+
+5 of the top 10 are pure software on existing hardware.
+
 ### "Alive House" Stack (build in order, compounds)
 - [ ] Automation Choreography — "movie time" = dim lights + TV on + Sonos vol 30. `data/scenes.yaml`, Tier 1 intent routing, sequential step execution
 - [ ] Proactive Intelligence — routines.py pattern detection + scheduler thread + Claude Haiku call (~$0.01/check). Max 2 proactive messages/hr, never during TV

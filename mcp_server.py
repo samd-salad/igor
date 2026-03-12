@@ -365,12 +365,15 @@ def test_pipeline(text: str, tv_playing: bool = False) -> str:
     t0 = time.perf_counter()
     try:
         from server.llm import LLM
-        from server.commands.memory_cmd import load_persistent_memory
+        from server.brain import get_brain
         import server.commands as commands
 
         llm = LLM()
         tools = commands.get_tools()
-        persistent_memory = load_persistent_memory()
+        brain = get_brain()
+        behavior_rules = brain.get_behavior_rules()
+        relevant = brain.retrieve_relevant(cleaned)
+        relevant_memories = brain.format_relevant(relevant)
         llm_commands = []
 
         def tool_executor(command_name: str, **kwargs) -> str:
@@ -388,8 +391,9 @@ def test_pipeline(text: str, tv_playing: bool = False) -> str:
             user_text=cleaned,
             tools=tools,
             tool_executor=tool_executor,
-            persistent_memory=persistent_memory,
+            behavior_rules=behavior_rules,
             patterns=patterns,
+            relevant_memories=relevant_memories,
         )
         llm_text = chat_result.text if chat_result else "LLM returned no result"
     except Exception as e:

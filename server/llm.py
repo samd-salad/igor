@@ -156,32 +156,40 @@ class LLM:
             # Non-critical — losing the summary just means slightly less context
             logger.debug(f"History compression failed: {e}")
 
-    def _get_system_prompt(self, persistent_memory: str = "", speaker: str = None, patterns: str = "") -> tuple:
+    def _get_system_prompt(self, behavior_rules: str = "", speaker: str = None, patterns: str = "", relevant_memories: str = "", recent_summaries: str = "") -> tuple:
         """Build system prompt split into (base, dynamic) for prompt caching.
 
         Returns a 2-tuple so _api_call() can send them as separate system blocks:
-          base   — persona + persistent_memory.  Stable between save_memory calls.
+          base   — persona + behavior_rules.  Stable between save_memory calls.
                    Marked cache_control=ephemeral → Anthropic KV-caches this.
-          dynamic — current timestamp, speaker name, history summary, usage patterns.
-                   Changes every call → never cached.
+          dynamic — current timestamp, speaker name, relevant memories, history
+                   summary, usage patterns.  Changes every call → never cached.
 
         Splitting avoids re-processing ~2000-4000 tokens of tool schemas + persona
         on every API call.  Cache read/write counts are logged at DEBUG.
 
         Args:
-            persistent_memory: Contents of data/memory.json, injected by orchestrator.
+            behavior_rules: Behavior rules from BrainStore, injected by orchestrator.
             speaker: Identified speaker name from Resemblyzer, or None.
             patterns: Formatted string from routines.get_patterns(), or "".
+            relevant_memories: Pre-formatted relevant memories for this query.
         """
-        # Base: stable persona + user memory (cached by Anthropic)
-        base = SYSTEM_PROMPT.format(persistent_memory=persistent_memory)
+        # Base: stable persona + behavior rules (cached by Anthropic)
+        base = SYSTEM_PROMPT.format(behavior_rules=behavior_rules)
 
-        # Dynamic: changes every call — time, speaker, history context, usage patterns
+        # Dynamic: changes every call — time, speaker, relevant memories, history context, usage patterns
         now = datetime.now()
         time_context = f"Current: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
         if speaker:
             time_context += f" | Speaking: {speaker}"
         dynamic = f"<current_context>\n{time_context}\n</current_context>"
+
+        # Inject relevant memories retrieved for this specific query
+        if relevant_memories:
+            dynamic += f"\n<relevant_memories>\n{relevant_memories}\n</relevant_memories>"
+
+        if recent_summaries:
+            dynamic += f"\n<recent_sessions>\n{recent_summaries}\n</recent_sessions>"
 
         # Inject compressed history summary if overflow has occurred
         with self._summary_lock:
@@ -331,9 +339,11 @@ class LLM:
         user_text: str,
         tools: List[Dict],
         tool_executor,
-        persistent_memory: str = "",
+        behavior_rules: str = "",
         speaker: str = None,
         patterns: str = "",
+        relevant_memories: str = "",
+        recent_summaries: str = "",
     ) -> Optional[ChatResult]:
         """Process user utterance. Returns ChatResult or None on total failure.
 
@@ -353,9 +363,11 @@ class LLM:
             user_text: Transcribed speech from the user.
             tools: List of command tool schemas from commands.get_tools().
             tool_executor: Callable(name, **kwargs) -> str; wraps commands.execute().
-            persistent_memory: Loaded memory.json contents for system prompt.
+            behavior_rules: Behavior rules from BrainStore for system prompt.
             speaker: Identified speaker name (for personalisation), or None.
             patterns: Usage pattern string from routines.get_patterns(), or "".
+            relevant_memories: Pre-formatted relevant memories for this query.
+            recent_summaries: Formatted recent conversation summaries.
 
         Returns:
             ChatResult(text, commands_executed) on success, None on failure.
@@ -364,7 +376,7 @@ class LLM:
         self._trim_history()
 
         base_prompt, dynamic_context = self._get_system_prompt(
-            persistent_memory, speaker, patterns
+            behavior_rules, speaker, patterns, relevant_memories, recent_summaries
         )
         self.last_usage = {"input_tokens": 0, "output_tokens": 0}
         commands_executed = []

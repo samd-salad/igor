@@ -21,6 +21,7 @@ from server.client_registry import ClientRegistry
 from server.room_state import RoomStateManager
 import server.commands as commands
 from server.beeps import write_beep_files
+from server.brain import init_brain
 from server.config import (
     SERVER_HOST,
     SERVER_PORT,
@@ -32,6 +33,7 @@ from server.config import (
     PI_PORT,
     DATA_DIR,
     TRUSTED_IPS,
+    BRAIN_FILE,
 )
 from shared.utils import setup_logging
 
@@ -46,6 +48,10 @@ if not CLAUDE_API_KEY:
 def initialize_services():
     """Initialize all services required by the server."""
     logger.info("Initializing Igor Voice Assistant Server...")
+
+    # Initialize unified brain store
+    brain = init_brain(BRAIN_FILE)
+    brain.migrate_legacy_files(DATA_DIR)
 
     # Load room configuration
     rooms_yaml = DATA_DIR / "rooms.yaml"
@@ -104,6 +110,7 @@ def initialize_services():
     logger.info("Starting event loop for timers")
     event_loop = initialize_event_loop(pi_client, synthesizer)
     event_loop.set_client_registry(registry)
+    event_loop.load_pending_reminders()
 
     # Initialize Orchestrator
     orchestrator = Orchestrator(

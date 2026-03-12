@@ -63,7 +63,7 @@ from server.config import (
     SONOS_TTS_OUTPUT,
     SERVER_EXTERNAL_HOST, SERVER_PORT,
 )
-from server.commands.memory_cmd import load_persistent_memory
+from server.brain import get_brain
 from server.routines import log_command, get_patterns
 from server.context import InteractionContext
 import server.commands as commands
@@ -358,8 +358,8 @@ class Orchestrator:
                 logger.error(f"Tier 1 command '{tier1.command}' timed out after 30s")
                 response_text = f"{tier1.command} timed out."
             except Exception as e:
-                logger.error(f"Tier 1 command '{tier1.command}' failed: {e}")
-                response_text = f"Error: {e}"
+                logger.error(f"Tier 1 command '{tier1.command}' failed: {e}", exc_info=True)
+                response_text = "Sorry, that command failed."
             commands_executed.append(tier1.command)
             timings['llm'] = 0.0
             timings['llm_cost'] = 0.0
@@ -368,7 +368,14 @@ class Orchestrator:
             # ---- LLM Processing (Tier 2+) ----
             start = time.time()
             tools = commands.get_tools()
-            persistent_memory = load_persistent_memory()
+            brain = get_brain()
+            behavior_rules = brain.get_behavior_rules()
+            relevant = brain.retrieve_relevant(transcription)
+            relevant_memories = brain.format_relevant(relevant)
+            _recent = brain.get_recent_summaries(limit=3)
+            recent_summaries = "\n".join(
+                f"- {s['data'].get('text', '')}" for s in _recent
+            ) if _recent else ""
 
             def tool_executor(command_name: str, **kwargs) -> str:
                 """Wrapper: execute command, track in commands_executed list.
@@ -399,9 +406,11 @@ class Orchestrator:
                 user_text=transcription,
                 tools=tools,
                 tool_executor=tool_executor,
-                persistent_memory=persistent_memory,
+                behavior_rules=behavior_rules,
                 speaker=speaker_name,
                 patterns=patterns,
+                relevant_memories=relevant_memories,
+                recent_summaries=recent_summaries,
             )
             timings['llm'] = time.time() - start
 
@@ -462,7 +471,7 @@ class Orchestrator:
             _snap = self.llm.get_history_snapshot()
             threading.Thread(
                 target=self._run_session_summarizer,
-                args=(_snap,),
+                args=(_snap, list(commands_executed)),
                 daemon=True,
                 name="SessionSummarizer"
             ).start()
@@ -598,7 +607,8 @@ class Orchestrator:
                 else:
                     response_text = tier1.response
             except Exception as e:
-                response_text = f"Error: {e}"
+                logger.error(f"Tier 1 command '{tier1.command}' failed: {e}", exc_info=True)
+                response_text = "Sorry, that command failed."
             commands_executed.append(tier1.command)
             return {
                 'response_text': response_text,
@@ -609,7 +619,14 @@ class Orchestrator:
 
         # LLM (Tier 2+)
         tools = commands.get_tools()
-        persistent_memory = load_persistent_memory()
+        brain = get_brain()
+        behavior_rules = brain.get_behavior_rules()
+        relevant = brain.retrieve_relevant(text)
+        relevant_memories = brain.format_relevant(relevant)
+        _recent = brain.get_recent_summaries(limit=3)
+        recent_summaries = "\n".join(
+            f"- {s['data'].get('text', '')}" for s in _recent
+        ) if _recent else ""
 
         def tool_executor(command_name: str, **kwargs) -> str:
             commands_executed.append(command_name)
@@ -627,8 +644,10 @@ class Orchestrator:
             user_text=text,
             tools=tools,
             tool_executor=tool_executor,
-            persistent_memory=persistent_memory,
+            behavior_rules=behavior_rules,
             patterns=patterns,
+            relevant_memories=relevant_memories,
+            recent_summaries=recent_summaries,
         )
 
         if not llm_result:
@@ -1002,11 +1021,11 @@ class Orchestrator:
             logger.warning(f"Sonos TTS routing failed: {e}")
             return False
 
-    def _run_session_summarizer(self, history_snapshot: list):
+    def _run_session_summarizer(self, history_snapshot: list, commands_executed: list = None):
         """Extract memorable facts from a completed conversation and auto-save to memory.
 
         Runs in a background daemon thread — never raises, never blocks interactions.
-        Only saves NEW facts (skips keys already present in memory.json).
+        Only saves NEW facts (skips keys already present in memory).
         Calls LLM.extract_memories() which makes a bare API call expecting JSON back.
 
         Examples of extracted facts:
@@ -1019,8 +1038,8 @@ class Orchestrator:
             if not facts:
                 return
 
-            from server.commands.memory_cmd import _load_memories, _save_memories, _sanitize
-            from server.commands.memory_cmd import _lock as _mem_lock
+            from server.brain import get_brain
+            from server.commands.memory_cmd import _sanitize
 
             # Only allow auto-save to these categories — prevents adversarial
             # conversation content from writing to "behavior" (system prompt rules).
@@ -1028,32 +1047,74 @@ class Orchestrator:
                 "preferences", "schedule", "people", "personal", "home", "other",
             })
 
+            brain = get_brain()
             saved = []
-            with _mem_lock:
-                memories = _load_memories()
-                for cat, key, val in facts:
-                    # Sanitize all fields to prevent injection into JSON storage
-                    cat = _sanitize(cat, max_len=50).lower().strip()
-                    key = _sanitize(key, max_len=50).lower().strip().replace(" ", "_")
-                    val = _sanitize(val, max_len=500)
-                    if not (cat and key and val):
-                        continue
-                    if cat not in _ALLOWED_AUTO_CATEGORIES:
-                        logger.debug(f"Session summarizer rejected category '{cat}'")
-                        continue
-                    if cat in memories and key in memories[cat]:
-                        continue  # Don't overwrite known facts — user must explicit save
-                    if cat not in memories:
-                        memories[cat] = {}
-                    memories[cat][key] = val
+            for cat, key, val in facts:
+                # Sanitize all fields — values are injected into system prompt
+                cat = _sanitize(cat, max_len=50).lower().strip()
+                key = _sanitize(key, max_len=50).lower().strip().replace(" ", "_")
+                val = _sanitize(val, max_len=500)
+                if not (cat and key and val):
+                    continue
+                if cat not in _ALLOWED_AUTO_CATEGORIES:
+                    logger.debug(f"Session summarizer rejected category '{cat}'")
+                    continue
+                # save_memory handles dedup internally — is_update=True means it existed
+                entry_id, is_update = brain.save_memory(cat, key, val)
+                if not is_update:
                     saved.append(f"[{cat}][{key}]")
-                if saved:
-                    _save_memories(memories)
 
             if saved:
                 logger.info(f"Session summarizer saved: {', '.join(saved)}")
+
+            # Generate a brief conversation summary for cross-session recall
+            self._save_conversation_summary(history_snapshot, commands_executed or [])
         except Exception as e:
             logger.debug(f"Session summarizer failed (non-critical): {e}")
+
+    def _save_conversation_summary(self, history_snapshot: list, commands_executed: list):
+        """Generate a brief summary of the conversation and store in brain.
+
+        Runs inside the session summarizer thread — never raises.
+        Builds summary from transcript + commands without an extra LLM call.
+        """
+        try:
+            from server.brain import get_brain
+            from server.commands.memory_cmd import _sanitize
+            brain = get_brain()
+
+            # Build summary from user messages — sanitize to prevent prompt injection
+            user_msgs = []
+            for msg in history_snapshot:
+                content = msg.get("content", "")
+                if isinstance(content, str) and content.strip() and msg.get("role") == "user":
+                    user_msgs.append(_sanitize(content.strip(), max_len=200))
+
+            if not user_msgs:
+                return
+
+            first_msg = user_msgs[0][:100]
+            if len(user_msgs) == 1:
+                summary = first_msg
+            else:
+                summary = f"{first_msg} (+{len(user_msgs) - 1} follow-ups)"
+
+            if commands_executed:
+                cmds = ", ".join(dict.fromkeys(commands_executed))
+                summary += f" [{cmds}]"
+
+            # Extract topic tags from user messages and commands
+            topic_tags = set()
+            if commands_executed:
+                topic_tags.update(c.lower() for c in commands_executed)
+            for msg_text in user_msgs:
+                topic_tags.update(brain._extract_tags(msg_text))
+            topic_tags = list(topic_tags)[:15]
+
+            brain.add_summary(summary, topic_tags)
+            logger.debug(f"Conversation summary saved: {summary[:80]}...")
+        except Exception as e:
+            logger.debug(f"Conversation summary failed (non-critical): {e}")
 
     # When Sonos is the active audio output, Pi volume commands should control
     # the Sonos instead of the Pi's ALSA mixer (Pi speaker not in use).
@@ -1112,8 +1173,8 @@ class Orchestrator:
             result = commands.execute(name, _ctx=ctx, **kwargs)
             threading.Thread(target=log_command, args=(name,), daemon=True).start()
         except Exception as e:
-            logger.error(f"Command '{name}' failed: {e}")
-            return f"Error: {e}"
+            logger.error(f"Command '{name}' failed: {e}", exc_info=True)
+            return "Command failed."
 
         # After TV commands, suppress wake word on Pi so startup audio doesn't retrigger.
         # Runs in a background thread — fire-and-forget, non-blocking.

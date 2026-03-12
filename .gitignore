@@ -9,6 +9,7 @@ venv/
 data/*.txt
 data/*.json
 data/*.csv
+data/*.migrated
 
 # Claude Code local settings
 .claude/
@@ -18,6 +19,7 @@ data/*.csv
 
 # Trained wake word models (personal voice data, large binaries)
 oww_models/*.onnx
+oww_models/*.pkl
 
 # Wake word samples (personal voice recordings)
 wakeword_samples/positive/*.wav
@@ -37,6 +39,10 @@ data/adbkey.pub
 # TTS voice models (large binaries, downloaded by setup script)
 voices/*.onnx
 voices/*.onnx.json
+
+# Environment files (may contain API keys)
+.env
+.env.*
 
 # IDE
 .vscode/

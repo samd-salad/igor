@@ -47,6 +47,7 @@ MEMORY_FILE = DATA_DIR / "memory.txt"  # Migration detection only; actual storag
 KNOWN_DEVICES_FILE = DATA_DIR / "known_devices.json"
 BENCHMARK_FILE = DATA_DIR / "benchmark.csv"
 ROUTINES_FILE = DATA_DIR / "routines.json"
+BRAIN_FILE = DATA_DIR / "brain.json"
 
 # Speaker identification
 SPEAKER_EMBEDDINGS_FILE = DATA_DIR / "speaker_embeddings.json"

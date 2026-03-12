@@ -1,33 +1,10 @@
 """Feedback / change-request logging commands."""
-import json
 import logging
-import threading
-from datetime import datetime
 
 from server.commands.base import Command
-from server.config import DATA_DIR
-from server.commands.memory_cmd import _sanitize, _load_memories, _save_memories, _lock as _mem_lock
+from server.commands.memory_cmd import _sanitize
 
 logger = logging.getLogger(__name__)
-
-FEEDBACK_FILE = DATA_DIR / "feedback.json"
-_lock = threading.Lock()
-
-
-def _load() -> list:
-    if not FEEDBACK_FILE.exists():
-        return []
-    try:
-        return json.loads(FEEDBACK_FILE.read_text())
-    except Exception:
-        return []
-
-
-def _save(items: list):
-    FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = FEEDBACK_FILE.with_suffix('.tmp')
-    tmp.write_text(json.dumps(items, indent=2))
-    tmp.replace(FEEDBACK_FILE)
 
 
 class LogFeedbackCommand(Command):
@@ -60,18 +37,12 @@ class LogFeedbackCommand(Command):
         return ["issue"]
 
     def execute(self, issue: str, suggestion: str = "", context: str = "") -> str:
-        with _lock:
-            items = _load()
-            new_id = max((i["id"] for i in items), default=0) + 1
-            items.append({
-                "id": new_id,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "status": "open",
-                "issue": issue,
-                "suggestion": suggestion,
-                "context": context,
-            })
-            _save(items)
+        issue = _sanitize(issue, max_len=500)
+        suggestion = _sanitize(suggestion, max_len=500)
+        context = _sanitize(context, max_len=500)
+        from server.brain import get_brain
+        brain = get_brain()
+        new_id = brain.add_feedback(issue, suggestion, context)
         logger.info(f"Feedback logged #{new_id}: {issue}")
         return f"Logged as #{new_id}."
 
@@ -94,17 +65,18 @@ class ListFeedbackCommand(Command):
         return []
 
     def execute(self, status: str = "open", **_) -> str:
-        items = _load()
-        if status != "all":
-            items = [i for i in items if i.get("status") == status]
+        from server.brain import get_brain
+        brain = get_brain()
+        items = brain.list_feedback(status)
         if not items:
             return "No feedback items." if status == "all" else f"No {status} feedback items."
 
         lines = []
-        for i in items:
-            line = f"#{i['id']} [{i['status']}] {i['timestamp']}: {i['issue']}"
-            if i.get("suggestion"):
-                line += f" → {i['suggestion']}"
+        for entry in items:
+            d = entry["data"]
+            line = f"#{d.get('id', '?')} [{entry['status']}] {d.get('timestamp', '')}: {d.get('issue', '')}"
+            if d.get("suggestion"):
+                line += f" → {d['suggestion']}"
             lines.append(line)
         return "\n".join(lines)
 
@@ -123,27 +95,16 @@ class ResolveFeedbackCommand(Command):
         }
 
     def execute(self, id: int, **_) -> str:
-        with _lock:
-            items = _load()
-            suggestion = ""
-            for item in items:
-                if item["id"] == id:
-                    item["status"] = "resolved"
-                    _save(items)
-                    suggestion = item.get("suggestion", "").strip()
-                    break
-            else:
-                return f"No feedback item with ID {id}."
+        from server.brain import get_brain
+        brain = get_brain()
+        entry = brain.resolve_feedback(id)
+        if not entry:
+            return f"No feedback item with ID {id}."
 
+        suggestion = entry["data"].get("suggestion", "").strip()
         if suggestion:
-            key = f"feedback_{id}"
             value = _sanitize(suggestion, max_len=500)
-            with _mem_lock:
-                memories = _load_memories()
-                if "behavior" not in memories:
-                    memories["behavior"] = {}
-                memories["behavior"][key] = value
-                _save_memories(memories)
+            brain.save_memory("behavior", f"feedback_{id}", value)
             logger.info(f"Feedback #{id} suggestion saved to behavior memory: {value}")
             return f"#{id} resolved. Behavior note saved."
 

@@ -212,7 +212,7 @@ def create_app(
         allow_origins=allowed_origins,
         allow_credentials=True,
         allow_methods=["POST", "GET"],
-        allow_headers=["*"],
+        allow_headers=["Content-Type"],
     )
 
     app.state.orchestrator = orchestrator
@@ -239,7 +239,12 @@ def create_app(
 
     @app.post("/api/register")
     def register_client(request: ClientRegistrationRequest, req: Request):
-        """Register a client with the server for dynamic routing."""
+        """Register a client with the server for dynamic routing.
+
+        Restricted to ALLOWED_CLIENT_IPS and TRUSTED_IPS to prevent
+        unauthenticated self-enrollment into the IP allowlist.
+        """
+        _require_allowed_ip(req, registry)
         client_ip = req.client.host
         registry.register(
             client_id=request.client_id,
@@ -381,7 +386,12 @@ def create_app(
 
     @app.get("/audio/tts/{room_id}")
     async def get_tts_audio_by_room(room_id: str, req: Request):
-        """Serve TTS audio for a specific room (Sonos pull endpoint)."""
+        """Serve TTS audio for a specific room (Sonos pull endpoint).
+
+        No IP restriction: Sonos speakers fetch this via play_uri and
+        their IPs are not in the client registry. Audio is ephemeral
+        (overwritten each interaction) and only available briefly.
+        """
         rs = room_state_mgr.get(room_id)
         audio = rs.tts_audio if rs else b""
         return _serve_tts_audio(audio, req)

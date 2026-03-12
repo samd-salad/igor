@@ -165,6 +165,16 @@ class EventLoop:
         """
         logger.info(f"Timer fired: {timer.name} (room={timer.room_id or 'default'})")
 
+        try:
+            from server.brain import get_brain
+            brain = get_brain()
+            for entry in brain.get_pending_reminders():
+                if entry["data"].get("name") == timer.name:
+                    brain.fire_reminder(entry["id"])
+                    break
+        except Exception:
+            pass
+
         # Get the correct Pi client for this timer's room
         pi_client = self._get_pi_client_for_timer(timer)
 
@@ -245,6 +255,14 @@ class EventLoop:
             )
 
         logger.info(f"Timer added: {name} ({seconds}s)")
+
+        try:
+            from server.brain import get_brain
+            brain = get_brain()
+            brain.add_reminder(name, fire_at, seconds, room_id=room_id)
+        except Exception:
+            pass  # Non-critical — timer still works in-memory
+
         return True
 
     def cancel_timer(self, name: str) -> bool:
@@ -260,6 +278,14 @@ class EventLoop:
             if name in self._timers:
                 del self._timers[name]
                 logger.info(f"Timer cancelled: {name}")
+
+                try:
+                    from server.brain import get_brain
+                    brain = get_brain()
+                    brain.cancel_reminder(name)
+                except Exception:
+                    pass
+
                 return True
 
         logger.warning(f"Timer not found: {name}")
@@ -280,6 +306,60 @@ class EventLoop:
         """Return the number of currently active timers."""
         with self._lock:
             return len(self._timers)
+
+    def load_pending_reminders(self):
+        """Reload pending reminders from brain on startup.
+
+        Handles three cases:
+          - fire_at in the past but within 5 minutes: fire immediately
+          - fire_at in the past and older than 5 minutes: mark as fired (missed)
+          - fire_at in the future: register as an in-memory timer
+        """
+        try:
+            from server.brain import get_brain
+            brain = get_brain()
+            pending = brain.get_pending_reminders()
+        except Exception as e:
+            logger.warning(f"Could not load pending reminders from brain: {e}")
+            return
+
+        now = time.time()
+        loaded = 0
+
+        for entry in pending:
+            try:
+                data = entry["data"]
+                reminder_id = entry["id"]
+                name = data.get("name", "unknown")
+                fire_at = data.get("fire_at", 0)
+                room_id = data.get("room_id")
+
+                if fire_at <= now:
+                    age_seconds = now - fire_at
+                    if age_seconds <= 300:  # Within 5 minutes — fire immediately
+                        logger.info(f"Firing missed reminder (age={age_seconds:.0f}s): {name}")
+                        brain.fire_reminder(reminder_id)
+                        # Add directly to _timers (already marked fired in brain)
+                        with self._lock:
+                            self._timers[name] = Timer(
+                                name=name, fire_at=time.time(), room_id=room_id,
+                            )
+                        loaded += 1
+                    else:
+                        logger.info(f"Marking stale reminder as fired (age={age_seconds:.0f}s): {name}")
+                        brain.fire_reminder(reminder_id)
+                else:
+                    # Add directly to _timers (already persisted in brain)
+                    logger.info(f"Restoring reminder: {name} ({fire_at - now:.0f}s remaining)")
+                    with self._lock:
+                        self._timers[name] = Timer(
+                            name=name, fire_at=fire_at, room_id=room_id,
+                        )
+                    loaded += 1
+            except Exception as e:
+                logger.error(f"Error loading reminder {entry}: {e}")
+
+        logger.info(f"Loaded {loaded} pending reminders from brain")
 
 
 # ---------------------------------------------------------------------------
