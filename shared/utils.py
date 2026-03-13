@@ -2,22 +2,40 @@
 import base64
 import logging
 import time
+from pathlib import Path
 from typing import Optional
 
 
-def setup_logging(name: str, level: int = logging.INFO) -> logging.Logger:
-    """Set up consistent logging format for client or server."""
+def setup_logging(name: str, level: int = logging.INFO,
+                  log_file: str = None) -> logging.Logger:
+    """Set up consistent logging format for client or server.
+
+    Args:
+        log_file: If provided, also write logs to this file (appended).
+                  Attaches to the root logger so all modules are captured.
+    """
     logger = logging.getLogger(name)
     logger.setLevel(level)
 
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
     if not logger.handlers:
         handler = logging.StreamHandler()
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
         handler.setFormatter(formatter)
         logger.addHandler(handler)
+
+    if log_file:
+        root = logging.getLogger()
+        root.setLevel(level)
+        # Avoid duplicate file handlers on re-init
+        if not any(isinstance(h, logging.FileHandler) and h.baseFilename
+                   == str(Path(log_file).resolve()) for h in root.handlers):
+            fh = logging.FileHandler(str(Path(log_file).resolve()), encoding='utf-8')
+            fh.setFormatter(formatter)
+            root.addHandler(fh)
 
     return logger
 

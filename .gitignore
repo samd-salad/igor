@@ -9,6 +9,7 @@ venv/
 data/*.txt
 data/*.json
 data/*.csv
+data/*.log
 data/*.migrated
 
 # Claude Code local settings

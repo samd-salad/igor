@@ -12,13 +12,15 @@ from openwakeword.model import Model
 
 class WakeWordDetector:
     def __init__(self, model_paths: List[str], threshold: float = 0.5,
-                 verifier_path: str = None, verifier_threshold: float = 0.3):
+                 verifier_path: str = None, verifier_threshold: float = 0.3,
+                 vad_threshold: float = 0.5):
         """
         Args:
             model_paths:        Paths to trained .onnx wakeword model files.
             threshold:          Detection score threshold (0–1). Higher = fewer false positives.
             verifier_path:      Path to a custom verifier .pkl (speaker-specific second stage).
             verifier_threshold: Base score must exceed this to trigger verifier.
+            vad_threshold:      Silero VAD pre-filter (0 to disable). Non-speech never reaches classifier.
         """
         if not model_paths:
             raise ValueError("At least one model path is required")
@@ -34,7 +36,7 @@ class WakeWordDetector:
         self._model = Model(
             wakeword_models=model_paths,
             inference_framework="onnx",
-            vad_threshold=0.5,  # Silero VAD pre-filter: non-speech audio never reaches classifier
+            vad_threshold=vad_threshold,
             custom_verifier_models=custom_verifier_models,
             custom_verifier_threshold=verifier_threshold,
         )

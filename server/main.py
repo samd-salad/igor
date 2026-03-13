@@ -37,8 +37,9 @@ from server.config import (
 )
 from shared.utils import setup_logging
 
-# Configure logging
-logger = setup_logging('server', level=logging.INFO)
+# Configure logging — console + file (file enables MCP tail_logs + AI auditing)
+logger = setup_logging('server', level=logging.INFO,
+                       log_file=str(DATA_DIR / 'server.log'))
 
 if not CLAUDE_API_KEY:
     logger.error("ANTHROPIC_API_KEY environment variable is not set. Exiting.")

@@ -12,7 +12,8 @@ PI_PORT = int(os.getenv("PI_PORT", "8080"))
 
 # IP allowlist — legacy fallback for single-client deployments.
 # Multi-client setups use ClientRegistry (dynamic registration via /api/register).
-ALLOWED_CLIENT_IPS: set = {PI_HOST}
+# Localhost always allowed (test_client.py, MCP server, etc.)
+ALLOWED_CLIENT_IPS: set = {PI_HOST, SERVER_HOST, "127.0.0.1", "::1"}
 
 # Trusted IPs that are always allowed regardless of client registration
 # (e.g. Tailscale VPN IPs, admin machines). Added to ClientRegistry.all_client_ips().
