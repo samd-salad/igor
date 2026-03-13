@@ -35,7 +35,7 @@ class WakeWordDetector:
             wakeword_models=model_paths,
             inference_framework="onnx",
             vad_threshold=0.5,  # Silero VAD pre-filter: non-speech audio never reaches classifier
-            custom_verifier_models=custom_verifier_models or None,
+            custom_verifier_models=custom_verifier_models,
             custom_verifier_threshold=verifier_threshold,
         )
 
