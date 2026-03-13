@@ -299,13 +299,6 @@ USE_SONOS_OUTPUT=True + INDICATOR_LIGHT=None:
   3. PC: `python onnx_models/wakeword_creation/train_wakeword.py`
   4. Pi: `scp oww_models/igor.onnx pi:smart_assistant/oww_models/`
 
-## Todo — Polish (current priority)
-
-- [ ] commas and quotes not reading right in TTS
-- [ ] test tv speaking meaning no word response
-- [ ] better network scanning/testing
-- [ ] Multi-user voice interpretation
-
 ## Wakeword Improvement Plan
 
 **Quick wins (do now):**
