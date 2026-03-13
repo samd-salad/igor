@@ -194,9 +194,37 @@ SERVICEEOF"
     fi
 fi
 
+# ---- Shell aliases ----
+ALIAS_BLOCK="
+# Igor client shortcuts
+alias igor-logs='sudo journalctl -u igor-client -f'
+alias igor-restart='sudo systemctl restart igor-client && echo \"Restarted\" && sleep 1 && systemctl status igor-client --no-pager'
+alias igor-stop='sudo systemctl stop igor-client && echo \"Stopped\"'
+alias igor-start='sudo systemctl start igor-client && echo \"Started\" && sleep 1 && systemctl status igor-client --no-pager'
+alias igor-status='systemctl status igor-client --no-pager'
+"
+
+BASHRC="$HOME/.bashrc"
+if ! grep -q "igor-logs" "$BASHRC" 2>/dev/null; then
+    echo ""
+    read -p "Add igor-logs/start/stop/restart aliases to ~/.bashrc? [Y/n] " ADD_ALIASES
+    if [[ ! "$ADD_ALIASES" =~ ^[Nn]$ ]]; then
+        echo "$ALIAS_BLOCK" >> "$BASHRC"
+        echo "Aliases added. Run 'source ~/.bashrc' or open a new terminal."
+    fi
+else
+    echo "Shell aliases already installed."
+fi
+
 echo ""
 echo "=== Setup complete ==="
 echo ""
-echo "Manual start:  CLIENT_ID=$CLIENT_ID ROOM_ID=$ROOM_ID .venv/bin/python -m client.main"
+echo "Commands:"
+echo "  igor-logs      Follow client logs in real time"
+echo "  igor-start     Start the client service"
+echo "  igor-stop      Stop the client service"
+echo "  igor-restart   Restart the client service"
+echo "  igor-status    Check service status"
+echo ""
 echo "Health check:  curl http://$PI_IP:8080/api/health"
 echo "Server check:  curl http://$SERVER_IP:8000/api/health"
