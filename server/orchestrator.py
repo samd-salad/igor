@@ -892,23 +892,28 @@ class Orchestrator:
             logger.warning(f"Sonos beep '{beep_type}' failed: {e}")
             return False
 
+    # Lock + state for serialized light indicator flashes.
+    # Without serialization, concurrent beep threads (start/end/error) stomp
+    # on each other and produce a rapid strobe instead of distinct signals.
+    _indicator_lock = threading.Lock()
+    _indicator_orig_color = None
+    _indicator_orig_power = None
+
     def _flash_light_indicator(self, beep_type: str, light_name: str):
         """Flash a LIFX light as a silent visual indicator (runs in background thread).
 
         Used as the beep signal when INDICATOR_LIGHT is configured — provides
         instant feedback (~50ms) vs Sonos play_uri (1-3s startup lag).
 
-        Sequence:
-          1. Save current light state (color + power).
-          2. Set light to indicator color for ~400ms.
-          3. Restore original state.
-          4. If light was off, turn it back off after restore.
+        Serialized via _indicator_lock so concurrent flashes queue up instead
+        of stomping on each other. Each flash holds the color for a visible
+        duration, then restores the original state.
 
         Color coding:
-          start (listening) → blue
-          end (processing)  → green
-          error             → red
-          alert (timer)     → orange
+          start (listening) → blue  (held until end/error arrives)
+          end (processing)  → green (800ms)
+          error             → red   (800ms)
+          alert (timer)     → orange (800ms)
 
         Args:
             beep_type: Beep type determines indicator color.
@@ -923,25 +928,47 @@ class Orchestrator:
         color = _COLORS.get(beep_type)
         if color is None:
             return
-        try:
-            from server.commands.lifx_cmd import _resolve_target
-            lights = _resolve_target(light_name)
-            if not lights:
-                logger.debug(f"Indicator light '{light_name}' not found")
-                return
-            light = lights[0]
-            orig_color = light.get_color()
-            orig_power = light.get_power()
-            light.set_power(65535, duration=0, rapid=True)
-            light.set_color(color, duration=100, rapid=True)
-            time.sleep(0.4)
-            light.set_color(orig_color, duration=150, rapid=True)
-            if orig_power < 1000:
-                # Light was off — restore to off after color transition
-                time.sleep(0.15)
-                light.set_power(0, duration=0, rapid=True)
-        except Exception as e:
-            logger.debug(f"Light indicator flash failed for '{beep_type}': {e}")
+
+        with self._indicator_lock:
+            try:
+                from server.commands.lifx_cmd import _resolve_target
+                lights = _resolve_target(light_name)
+                if not lights:
+                    logger.debug(f"Indicator light '{light_name}' not found")
+                    return
+                light = lights[0]
+
+                # Save original state only on the first flash of a sequence (start).
+                # Subsequent flashes (end, error) reuse the saved state so we restore
+                # to the pre-interaction state, not to the previous indicator color.
+                if beep_type == 'start' or self._indicator_orig_color is None:
+                    self._indicator_orig_color = light.get_color()
+                    self._indicator_orig_power = light.get_power()
+
+                # Set indicator color
+                light.set_power(65535, duration=0, rapid=True)
+                light.set_color(color, duration=0, rapid=True)
+
+                if beep_type == 'start':
+                    # Start stays lit — end or error will replace it.
+                    # No sleep here; the lock releases so the next flash can queue.
+                    return
+
+                # Hold the color long enough to be clearly visible
+                time.sleep(0.8)
+
+                # Restore original state
+                light.set_color(self._indicator_orig_color, duration=300, rapid=True)
+                if self._indicator_orig_power < 1000:
+                    time.sleep(0.3)
+                    light.set_power(0, duration=0, rapid=True)
+
+                # Clear saved state
+                self._indicator_orig_color = None
+                self._indicator_orig_power = None
+
+            except Exception as e:
+                logger.debug(f"Light indicator flash failed for '{beep_type}': {e}")
 
     @staticmethod
     def _append_done_chime(wav_data: bytes) -> bytes:
