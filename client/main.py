@@ -297,6 +297,8 @@ class PiClient:
 
             wake_word = None
             consecutive: dict[str, int] = {}  # Per-model consecutive frame counter
+            gap_frames: dict[str, int] = {}   # Frames since last above-threshold frame
+            MAX_GAP = 3  # Allow brief dips (glottal stops, syllable boundaries)
             while not wake_word:
                 audio_bytes = stream.read(chunk_bytes, exception_on_overflow=False)
 
@@ -313,13 +315,18 @@ class PiClient:
                 for name, score in predictions.items():
                     if score >= OWW_THRESHOLD:
                         consecutive[name] = consecutive.get(name, 0) + 1
+                        gap_frames[name] = 0
                         if consecutive[name] >= OWW_TRIGGER_FRAMES:
                             # Required consecutive frames reached → confirmed detection
                             wake_word = name
                             break
                     else:
-                        # Reset on any sub-threshold frame — must be *consecutive*
-                        consecutive[name] = 0
+                        # Allow brief gaps (natural speech has glottal stops,
+                        # syllable boundaries that can dip below threshold)
+                        gap_frames[name] = gap_frames.get(name, 0) + 1
+                        if gap_frames[name] > MAX_GAP:
+                            consecutive[name] = 0
+                            gap_frames[name] = 0
 
         finally:
             stream.close()
