@@ -63,7 +63,7 @@ from client.config import (
 from client.audio import Audio
 from client.wakeword import WakeWordDetector
 from client.pi_server import run_pi_server
-from client.suppress import is_suppressed, unsuppress
+from client.suppress import is_suppressed
 from shared.protocol import PROCESS_INTERACTION_ENDPOINT, SONOS_BEEP_ENDPOINT, REGISTER_CLIENT_ENDPOINT
 from shared.models import ProcessInteractionRequest
 from shared.utils import setup_logging, read_wav_file, encode_audio_base64, decode_audio_base64, get_timestamp
@@ -299,6 +299,8 @@ class PiClient:
             consecutive: dict[str, int] = {}  # Per-model consecutive frame counter
             gap_frames: dict[str, int] = {}   # Frames since last above-threshold frame
             MAX_GAP = 3  # Allow brief dips (glottal stops, syllable boundaries)
+            saw_dip = False  # Score must drop below DIP_SCORE before counting
+            DIP_SCORE = 0.3  # Proves new audio entered OWW buffer (not stale silence scores)
             while not wake_word:
                 audio_bytes = stream.read(chunk_bytes, exception_on_overflow=False)
 
@@ -313,14 +315,21 @@ class PiClient:
 
                 predictions = self.wakeword_detector.predict(audio_bytes)
                 for name, score in predictions.items():
-                    if score >= OWW_THRESHOLD:
+                    # Dip requirement: score must drop below 0.3 at least once
+                    # before we start counting. Prevents stale 1.0 scores from
+                    # OWW's internal buffer (e.g. after reset() seeds with noise)
+                    # from immediately triggering.
+                    if score < DIP_SCORE:
+                        saw_dip = True
+
+                    if score >= OWW_THRESHOLD and saw_dip:
                         consecutive[name] = consecutive.get(name, 0) + 1
                         gap_frames[name] = 0
                         if consecutive[name] >= OWW_TRIGGER_FRAMES:
                             # Required consecutive frames reached → confirmed detection
                             wake_word = name
                             break
-                    else:
+                    elif score < OWW_THRESHOLD:
                         # Allow brief gaps (natural speech has glottal stops,
                         # syllable boundaries that can dip below threshold)
                         gap_frames[name] = gap_frames.get(name, 0) + 1
@@ -413,7 +422,7 @@ class PiClient:
           3. Route response:
              a. tts_routed=True  → Sonos played it; sleep for duration + 3.5s.
              b. audio_base64     → decode and play locally via PyAudio.
-          4. After audio ends: unsuppress() clears any TV-command suppression.
+          4. After audio ends: time-based suppression expires naturally.
           5. If await_followup=True and under depth limit: play start beep, stay in loop.
 
         Follow-up beep: both Sonos and local paths play a start beep via _beep()
@@ -499,7 +508,8 @@ class PiClient:
                     # can take 1-3s to start; 3.5s margin ensures we don't proceed
                     # until speech has fully finished playing.
                     time.sleep(tts_dur + 3.5)
-                    unsuppress()  # TTS done; clear any active TV-command suppression
+                    # Don't unsuppress() here — TV commands set a 20s window that
+                    # must run its full duration.  Time-based expiry handles it.
 
                     if result.get('await_followup') and depth < self.MAX_FOLLOWUP_DEPTH:
                         logger.info("Bot is awaiting follow-up response (Sonos routed)")
@@ -520,8 +530,8 @@ class PiClient:
                         self._beep("error")
                         return
 
-                    # Audio finished playing — clear any TV suppression so user can speak
-                    unsuppress()
+                    # Don't unsuppress() here — let time-based suppression expire naturally.
+                    # TV commands need the full 20s window for startup audio.
 
                     if result.get('await_followup') and depth < self.MAX_FOLLOWUP_DEPTH:
                         # Follow-up: stay in loop, play start beep to signal "listening"
