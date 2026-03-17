@@ -33,7 +33,7 @@ from shared.models import (
 )
 from shared.utils import decode_audio_base64
 from client.hardware import HardwareController
-from client.config import SERVER_HOST
+from client.config import SERVER_HOST, WAKE_SAMPLES_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +206,46 @@ def create_pi_app(audio_system, start_time: float) -> Flask:
         except Exception as e:
             logger.error(f"Error in suppress_wakeword: {e}")
             return jsonify({'error': 'Internal server error'}), 500
+
+    @app.route('/api/relabel_wakeword', methods=['POST'])
+    def relabel_wakeword():
+        """Move the most recent auto-saved wake word sample to negative/.
+
+        Called when the user reports a false positive ("that wasn't me").
+        Finds the newest auto_*.wav in positive/, moves it to negative/.
+        """
+        try:
+            pos_dir = WAKE_SAMPLES_DIR  # .../wakeword_samples/positive/
+            neg_dir = pos_dir.parent / "negative"
+
+            # Find the most recent auto-saved sample
+            auto_files = sorted(pos_dir.glob("auto_*.wav"), key=lambda f: f.stat().st_mtime)
+            if not auto_files:
+                return jsonify({'status': 'error', 'error': 'No auto-saved samples to relabel.'}), 404
+
+            latest = auto_files[-1]
+            neg_dir.mkdir(parents=True, exist_ok=True)
+
+            # Find next available index in negative/ (max + 1, not len,
+            # to avoid overwriting if files were deleted non-sequentially)
+            existing_neg = list(neg_dir.glob("auto_*.wav"))
+            if existing_neg:
+                max_idx = max(
+                    int(f.stem.split("_")[1]) for f in existing_neg
+                    if f.stem.split("_")[1].isdigit()
+                )
+                next_idx = max_idx + 1
+            else:
+                next_idx = 0
+            dest = neg_dir / f"auto_{next_idx:04d}.wav"
+
+            latest.rename(dest)
+            logger.info(f"Relabeled wake word sample: {latest.name} → negative/{dest.name}")
+            return jsonify({'status': 'success', 'message': f'Moved {latest.name} to negative samples.'})
+
+        except Exception as e:
+            logger.error(f"Error relabeling wake word sample: {e}", exc_info=True)
+            return jsonify({'status': 'error', 'error': 'Failed to relabel sample.'}), 500
 
     @app.route('/api/health', methods=['GET'])
     def health():

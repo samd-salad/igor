@@ -58,5 +58,5 @@ def inject_dependencies(registry=None, room_state_mgr=None, pi_client=None):
             cmd._registry = registry
         if room_state_mgr is not None:
             cmd._room_state_mgr = room_state_mgr
-        if pi_client is not None and (hasattr(cmd, 'pi_client') or cmd.name in ('set_volume', 'get_volume')):
+        if pi_client is not None and (hasattr(cmd, 'pi_client') or cmd.name in ('set_volume', 'get_volume', 'label_wakeword')):
             cmd.pi_client = pi_client

@@ -16,7 +16,7 @@ import logging
 import requests
 from typing import Optional
 
-from shared.protocol import PLAY_AUDIO_ENDPOINT, HARDWARE_CONTROL_ENDPOINT, PLAY_BEEP_ENDPOINT, SUPPRESS_WAKEWORD_ENDPOINT, REQUEST_TIMEOUT
+from shared.protocol import PLAY_AUDIO_ENDPOINT, HARDWARE_CONTROL_ENDPOINT, PLAY_BEEP_ENDPOINT, SUPPRESS_WAKEWORD_ENDPOINT, RELABEL_WAKEWORD_ENDPOINT, REQUEST_TIMEOUT
 from shared.models import PlayAudioRequest, HardwareControlRequest, PlayBeepRequest, BeepType, Priority, Status
 from shared.utils import encode_audio_base64
 
@@ -195,6 +195,31 @@ class PiCallbackClient:
         except Exception as e:
             logger.debug(f"suppress_wakeword failed (non-critical): {e}")
             return False
+
+    def relabel_wakeword_sample(self) -> Optional[str]:
+        """Tell the Pi to move the last auto-saved wake word sample to negative/.
+
+        Called when the user reports a false positive ("that wasn't me", "bad
+        wake word").  The Pi moves the most recent auto_*.wav from positive/
+        to negative/ so future retraining treats it correctly.
+
+        Returns:
+            Result message from Pi, or None on failure.
+        """
+        try:
+            response = requests.post(
+                f"{self.pi_base_url}{RELABEL_WAKEWORD_ENDPOINT}",
+                json={},
+                timeout=REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if result.get('status') == Status.SUCCESS.value:
+                return result.get('message', 'Sample relabeled.')
+            return result.get('error', 'Unknown error from Pi.')
+        except Exception as e:
+            logger.error(f"relabel_wakeword_sample failed: {e}")
+            return None
 
     def check_health(self) -> bool:
         """Check if the Pi server is reachable and healthy.
