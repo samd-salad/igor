@@ -196,6 +196,54 @@ class SpeakerIdentifier:
             logger.error(f"Speaker identification failed: {e}")
             return SpeakerMatch(name="unknown", confidence=0.0, is_known=False)
 
+    def update_speaker(self, name: str, audio: np.ndarray, confidence: float,
+                        sample_rate: int = 16000, alpha: float = 0.05,
+                        min_confidence: float = 0.82) -> bool:
+        """Adaptively update a speaker's embedding from a high-confidence match.
+
+        Uses exponential moving average to slowly drift the stored embedding
+        toward recent speech, keeping the profile current as mic gain, voice,
+        and environment change over time.
+
+        Only updates when confidence exceeds min_confidence to avoid polluting
+        the profile with misidentified audio.
+
+        Args:
+            name: Speaker name (must already be enrolled).
+            audio: Audio array from the interaction.
+            confidence: Cosine similarity from the identify() call.
+            sample_rate: Sample rate of audio.
+            alpha: Blending weight for new embedding (0.05 = 5% new, 95% old).
+            min_confidence: Minimum confidence to trigger an update.
+
+        Returns:
+            True if profile was updated.
+        """
+        if name not in self.speakers:
+            return False
+        if confidence < min_confidence:
+            return False
+
+        try:
+            from resemblyzer import preprocess_wav
+            encoder = _get_encoder()
+            wav = preprocess_wav(audio, source_sr=sample_rate)
+            new_embedding = encoder.embed_utterance(wav)
+
+            # Exponential moving average: gently blend new into existing
+            old_embedding = self.speakers[name]
+            blended = (1 - alpha) * old_embedding + alpha * new_embedding
+            # Re-normalize to unit length
+            blended = blended / np.linalg.norm(blended)
+            self.speakers[name] = blended
+            self._save_embeddings()
+
+            logger.debug(f"Updated speaker profile '{name}' (confidence={confidence:.2f}, alpha={alpha})")
+            return True
+        except Exception as e:
+            logger.debug(f"Speaker profile update failed for '{name}': {e}")
+            return False
+
     def remove_speaker(self, name: str) -> bool:
         """Remove a speaker from the database."""
         if name in self.speakers:

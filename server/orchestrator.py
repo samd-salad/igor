@@ -284,9 +284,16 @@ class Orchestrator:
                 if 'duration' in _speaker_result:
                     timings['speaker_id'] = _speaker_result['duration']
                 if speaker_name:
-                    logger.debug(f"Identified speaker: {speaker_name} ({speaker_confidence:.0%})")
+                    logger.info(f"Speaker: {speaker_name} ({speaker_confidence:.0%})")
+                    # Adaptively update speaker profile from high-confidence matches
+                    if speaker_confidence >= 0.82:
+                        threading.Thread(
+                            target=self._update_speaker_profile,
+                            args=(speaker_name, audio_bytes, speaker_confidence),
+                            daemon=True, name="SpeakerUpdate",
+                        ).start()
                 else:
-                    logger.debug(f"Unknown speaker (best match: {speaker_confidence:.0%})")
+                    logger.info(f"Speaker: unknown (best={speaker_confidence:.0%})")
 
         # ---- Quality Gate ----
         tv_playing = (tv_state == "playing")
@@ -680,6 +687,23 @@ class Orchestrator:
             'await_followup': await_followup,
             'error': None,
         }
+
+    def _update_speaker_profile(self, speaker_name: str, audio_bytes: bytes,
+                                 confidence: float):
+        """Adaptively update a speaker's voice profile from a high-confidence match.
+
+        Runs in a background thread — never blocks interactions.
+        Uses exponential moving average (5% new, 95% old) to gently drift
+        the embedding over time, keeping it current with mic/voice changes.
+        """
+        try:
+            audio_array = self._audio_bytes_to_numpy(audio_bytes)
+            if audio_array is not None:
+                self.speaker_identifier.update_speaker(
+                    speaker_name, audio_array, confidence, sample_rate=16000
+                )
+        except Exception as e:
+            logger.debug(f"Speaker profile update failed: {e}")
 
     def _audio_bytes_to_numpy(self, audio_bytes: bytes):
         """Convert WAV audio bytes to float32 numpy array for speaker identification.
