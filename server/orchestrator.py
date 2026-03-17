@@ -1415,15 +1415,15 @@ class Orchestrator:
             tts_stats = self._load_benchmark_stats('tts')
 
         def cmp(current, avg) -> str:
-            """Return fixed-width comparison arrow: ↓ fast, ↑ slow, ~ near-average."""
+            """Return fixed-width 6-char comparison: ↓ fast, ↑ slow, ~ near-average."""
             if avg == 0:
-                return "        "
+                return "      "
             pct = ((current - avg) / avg) * 100
             if pct < -5:
                 return f"\u2193{min(abs(pct), 999):.0f}%".rjust(6)
             elif pct > 5:
                 return f"\u2191{min(pct, 999):.0f}%".rjust(6)
-            return "       ~"
+            return "     ~"
 
         def fmt_time(t: float) -> str:
             return f"{t:7.2f}s"
