@@ -12,7 +12,7 @@ from flask import Flask, request, jsonify
 
 from client.pc_audio import PCAudio
 from client.pc_config import SERVER_HOST, WAKE_SAMPLES_DIR
-from client.suppress import suppress_wakeword, is_suppressed
+from client.suppress import suppress, is_suppressed
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def create_pc_app(audio: PCAudio) -> Flask:
         """Suppress wake word detection for a duration."""
         data = request.get_json() or {}
         seconds = data.get("seconds", 20)
-        suppress_wakeword(seconds)
+        suppress(seconds)
         logger.info(f"Wake word suppressed for {seconds}s")
         return jsonify({"status": "suppressed", "seconds": seconds})
 

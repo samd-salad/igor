@@ -34,7 +34,7 @@ from client.pc_config import (
     WAKE_SAMPLES_DIR, USE_SONOS_OUTPUT, TEMP_WAV,
     MAX_FOLLOWUP_DEPTH, FOLLOWUP_TIMEOUT,
 )
-from client.suppress import suppress_wakeword, is_suppressed
+from client.suppress import suppress, is_suppressed
 from shared.utils import setup_logging
 
 logger = logging.getLogger(__name__)
