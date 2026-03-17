@@ -187,6 +187,7 @@ class MyCommand(Command):
 | `set_timer` / `cancel_timer` / `list_timers` | "5 minute timer" |
 | `get_weather` | "What's the weather?" |
 | `scan_network` / `list_known_devices` / `pending_network_alerts` | "Scan for new devices" / "What's on my network?" |
+| `delayed_command` | "Turn off the lights in 15 minutes" / "Mute the TV in an hour" |
 
 ## Key Configuration
 
@@ -384,7 +385,7 @@ USE_SONOS_OUTPUT=True + INDICATOR_LIGHT=None:
 
 ### Tier 1: High impact, buildable next
 - [x] Reminders/scheduling — persistent reminders via Brain Store (timers survive restart)
-- [ ] Delayed commands — "turn off the lights in 15 minutes". Timer callback executes a command on expiry. Timer `callback` field exists but unused. LLM needs to chain `set_timer` + command intent.
+- [x] Delayed commands — `delayed_command(command, params, delay)` schedules any device command to run after a delay. Uses timer callback. Whitelist in `_ALLOWED_DELAYED`.
 - [ ] PC test client → first-class client — register with server, room assignment, receive callbacks, proper Flask callback server like Pi client. Currently imitates Pi but lacks registration and callback support.
 - [ ] "Stop" wake word interrupt — second OWW model, playback interruption logic
 - [ ] Spotify control (spotipy, needs free developer app registration)
