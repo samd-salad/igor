@@ -86,24 +86,30 @@ class PCAudio:
             except Exception as e:
                 logger.error(f"Playback failed: {e}")
 
-    def beep(self, frequency: int = 880, duration: float = 0.15, volume: float = 0.3):
-        """Play a simple sine wave beep."""
+    def _synth(self, freq_start: float, freq_end: float, duration: float, volume: float = 0.3):
+        """Synthesize a frequency sweep (matching Pi sox 'sine start:end' behavior)."""
         try:
             n_samples = int(SAMPLE_RATE * duration)
+            fade = int(SAMPLE_RATE * 0.005)
             samples = []
             for i in range(n_samples):
-                t = i / SAMPLE_RATE
-                # Apply fade in/out to avoid click
+                t = i / n_samples  # 0..1 progress
+                freq = freq_start + (freq_end - freq_start) * t
+                # Fade envelope to avoid clicks
                 env = 1.0
-                fade = int(SAMPLE_RATE * 0.01)
                 if i < fade:
                     env = i / fade
                 elif i > n_samples - fade:
                     env = (n_samples - i) / fade
-                val = volume * env * math.sin(2 * math.pi * frequency * t)
+                val = volume * env * math.sin(2 * math.pi * freq * (i / SAMPLE_RATE))
                 samples.append(int(val * 32767))
+            return struct.pack(f"<{len(samples)}h", *samples)
+        except Exception:
+            return b""
 
-            raw = struct.pack(f"<{len(samples)}h", *samples)
+    def _play_raw(self, raw: bytes):
+        """Play raw PCM samples."""
+        try:
             stream = self._pa.open(
                 format=PA_FORMAT, channels=1, rate=SAMPLE_RATE,
                 output=True, output_device_index=self._output_idx,
@@ -112,25 +118,29 @@ class PCAudio:
             stream.stop_stream()
             stream.close()
         except Exception as e:
-            logger.error(f"Beep failed: {e}")
+            logger.error(f"Playback failed: {e}")
 
     def beep_start(self):
-        """Ascending beep — listening started."""
-        self.beep(frequency=880, duration=0.12, volume=0.25)
+        """Rising sweep 500→900Hz: 'I'm listening' (matches Pi sox)."""
+        self._play_raw(self._synth(500, 900, 0.12, 0.3))
 
     def beep_end(self):
-        """Descending beep — recording finished."""
-        self.beep(frequency=440, duration=0.12, volume=0.2)
+        """Falling sweep 700→400Hz: 'Got it' (matches Pi sox)."""
+        self._play_raw(self._synth(700, 400, 0.12, 0.25))
 
     def beep_error(self):
-        """Low buzzy beep — error occurred."""
-        self.beep(frequency=220, duration=0.3, volume=0.2)
+        """Low 200Hz buzz: 'Error' (matches Pi sox)."""
+        self._play_raw(self._synth(200, 200, 0.3, 0.25))
 
     def beep_alert(self):
-        """Timer alert beep."""
-        for freq in [880, 1100, 880]:
-            self.beep(frequency=freq, duration=0.15, volume=0.3)
-            time.sleep(0.05)
+        """Triple ascending chime: 660→880→1100Hz (matches Pi sox)."""
+        self._play_raw(
+            self._synth(660, 660, 0.1, 0.35)
+            + self._synth(0, 0, 0.08, 0)  # gap
+            + self._synth(880, 880, 0.1, 0.35)
+            + self._synth(0, 0, 0.08, 0)  # gap
+            + self._synth(1100, 1100, 0.15, 0.4)
+        )
 
     def terminate(self):
         """Clean up PyAudio."""
