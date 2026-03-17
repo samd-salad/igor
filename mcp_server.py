@@ -164,10 +164,11 @@ def test_quality_gate(text: str, tv_playing: bool = False) -> str:
         tv_playing: Whether to simulate TV playing (enables long-text rejection)
     """
     from server.quality_gate import filter_transcription
-    result = filter_transcription(text, tv_playing=tv_playing)
-    if result is None:
+    gate = filter_transcription(text, tv_playing=tv_playing)
+    if gate.text is None:
         return json.dumps({
             "verdict": "REJECTED",
+            "reason": gate.reason,
             "input": text,
             "tv_playing": tv_playing,
             "output": None,
@@ -311,11 +312,12 @@ def test_pipeline(text: str, tv_playing: bool = False) -> str:
     # Stage 1: Quality Gate
     t0 = time.perf_counter()
     from server.quality_gate import filter_transcription
-    cleaned = filter_transcription(text, tv_playing=tv_playing)
+    gate = filter_transcription(text, tv_playing=tv_playing)
     timings["quality_gate_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+    cleaned = gate.text
 
     if cleaned is None:
-        stages.append({"stage": "quality_gate", "result": "REJECTED"})
+        stages.append({"stage": "quality_gate", "result": "REJECTED", "reason": gate.reason})
         return json.dumps({
             "text": text,
             "tv_playing": tv_playing,
@@ -482,9 +484,10 @@ def run_benchmark(phrases: str = "") -> str:
         row = {"phrase": phrase}
 
         # Quality gate
-        cleaned = filter_transcription(phrase)
+        gate = filter_transcription(phrase)
+        cleaned = gate.text
         if cleaned is None:
-            row["gate"] = "REJECTED"
+            row["gate"] = f"REJECTED ({gate.reason})"
             row["tier"] = "-"
             row["command"] = "-"
             row["response"] = "-"

@@ -55,7 +55,7 @@ from server.transcription import Transcriber
 from server.llm import LLM
 from server.synthesis import Synthesizer
 from server.pi_callback import PiCallbackClient
-from server.quality_gate import filter_transcription
+from server.quality_gate import filter_transcription, GateResult
 from server.intent_router import route as route_intent
 from server.config import (
     BENCHMARK_FILE, SPEAKER_EMBEDDINGS_FILE, SPEAKER_SIMILARITY_THRESHOLD,
@@ -297,9 +297,20 @@ class Orchestrator:
 
         # ---- Quality Gate ----
         tv_playing = (tv_state == "playing")
-        filtered = filter_transcription(transcription, tv_playing=tv_playing)
-        if filtered is None:
-            logger.info("Quality gate rejected transcription")
+        gate = filter_transcription(transcription, tv_playing=tv_playing)
+        if gate.text is None:
+            logger.info(f"Quality gate rejected transcription ({gate.reason})")
+
+            # Auto-relabel false wake word: if user dismissed ("bad wake word")
+            # or hallucination detected, tell the client to move the auto-saved
+            # sample from positive/ to negative/ for future retraining.
+            if gate.reason in ("dismissal", "hallucination"):
+                pi = self._get_pi_client_for_ctx(ctx)
+                if pi:
+                    threading.Thread(
+                        target=lambda: pi.relabel_wakeword_sample(),
+                        daemon=True, name="AutoRelabel",
+                    ).start()
             # When TV is playing, silence is correct — the rejection is likely TV
             # dialogue and any audio response would interrupt viewing.
             # When TV is NOT playing, the user actually spoke but was unclear.
@@ -340,7 +351,7 @@ class Orchestrator:
                 'tts_duration_seconds': 0.0,
                 'error': None,
             }
-        transcription = filtered
+        transcription = gate.text
 
         # ---- Intent Router (Tier 1) ----
         tier1 = route_intent(transcription)
@@ -593,15 +604,15 @@ class Orchestrator:
         # Quality gate
         tv_state = ctx.tv_state if ctx else "unknown"
         tv_playing = (tv_state == "playing")
-        filtered = filter_transcription(text, tv_playing=tv_playing)
-        if filtered is None:
+        gate = filter_transcription(text, tv_playing=tv_playing)
+        if gate.text is None:
             return {
                 'response_text': '',
                 'commands_executed': [],
                 'await_followup': False,
                 'error': None,
             }
-        text = filtered
+        text = gate.text
 
         # Intent router (Tier 1)
         tier1 = route_intent(text)
