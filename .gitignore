@@ -39,7 +39,9 @@ data/google_tv_key.pem
 data/adbkey
 data/adbkey.pub
 
-# TTS voice models (large binaries, downloaded by setup script)
+# TTS model files (large binaries, downloaded by setup script)
+kokoro/*.onnx
+kokoro/*.bin
 voices/*.onnx
 voices/*.onnx.json
 
