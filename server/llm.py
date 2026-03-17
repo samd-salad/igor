@@ -91,6 +91,7 @@ NARRATED_COMMANDS = frozenset({
     'list_feedback', 'list_sonos', 'list_lights', 'list_scenes',
     'get_volume',
     'log_feedback', 'resolve_feedback',
+    'save_memory', 'forget_memory',
 })
 
 # Response texture: rotate confirmations instead of always "Done."

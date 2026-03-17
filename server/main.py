@@ -74,19 +74,9 @@ def initialize_services():
     logger.info(f"Connecting to Claude API ({CLAUDE_MODEL})")
     llm = LLM()
 
-    # Initialize Synthesizer (lazy-loads Kokoro model on first synthesis)
+    # Initialize Synthesizer — fully lazy. Kokoro model loads on first
+    # synthesis request (~2s one-time cost). Pre-caching also deferred.
     synthesizer = Synthesizer()
-    if synthesizer.initialize():
-        # Pre-cache TTS for common short responses (zero-latency on Tier 1 commands)
-        from server.intent_router import get_cacheable_responses
-        from server.llm import _CONFIRMATIONS
-        confirmation_set = set()
-        for pool in _CONFIRMATIONS.values():
-            confirmation_set.update(pool)
-        cacheable = list(get_cacheable_responses()) + sorted(confirmation_set) + ["Didn't catch that."]
-        synthesizer.pre_generate(cacheable)
-    else:
-        logger.warning("Kokoro TTS not available at startup — will retry on first synthesis")
 
     # Initialize Pi callback client (legacy singleton)
     pi_url = f"http://{PI_HOST}:{PI_PORT}"
