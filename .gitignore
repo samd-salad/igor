@@ -5,11 +5,13 @@ __pycache__/
 venv/
 .venv/
 
-# Local data (contains personal info)
+# Local data (contains personal info, network config, logs)
 data/*.txt
 data/*.json
+data/*.jsonl
 data/*.csv
 data/*.log
+data/*.yaml
 data/*.migrated
 
 # Claude Code local settings
