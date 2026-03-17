@@ -227,8 +227,10 @@ class LLM:
         # Dynamic: changes every call — time, speaker, episodes, memories, patterns
         now = datetime.now()
         time_context = f"Current: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
-        if speaker:
+        if speaker and speaker != "unknown":
             time_context += f" | Speaking: {speaker}"
+        elif speaker == "unknown":
+            time_context += " | Speaking: unrecognized voice (not an enrolled household member — be helpful but don't assume identity or save personal details)"
         dynamic = f"<current_context>\n{time_context}\n</current_context>"
 
         # Inject relevant memories retrieved for this specific query
@@ -767,14 +769,14 @@ class LLM:
 
         prompt = (
             "You are a memory consolidation system for a voice assistant named Igor. "
-            "Igor is a dry, sardonic assistant who lives in his user's home.\n\n"
+            "Igor is a dry, sardonic assistant who lives in a household.\n\n"
             "Given the raw memories and recent interaction episodes below, write a "
-            "concise narrative paragraph (3-5 sentences) that captures who this person "
-            "is — their name, identity, daily rhythm, key relationships, and notable "
-            "preferences.\n\n"
+            "concise household narrative (4-6 sentences) that captures who lives here — "
+            "each person's name, identity, daily rhythm, and notable preferences. "
+            "Cover all household members mentioned in memories, not just the primary user.\n\n"
             "Write in third person present tense. Be specific (use names, times, details). "
-            "This paragraph is Igor's core knowledge of his person — it should read like "
-            "how a close friend would describe someone, not like a database printout.\n\n"
+            "This paragraph is Igor's core knowledge of his household — it should read like "
+            "how a close friend would describe a home, not like a database printout.\n\n"
             "If there are notable gaps in what Igor knows, end with ONE sentence noting "
             "the 2-3 most interesting unknowns (phrased as things Igor is curious about, "
             "not as database fields).\n\n"
@@ -788,9 +790,9 @@ class LLM:
             future = _executor.submit(
                 self.client.messages.create,
                 model=self.model,
-                max_tokens=300,
+                max_tokens=400,
                 timeout=20.0,
-                system="You write concise, warm, factual identity narratives.",
+                system="You write concise, warm, factual household narratives.",
                 messages=[{"role": "user", "content": prompt}],
             )
             response = future.result(timeout=30.0)

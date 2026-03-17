@@ -274,6 +274,7 @@ class Orchestrator:
         self._log_benchmark('stt', timings['stt'], transcription)
 
         # Collect speaker ID result — join with 2s timeout since STT took longer
+        # speaker_name: str = identified name, "unknown" = unrecognized voice, None = no speaker ID
         speaker_name = None
         speaker_confidence = 0.0
         if speaker_thread:
@@ -293,6 +294,7 @@ class Orchestrator:
                             daemon=True, name="SpeakerUpdate",
                         ).start()
                 else:
+                    speaker_name = "unknown"
                     logger.info(f"Speaker: unknown (best={speaker_confidence:.0%})")
 
         # ---- Quality Gate ----
@@ -490,11 +492,13 @@ class Orchestrator:
 
         # Run session summarizer after non-follow-up turns, when TV isn't playing,
         # and when it wasn't a Tier 1 match (no LLM history to summarize).
+        # Skip memory auto-save for unknown speakers (episodes still recorded).
         if not await_followup and not tv_playing and tier1 is None:
             _snap = self.llm.get_history_snapshot()
             threading.Thread(
                 target=self._run_session_summarizer,
                 args=(_snap, list(commands_executed), speaker_name or ""),
+                kwargs={"skip_memory_save": speaker_name == "unknown"},
                 daemon=True,
                 name="SessionSummarizer"
             ).start()
@@ -1092,12 +1096,16 @@ class Orchestrator:
             return False
 
     def _run_session_summarizer(self, history_snapshot: list, commands_executed: list = None,
-                                speaker: str = ""):
+                                speaker: str = "", skip_memory_save: bool = False):
         """Extract facts + episode from a conversation and auto-save to memory.
 
         Runs in a background daemon thread — never raises, never blocks interactions.
         Uses LLM.analyze_conversation() which combines fact extraction and episode
         generation in a single API call (zero extra cost vs the old approach).
+
+        When skip_memory_save is True (unknown speaker), facts are NOT saved to
+        persistent memory — prevents unknown guests from polluting the household's
+        memory store. Episodes are still recorded for continuity.
 
         After saving, checks if memory consolidation should run (every 5 episodes
         or when no identity narrative exists yet).
@@ -1111,26 +1119,29 @@ class Orchestrator:
 
             brain = get_brain()
 
-            # Save extracted facts
-            _ALLOWED_AUTO_CATEGORIES = frozenset({
-                "preferences", "schedule", "people", "personal", "home", "other",
-            })
-            facts = analysis.get("facts", [])
-            saved = []
-            for cat, key, val in facts:
-                cat = _sanitize(cat, max_len=50).lower().strip()
-                key = _sanitize(key, max_len=50).lower().strip().replace(" ", "_")
-                val = _sanitize(val, max_len=500)
-                if not (cat and key and val):
-                    continue
-                if cat not in _ALLOWED_AUTO_CATEGORIES:
-                    logger.debug(f"Session summarizer rejected category '{cat}'")
-                    continue
-                entry_id, is_update = brain.save_memory(cat, key, val)
-                if not is_update:
-                    saved.append(f"[{cat}][{key}]")
-            if saved:
-                logger.info(f"Session summarizer saved: {', '.join(saved)}")
+            # Save extracted facts (skip for unknown speakers)
+            if not skip_memory_save:
+                _ALLOWED_AUTO_CATEGORIES = frozenset({
+                    "preferences", "schedule", "people", "personal", "home", "other",
+                })
+                facts = analysis.get("facts", [])
+                saved = []
+                for cat, key, val in facts:
+                    cat = _sanitize(cat, max_len=50).lower().strip()
+                    key = _sanitize(key, max_len=50).lower().strip().replace(" ", "_")
+                    val = _sanitize(val, max_len=500)
+                    if not (cat and key and val):
+                        continue
+                    if cat not in _ALLOWED_AUTO_CATEGORIES:
+                        logger.debug(f"Session summarizer rejected category '{cat}'")
+                        continue
+                    entry_id, is_update = brain.save_memory(cat, key, val)
+                    if not is_update:
+                        saved.append(f"[{cat}][{key}]")
+                if saved:
+                    logger.info(f"Session summarizer saved: {', '.join(saved)}")
+            else:
+                logger.info("Session summarizer: skipping memory save (unknown speaker)")
 
             # Save episode (episodic memory)
             episode = analysis.get("episode")
