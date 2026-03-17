@@ -37,7 +37,8 @@ OWW_THRESHOLD = float(os.getenv("OWW_THRESHOLD", "0.8"))
 OWW_TRIGGER_FRAMES = int(os.getenv("OWW_TRIGGER_FRAMES", "5"))
 
 # Audio normalization for low-gain mics
-NORMALIZE_TARGET_PEAK = 16000
+# 24000 gives Whisper clean signal without clipping (int16 max = 32767)
+NORMALIZE_TARGET_PEAK = 24000
 NORMALIZE_FLOOR = 50  # Below this peak, treat as silence
 
 # Speech detection for wake word gating
