@@ -66,7 +66,11 @@ smart_assistant/
 │   ├── hardware.py  # ALSA volume
 │   ├── pi_server.py # Flask callback server
 │   ├── suppress.py  # Wake word suppression state (thread-safe)
-│   └── config.py
+│   ├── config.py
+│   ├── pc_main.py   # PC client entry point (office endpoint)
+│   ├── pc_audio.py  # Windows PyAudio wrapper
+│   ├── pc_server.py # PC Flask callback server (:8081)
+│   └── pc_config.py # PC-specific config (ports, devices, room)
 ├── server/          # PC
 │   ├── main.py
 │   ├── api.py       # FastAPI endpoints + rate limiter
@@ -361,22 +365,15 @@ USE_SONOS_OUTPUT=True + INDICATOR_LIGHT=None:
 
 ## Roadmap — Future Features
 
-### Jarvis Ideas: Scored Reference
-
-| # | Idea | WOW | Feasible | Utility | Key Insight |
-|---|------|-----|----------|---------|-------------|
-| 1 | Proactive Intelligence | 9 | 8 | 10 | routines.py already tracks patterns — connect the last wire |
-| 2 | mmWave Presence + Follow-Me Audio | 9 | 7 | 9 | $8/room (LD2410B + ESP32), music follows between Sonos zones |
-| 3 | Automation Choreography ("movie time") | 8 | 9 | 8 | Every command exists — just need orchestration layer |
-| 4 | Emotional Voice Adaptation | 8 | 7 | 7 | librosa pitch/energy → mood hint in system prompt |
-| 5 | Visual Intelligence (Pi Camera) | 9 | 6 | 6 | Pi AI Camera ($70) runs inference on-chip |
-| 6 | Room-to-Room Intercom | 7 | 9 | 8 | Multi-room infra exists — new command on top |
-| 7 | Local LLM Fallback | 6 | 8 | 7 | Ollama + Qwen3 4B, try/except on API error |
-| 8 | Circadian Lighting + Soundscapes | 8 | 7 | 7 | Auto color temp by time of day + ambient audio |
-| 9 | Streaming ASR | 6 | 6 | 8 | WebSocket chunks → latency from ~3s to ~1.5s |
-| 10 | Entertainment Host (trivia/DM) | 8 | 8 | 5 | Party trick that makes guests lose their minds |
-
-5 of the top 10 are pure software on existing hardware.
+### Sam's List - Don't touch
+- learning routines from tool calls, not just speech
+- automation choreograph ideas - "good morning"/"goodnight" (as early triggers for circadian rhythym calls), "sexy lightning", "ay carumba"
+- bedtime reminders/nudges?
+- speak directly into mic out
+- searching online and adding notes to project files
+- smart roomba integration?
+- are pre-synthesized speech segments in a different model?
+- better method for cleaning up our wakeword samples? all pc silences test as .98+
 
 ### "Alive House" Stack (build in order, compounds)
 - [ ] Automation Choreography — "movie time" = dim lights + TV on + Sonos vol 30. `data/scenes.yaml`, Tier 1 intent routing, sequential step execution
@@ -386,7 +383,7 @@ USE_SONOS_OUTPUT=True + INDICATOR_LIGHT=None:
 ### Tier 1: High impact, buildable next
 - [x] Reminders/scheduling — persistent reminders via Brain Store (timers survive restart)
 - [x] Delayed commands — `delayed_command(command, params, delay)` schedules any device command to run after a delay. Uses timer callback. Whitelist in `_ALLOWED_DELAYED`.
-- [ ] PC test client → first-class client — register with server, room assignment, receive callbacks, proper Flask callback server like Pi client. Currently imitates Pi but lacks registration and callback support.
+- [x] PC client — `client/pc_main.py`, registers as office_pc/office, Flask callback on :8081, wake word + sample management. Run: `python -m client.pc_main`
 - [ ] "Stop" wake word interrupt — second OWW model, playback interruption logic
 - [ ] Spotify control (spotipy, needs free developer app registration)
 - [ ] Calendar integration — Google Calendar API (read-only to start)
@@ -402,7 +399,7 @@ USE_SONOS_OUTPUT=True + INDICATOR_LIGHT=None:
 ### Tier 3: Ambitious / transformative (hardware needed)
 - [ ] mmWave presence + follow-me audio — $8/room (LD2410B + ESP32), music follows between Sonos zones, auto-lights on enter/leave
 - [ ] Visual intelligence — Pi AI Camera ($70, on-chip inference), package detection, visitor recognition, OCR
-- [ ] Streaming ASR — WebSocket audio chunks, latency drops from ~3s to ~1.5s
+- [ ] Streaming ASR — WebSocket audio chunks, latency drops from ~3s to ~1.5s (Deepgram Nova, Vosk, Moonshine)
 - [ ] Web/API agent — browser or API calls for lookups, research, purchases
 - [x] Multiple client support + bedroom Sonos as 2nd output
 - [ ] Web dashboard for monitoring
