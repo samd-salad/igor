@@ -198,11 +198,14 @@ class PCClient:
             WAKE_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y%m%d_%H%M%S")
             filepath = WAKE_SAMPLES_DIR / f"pc_auto_{ts}.wav"
+            # Normalize before saving — BlackShark raw audio is too quiet for training
+            raw = b"".join(audio_buffer)
+            normalized = normalize_audio(np.frombuffer(raw, dtype=np.int16))
             with wave.open(str(filepath), "wb") as wf:
                 wf.setnchannels(CHANNELS)
                 wf.setsampwidth(2)
                 wf.setframerate(SAMPLE_RATE)
-                wf.writeframes(b"".join(audio_buffer))
+                wf.writeframes(normalized.tobytes())
             logger.debug(f"Saved wake sample: {filepath.name}")
 
             # Rotate old samples
