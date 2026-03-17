@@ -87,7 +87,7 @@ def create_pc_app(audio: PCAudio) -> Flask:
         neg_dir.mkdir(parents=True, exist_ok=True)
 
         auto_files = sorted(
-            WAKE_SAMPLES_DIR.glob("auto_*.wav"),
+            WAKE_SAMPLES_DIR.glob("pc_auto_*.wav"),
             key=lambda f: f.stat().st_mtime,
             reverse=True,
         )

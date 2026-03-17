@@ -196,7 +196,7 @@ class PCClient:
         try:
             WAKE_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y%m%d_%H%M%S")
-            filepath = WAKE_SAMPLES_DIR / f"auto_{ts}.wav"
+            filepath = WAKE_SAMPLES_DIR / f"pc_auto_{ts}.wav"
             with wave.open(str(filepath), "wb") as wf:
                 wf.setnchannels(CHANNELS)
                 wf.setsampwidth(2)
@@ -205,7 +205,7 @@ class PCClient:
             logger.debug(f"Saved wake sample: {filepath.name}")
 
             # Rotate old samples
-            auto_files = sorted(WAKE_SAMPLES_DIR.glob("auto_*.wav"), key=lambda f: f.stat().st_mtime)
+            auto_files = sorted(WAKE_SAMPLES_DIR.glob("pc_auto_*.wav"), key=lambda f: f.stat().st_mtime)
             excess = len(auto_files) - OWW_MAX_AUTO_SAMPLES
             if excess > 0:
                 for f in auto_files[:excess]:
