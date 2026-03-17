@@ -384,8 +384,9 @@ USE_SONOS_OUTPUT=True + INDICATOR_LIGHT=None:
 
 ### Tier 1: High impact, buildable next
 - [x] Reminders/scheduling — persistent reminders via Brain Store (timers survive restart)
-- [ ] Local LLM fallback — Ollama + Qwen3 4B, try/except on Claude API error, auto-recovery
-- [ ] "stop" wake word interrupt — second OWW model, playback interruption logic
+- [ ] Delayed commands — "turn off the lights in 15 minutes". Timer callback executes a command on expiry. Timer `callback` field exists but unused. LLM needs to chain `set_timer` + command intent.
+- [ ] PC test client → first-class client — register with server, room assignment, receive callbacks, proper Flask callback server like Pi client. Currently imitates Pi but lacks registration and callback support.
+- [ ] "Stop" wake word interrupt — second OWW model, playback interruption logic
 - [ ] Spotify control (spotipy, needs free developer app registration)
 - [ ] Calendar integration — Google Calendar API (read-only to start)
 - [ ] Shopping/todo list — shared with phone (Todoist, Google Keep, or self-hosted)
@@ -406,6 +407,10 @@ USE_SONOS_OUTPUT=True + INDICATOR_LIGHT=None:
 - [ ] Web dashboard for monitoring
 - [ ] Entertainment host — trivia night, D&D dungeon master, scorekeeping, sound effects
 - [ ] Puramax2 litterbox control
+
+### Denied - Ideas proposed that I don't like
+- [ ] Local LLM fallback — Ollama + Qwen3 4B, try/except on Claude API error, auto-recovery
+
 
 ## Quick Reference
 
