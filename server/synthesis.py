@@ -3,6 +3,7 @@ import asyncio
 import io
 import logging
 import re
+import threading
 import wave
 from typing import Dict, List, Optional, Tuple
 
@@ -69,6 +70,7 @@ class Synthesizer:
         self._kokoro = None
         self._tts_cache: Dict[str, bytes] = {}
         self._init_failed = False
+        self._synth_lock = threading.Lock()  # Kokoro is not thread-safe
         logger.info(f"Synthesizer created (voice={self.voice}, speed={self.speed})")
 
     def _ensure_loaded(self) -> bool:
@@ -83,8 +85,11 @@ class Synthesizer:
             return False
         if not self.initialize():
             return False
-        # Pre-cache common responses on first load (background-ish, runs once)
-        self._pre_cache_common()
+        # Pre-cache common responses in background — don't block the first request
+        import threading
+        threading.Thread(
+            target=self._pre_cache_common, daemon=True, name="TTSPreCache"
+        ).start()
         return True
 
     def _pre_cache_common(self):
@@ -173,12 +178,13 @@ class Synthesizer:
             return None
 
         try:
-            samples, sample_rate = self._kokoro.create(
-                text,
-                voice=self.voice,
-                speed=self.speed,
-                lang="en-us",
-            )
+            with self._synth_lock:
+                samples, sample_rate = self._kokoro.create(
+                    text,
+                    voice=self.voice,
+                    speed=self.speed,
+                    lang="en-us",
+                )
 
             if samples is None or len(samples) == 0:
                 logger.error("Kokoro returned empty audio")
