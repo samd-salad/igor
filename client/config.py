@@ -48,6 +48,7 @@ OWW_MIN_RMS = 500        # Minimum RMS of detection audio to confirm wake word.
 # Auto-save detected wake words as training samples
 # Saves the audio that triggered each detection to wakeword_samples/positive/
 OWW_AUTO_SAVE_SAMPLES = True
+OWW_MAX_AUTO_SAMPLES = 200  # Keep last N auto-saved wake word samples; older ones are deleted
 OWW_SAMPLE_BUFFER_SECONDS = 2.5  # How much audio before detection to capture
 WAKE_SAMPLES_DIR = BASE_DIR / "wakeword_samples" / "positive"
 

@@ -37,6 +37,7 @@ Timeouts:
   - SDK timeout: 10s client-side HTTP timeout; fires first in normal timeout scenarios.
 """
 import logging
+import random
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Optional, List, Dict, NamedTuple
@@ -47,6 +48,20 @@ from server.config import CLAUDE_API_KEY, CLAUDE_MODEL, MAX_CONVERSATION_HISTORY
 from prompt import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_log_params(name, params):
+    """Redact sensitive values from tool params for logging."""
+    if not params:
+        return "{}"
+    safe = {}
+    for k, v in params.items():
+        if k == "value" and name in ("save_memory", "log_feedback"):
+            safe[k] = f"{str(v)[:20]}..." if len(str(v)) > 20 else str(v)
+        else:
+            safe[k] = v
+    return safe
+
 
 # Hard wall-clock timeout per API call.  Set LONGER than the SDK timeout (10s) so
 # the SDK normally fires first and the exception is caught as APIConnectionError.
@@ -74,9 +89,32 @@ NARRATED_COMMANDS = frozenset({
     'get_weather', 'get_time', 'calculate',
     'list_timers', 'cancel_timer',
     'list_feedback', 'list_sonos', 'list_lights', 'list_scenes',
-    'get_volume', 'save_memory', 'forget_memory',
+    'get_volume',
     'log_feedback', 'resolve_feedback',
 })
+
+# Response texture: rotate confirmations instead of always "Done."
+_CONFIRMATIONS = {
+    "light": ["Lights adjusted.", "Done.", "Got it.", "Set."],
+    "volume": ["Volume set.", "Done.", "Got it.", "Adjusted."],
+    "tv": ["Done.", "Got it.", "All set."],
+    "timer": ["Timer set.", "Done.", "Got it."],
+    "default": ["Done.", "Got it.", "All set.", "Handled.", "Sorted."],
+}
+
+
+def _pick_confirmation(commands: list[str]) -> str:
+    """Pick a contextual confirmation from the rotation pool."""
+    for cmd in commands:
+        if any(k in cmd for k in ("light", "bright", "color", "scene", "hue")):
+            return random.choice(_CONFIRMATIONS["light"])
+        if any(k in cmd for k in ("volume", "sonos", "mute")):
+            return random.choice(_CONFIRMATIONS["volume"])
+        if "tv" in cmd or "adb" in cmd:
+            return random.choice(_CONFIRMATIONS["tv"])
+        if "timer" in cmd:
+            return random.choice(_CONFIRMATIONS["timer"])
+    return random.choice(_CONFIRMATIONS["default"])
 
 
 class LLM:
@@ -156,28 +194,35 @@ class LLM:
             # Non-critical — losing the summary just means slightly less context
             logger.debug(f"History compression failed: {e}")
 
-    def _get_system_prompt(self, behavior_rules: str = "", speaker: str = None, patterns: str = "", relevant_memories: str = "", recent_summaries: str = "") -> tuple:
+    def _get_system_prompt(self, behavior_rules: str = "", speaker: str = None,
+                           patterns: str = "", relevant_memories: str = "",
+                           recent_episodes: str = "",
+                           identity_narrative: str = "") -> tuple:
         """Build system prompt split into (base, dynamic) for prompt caching.
 
         Returns a 2-tuple so _api_call() can send them as separate system blocks:
-          base   — persona + behavior_rules.  Stable between save_memory calls.
-                   Marked cache_control=ephemeral → Anthropic KV-caches this.
-          dynamic — current timestamp, speaker name, relevant memories, history
-                   summary, usage patterns.  Changes every call → never cached.
-
-        Splitting avoids re-processing ~2000-4000 tokens of tool schemas + persona
-        on every API call.  Cache read/write counts are logged at DEBUG.
+          base   — persona + behavior_rules + identity_narrative.  Stable between
+                   memory changes.  Marked cache_control=ephemeral → Anthropic
+                   KV-caches this (~2000-4000 tokens saved per call).
+          dynamic — current timestamp, speaker name, relevant memories, recent
+                   episodes, history summary, usage patterns.  Changes every call.
 
         Args:
             behavior_rules: Behavior rules from BrainStore, injected by orchestrator.
             speaker: Identified speaker name from Resemblyzer, or None.
             patterns: Formatted string from routines.get_patterns(), or "".
             relevant_memories: Pre-formatted relevant memories for this query.
+            recent_episodes: Formatted recent episodic memories.
+            identity_narrative: Living narrative about the user (from consolidation).
         """
-        # Base: stable persona + behavior rules (cached by Anthropic)
+        # Base: stable persona + behavior rules + identity (cached by Anthropic)
         base = SYSTEM_PROMPT.format(behavior_rules=behavior_rules)
 
-        # Dynamic: changes every call — time, speaker, relevant memories, history context, usage patterns
+        # Identity narrative: living profile of the user, always present
+        if identity_narrative:
+            base += f"\n\n<my_person>\n{identity_narrative}\n</my_person>"
+
+        # Dynamic: changes every call — time, speaker, episodes, memories, patterns
         now = datetime.now()
         time_context = f"Current: {now.strftime('%A, %B %d, %Y at %I:%M %p')}"
         if speaker:
@@ -188,8 +233,9 @@ class LLM:
         if relevant_memories:
             dynamic += f"\n<relevant_memories>\n{relevant_memories}\n</relevant_memories>"
 
-        if recent_summaries:
-            dynamic += f"\n<recent_sessions>\n{recent_summaries}\n</recent_sessions>"
+        # Inject recent episodic memories (replaces old session summaries)
+        if recent_episodes:
+            dynamic += f"\n<recent_episodes>\n{recent_episodes}\n</recent_episodes>"
 
         # Inject compressed history summary if overflow has occurred
         with self._summary_lock:
@@ -343,7 +389,8 @@ class LLM:
         speaker: str = None,
         patterns: str = "",
         relevant_memories: str = "",
-        recent_summaries: str = "",
+        recent_episodes: str = "",
+        identity_narrative: str = "",
     ) -> Optional[ChatResult]:
         """Process user utterance. Returns ChatResult or None on total failure.
 
@@ -367,7 +414,8 @@ class LLM:
             speaker: Identified speaker name (for personalisation), or None.
             patterns: Usage pattern string from routines.get_patterns(), or "".
             relevant_memories: Pre-formatted relevant memories for this query.
-            recent_summaries: Formatted recent conversation summaries.
+            recent_episodes: Formatted recent episodic memories.
+            identity_narrative: Living narrative about the user (from consolidation).
 
         Returns:
             ChatResult(text, commands_executed) on success, None on failure.
@@ -376,7 +424,8 @@ class LLM:
         self._trim_history()
 
         base_prompt, dynamic_context = self._get_system_prompt(
-            behavior_rules, speaker, patterns, relevant_memories, recent_summaries
+            behavior_rules, speaker, patterns, relevant_memories,
+            recent_episodes, identity_narrative
         )
         self.last_usage = {"input_tokens": 0, "output_tokens": 0}
         commands_executed = []
@@ -401,8 +450,14 @@ class LLM:
                     b.text for b in response.content if b.type == "text"
                 ).strip()
                 if not text:
-                    logger.warning("LLM returned empty response")
-                    return None
+                    if commands_executed:
+                        # LLM returned empty narration after tool execution —
+                        # fall back to "Done." instead of failing the interaction.
+                        logger.warning("LLM returned empty narration after tools, falling back to Done.")
+                        text = "Done."
+                    else:
+                        logger.warning("LLM returned empty response")
+                        return None
                 self.conversation_history.append(
                     {"role": "assistant", "content": text}
                 )
@@ -426,7 +481,7 @@ class LLM:
             needs_narration = False
 
             def _exec_one(call):
-                logger.info(f"Executing tool: {call.name}({call.input})")
+                logger.info(f"Executing tool: {call.name}({_safe_log_params(call.name, call.input)})")
                 try:
                     result = tool_executor(call.name, **call.input)
                     logger.info(f"Tool '{call.name}' returned: {result}")
@@ -468,7 +523,7 @@ class LLM:
                 r["content"].startswith("Error:") for r in tool_results
             )
             if not needs_narration and not has_tool_error:
-                short_reply = accompanying_text or "Done."
+                short_reply = accompanying_text or _pick_confirmation(commands_executed)
                 self.conversation_history.append(
                     {"role": "assistant", "content": short_reply}
                 )
@@ -578,6 +633,176 @@ class LLM:
         except Exception as e:
             logger.debug(f"extract_memories failed: {e}")
             return []
+
+    def analyze_conversation(self, history_snapshot: List[Dict],
+                             commands_executed: list = None) -> dict:
+        """Extract facts AND generate an episode summary from a conversation.
+
+        Combines memory extraction and episode generation into a single API call
+        (zero extra cost vs the old extract_memories approach).
+
+        Returns:
+            {"facts": [(cat, key, val), ...],
+             "episode": {"summary": str, "topics": [str], "emotional_tone": str}}
+        """
+        if not history_snapshot:
+            return {"facts": [], "episode": None}
+
+        lines = []
+        for msg in history_snapshot:
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                tag = "User" if msg.get("role") == "user" else "Assistant"
+                lines.append(f"{tag}: {content.strip()}")
+        transcript = "\n".join(lines)
+        if not transcript.strip():
+            return {"facts": [], "episode": None}
+
+        cmds_note = ""
+        if commands_executed:
+            cmds_note = f"\nCommands used: {', '.join(dict.fromkeys(commands_executed))}"
+
+        prompt = (
+            "You are a memory extraction and conversation analysis assistant. "
+            "Read the conversation below and produce TWO things:\n\n"
+            "1. FACTS: Any NEW facts worth remembering long-term about the user. "
+            "Only clear, stable, personal facts (names, preferences, schedules, "
+            "relationships, habits, home config). Be conservative.\n\n"
+            "2. EPISODE: A brief (1-2 sentence) summary of what happened in this "
+            "interaction. Write it as a third-person narrative for the assistant's "
+            "episodic memory. Include the user's apparent mood/tone if notable.\n\n"
+            "Respond with ONLY JSON:\n"
+            '{"facts": [{"category": "...", "key": "...", "value": "..."}], '
+            '"episode": {"summary": "...", "topics": ["..."], "emotional_tone": "..."}}\n\n'
+            "Valid fact categories: preferences, schedule, people, personal, home, other.\n"
+            "emotional_tone: one word (neutral, upbeat, stressed, playful, tired, frustrated) or empty.\n"
+            "If no facts worth saving, use empty facts array. Always produce an episode."
+        )
+
+        try:
+            import json
+            future = _executor.submit(
+                self.client.messages.create,
+                model=self.model,
+                max_tokens=512,
+                timeout=20.0,
+                system=prompt,
+                messages=[{"role": "user", "content": f"Conversation:\n{transcript}{cmds_note}"}],
+            )
+            response = future.result(timeout=30.0)
+            raw = ""
+            for block in response.content:
+                if block.type == "text":
+                    raw = block.text.strip()
+                    break
+            if not raw:
+                return {"facts": [], "episode": None}
+
+            data = json.loads(raw)
+
+            # Parse facts
+            facts = []
+            for item in data.get("facts", []):
+                if isinstance(item, dict):
+                    cat = str(item.get("category", "")).strip().lower()
+                    key = str(item.get("key", "")).strip().lower().replace(" ", "_")
+                    val = str(item.get("value", "")).strip()
+                    if cat and key and val:
+                        facts.append((cat, key, val))
+
+            # Parse episode
+            episode = None
+            ep_data = data.get("episode")
+            if isinstance(ep_data, dict) and ep_data.get("summary"):
+                episode = {
+                    "summary": str(ep_data["summary"])[:300],
+                    "topics": [str(t).lower() for t in ep_data.get("topics", []) if t][:5],
+                    "emotional_tone": str(ep_data.get("emotional_tone", ""))[:20].lower(),
+                }
+
+            return {"facts": facts, "episode": episode}
+        except Exception as e:
+            logger.debug(f"analyze_conversation failed: {e}")
+            return {"facts": [], "episode": None}
+
+    def generate_identity_narrative(self, memories: dict, episodes: list,
+                                     gaps: list) -> str:
+        """Generate a living narrative paragraph about the user.
+
+        Called by the consolidation engine.  Synthesizes all known memories and
+        recent episodes into a warm, factual paragraph that becomes the LLM's
+        core knowledge of its person.  One Haiku call (~$0.001).
+
+        Args:
+            memories: {category: {key: value}} from brain.get_all_memories().
+            episodes: Recent episode entries from brain.get_recent_episodes().
+            gaps: Unfilled profile questions from brain.get_knowledge_gaps().
+
+        Returns:
+            Narrative paragraph string, or "" on failure.
+        """
+        # Format memories
+        mem_lines = []
+        for cat, items in sorted(memories.items()):
+            for key, val in sorted(items.items()):
+                mem_lines.append(f"  [{cat}] {key}: {val}")
+        mem_text = "\n".join(mem_lines) if mem_lines else "(no memories yet)"
+
+        # Format recent episodes
+        ep_lines = []
+        for ep in episodes[:10]:
+            data = ep.get("data", {})
+            ts = ep.get("created", "")[:10]
+            summary = data.get("summary", "")
+            tone = data.get("emotional_tone", "")
+            if summary:
+                tone_note = f" [{tone}]" if tone else ""
+                ep_lines.append(f"  [{ts}] {summary}{tone_note}")
+        ep_text = "\n".join(ep_lines) if ep_lines else "(no interactions recorded yet)"
+
+        # Format gaps
+        gaps_text = "\n".join(f"  - {g}" for g in gaps[:8]) if gaps else "(profile complete)"
+
+        prompt = (
+            "You are a memory consolidation system for a voice assistant named Igor. "
+            "Igor is a dry, sardonic assistant who lives in his user's home.\n\n"
+            "Given the raw memories and recent interaction episodes below, write a "
+            "concise narrative paragraph (3-5 sentences) that captures who this person "
+            "is — their name, identity, daily rhythm, key relationships, and notable "
+            "preferences.\n\n"
+            "Write in third person present tense. Be specific (use names, times, details). "
+            "This paragraph is Igor's core knowledge of his person — it should read like "
+            "how a close friend would describe someone, not like a database printout.\n\n"
+            "If there are notable gaps in what Igor knows, end with ONE sentence noting "
+            "the 2-3 most interesting unknowns (phrased as things Igor is curious about, "
+            "not as database fields).\n\n"
+            f"Raw memories:\n{mem_text}\n\n"
+            f"Recent interactions:\n{ep_text}\n\n"
+            f"Known gaps:\n{gaps_text}\n\n"
+            "Write ONLY the narrative paragraph, nothing else:"
+        )
+
+        try:
+            future = _executor.submit(
+                self.client.messages.create,
+                model=self.model,
+                max_tokens=300,
+                timeout=20.0,
+                system="You write concise, warm, factual identity narratives.",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            response = future.result(timeout=30.0)
+            for block in response.content:
+                if block.type == "text":
+                    narrative = block.text.strip()
+                    # Strip quotes the LLM might wrap it in
+                    if narrative.startswith('"') and narrative.endswith('"'):
+                        narrative = narrative[1:-1]
+                    return narrative
+            return ""
+        except Exception as e:
+            logger.debug(f"generate_identity_narrative failed: {e}")
+            return ""
 
     def set_history(self, history: List[Dict]):
         """Restore conversation history from a saved state."""

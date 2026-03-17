@@ -68,10 +68,23 @@ class Synthesizer:
         self.sample_rate = KOKORO_SAMPLE_RATE
         self._kokoro = None
         self._tts_cache: Dict[str, bytes] = {}
-        logger.info(f"Synthesizer initialized (voice={self.voice}, speed={self.speed})")
+        self._init_failed = False
+        logger.info(f"Synthesizer created (voice={self.voice}, speed={self.speed})")
+
+    def _ensure_loaded(self) -> bool:
+        """Lazy-load Kokoro model on first use. Returns True if ready."""
+        if self._kokoro is not None:
+            return True
+        if self._init_failed:
+            return False
+        return self.initialize()
 
     def initialize(self) -> bool:
-        """Load Kokoro model into memory. Returns success."""
+        """Load Kokoro model into memory. Returns success.
+
+        Called automatically on first synthesis. Can also be called explicitly
+        at startup for eager loading.
+        """
         try:
             from kokoro_onnx import Kokoro
             self._kokoro = Kokoro(KOKORO_MODEL_FILE, KOKORO_VOICES_FILE)
@@ -79,6 +92,7 @@ class Synthesizer:
             return True
         except ImportError:
             logger.error("kokoro-onnx not installed. Run: pip install kokoro-onnx")
+            self._init_failed = True
             return False
         except FileNotFoundError as e:
             logger.error(
@@ -86,9 +100,11 @@ class Synthesizer:
                 "Download kokoro-v1.0.onnx and voices-v1.0.bin from "
                 "https://github.com/thewh1teagle/kokoro-onnx/releases and place in kokoro/"
             )
+            self._init_failed = True
             return False
         except Exception as e:
             logger.error(f"Failed to load Kokoro: {e}")
+            self._init_failed = True
             return False
 
     def pre_generate(self, texts: List[str]) -> int:
@@ -131,8 +147,8 @@ class Synthesizer:
             logger.debug(f"TTS cache hit: '{text}'")
             return self._tts_cache[text]
 
-        if not self._kokoro:
-            logger.error("Synthesizer not initialized")
+        if not self._ensure_loaded():
+            logger.error("Synthesizer not available")
             return None
 
         try:
@@ -178,8 +194,8 @@ class Synthesizer:
         if len(cleaned) < 80:
             return self._synthesize_cleaned(cleaned)
 
-        if not self._kokoro:
-            logger.error("Synthesizer not initialized")
+        if not self._ensure_loaded():
+            logger.error("Synthesizer not available")
             return None
 
         try:

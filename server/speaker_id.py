@@ -69,6 +69,11 @@ class SpeakerIdentifier:
             data = {name: emb.tolist() for name, emb in self.speakers.items()}
             with open(self.embeddings_file, 'w') as f:
                 json.dump(data, f, indent=2)
+            try:
+                import os
+                os.chmod(self.embeddings_file, 0o600)  # Owner read/write only
+            except OSError:
+                pass  # Windows doesn't support Unix permissions
             logger.info(f"Saved {len(self.speakers)} speaker embeddings")
         except Exception as e:
             logger.error(f"Failed to save speaker embeddings: {e}")

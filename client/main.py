@@ -52,6 +52,7 @@ from client.config import (
     OWW_TRIGGER_FRAMES,
     OWW_MIN_RMS,
     OWW_AUTO_SAVE_SAMPLES,
+    OWW_MAX_AUTO_SAMPLES,
     OWW_SAMPLE_BUFFER_SECONDS,
     WAKE_SAMPLES_DIR,
     TEMP_WAV,
@@ -406,6 +407,13 @@ class PiClient:
                 wf.setframerate(SAMPLE_RATE)
                 wf.writeframes(b"".join(audio_buffer))
             logger.debug(f"Saved wake sample: {filepath.name}")
+            # Rotate: keep only the newest OWW_MAX_AUTO_SAMPLES auto-saved files
+            auto_files = sorted(WAKE_SAMPLES_DIR.glob("auto_*.wav"), key=lambda f: f.stat().st_mtime)
+            excess = len(auto_files) - OWW_MAX_AUTO_SAMPLES
+            if excess > 0:
+                for f in auto_files[:excess]:
+                    f.unlink()
+                logger.debug(f"Rotated {excess} old auto-saved wake word samples")
         except Exception as e:
             logger.warning(f"Failed to save wake sample: {e}")
 

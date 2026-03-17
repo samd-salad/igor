@@ -87,6 +87,19 @@ def load_wav(path: Path) -> np.ndarray:
     return np.frombuffer(frames, dtype=np.int16).copy()
 
 
+def normalize_peak(audio: np.ndarray, target_peak: int = 16000) -> np.ndarray:
+    """Normalize audio to a consistent peak amplitude.
+
+    Makes the model amplitude-invariant so it works across mics with
+    different gain levels (e.g. Pi mic at peak ~20000 vs PC BlackShark at ~3000).
+    """
+    peak = int(np.max(np.abs(audio)))
+    if peak < 10:
+        return audio  # Digital silence — don't amplify
+    gain = min(target_peak / peak, 1000.0)
+    return np.clip(audio.astype(np.float32) * gain, -32768, 32767).astype(np.int16)
+
+
 def pad_or_trim(audio: np.ndarray, length: int) -> np.ndarray:
     if len(audio) >= length:
         return audio[:length]
@@ -157,11 +170,11 @@ def main():
     # ------------------------------------------------------------------
     # Load positive clips
     # ------------------------------------------------------------------
-    print("\nLoading positive clips...")
+    print("\nLoading positive clips (peak-normalized to 16000)...")
     pos_audio = []
     for path in wav_files:
         try:
-            audio = pad_or_trim(load_wav(path), CLIP_SAMPLES)
+            audio = normalize_peak(pad_or_trim(load_wav(path), CLIP_SAMPLES))
             pos_audio.append(audio)
         except Exception as e:
             print(f"  Skipping {path.name}: {e}")
@@ -185,7 +198,7 @@ def main():
             print(f"Loading {len(neg_files)} real negative clips from {NEGATIVE_DIR.name}/...")
             for path in neg_files:
                 try:
-                    audio = pad_or_trim(load_wav(path), CLIP_SAMPLES)
+                    audio = normalize_peak(pad_or_trim(load_wav(path), CLIP_SAMPLES))
                     neg_audio_list.append(audio)
                 except Exception as e:
                     print(f"  Skipping {path.name}: {e}")

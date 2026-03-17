@@ -47,9 +47,16 @@ from server.context import InteractionContext
 from server.client_registry import ClientRegistry
 from server.room_state import RoomStateManager
 from server.rooms import RoomConfig
-from server.config import ALLOWED_CLIENT_IPS
+from server.config import ALLOWED_CLIENT_IPS, AUDIO_TOKEN
 
 logger = logging.getLogger(__name__)
+
+
+def _require_audio_token(req: Request):
+    """Validate audio endpoint access via token query parameter."""
+    token = req.query_params.get("token")
+    if token != AUDIO_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid audio token")
 
 
 def _require_allowed_ip(req: Request, registry: ClientRegistry):
@@ -353,8 +360,9 @@ def create_app(
     # ---- Audio Serving ----
 
     @app.get("/audio/beep/{beep_type}")
-    async def get_beep_audio(beep_type: str):
+    async def get_beep_audio(beep_type: str, req: Request):
         """Serve pre-generated beep WAV files (fetched by Sonos)."""
+        _require_audio_token(req)
         from server.config import DATA_DIR
         from server.beeps import get_beep_wav, _DEFS
         if beep_type not in _DEFS:
@@ -388,10 +396,10 @@ def create_app(
     async def get_tts_audio_by_room(room_id: str, req: Request):
         """Serve TTS audio for a specific room (Sonos pull endpoint).
 
-        No IP restriction: Sonos speakers fetch this via play_uri and
-        their IPs are not in the client registry. Audio is ephemeral
-        (overwritten each interaction) and only available briefly.
+        Token-protected: Sonos gets the token embedded in the play_uri URL.
+        Audio is ephemeral (overwritten each interaction) and only available briefly.
         """
+        _require_audio_token(req)
         rs = room_state_mgr.get(room_id)
         audio = rs.tts_audio if rs else b""
         return _serve_tts_audio(audio, req)
@@ -399,6 +407,7 @@ def create_app(
     @app.get("/audio/tts_latest")
     async def get_tts_audio(req: Request):
         """Serve the most recent TTS audio (legacy endpoint, uses orchestrator buffer)."""
+        _require_audio_token(req)
         audio = app.state.orchestrator.tts_audio
         return _serve_tts_audio(audio, req)
 

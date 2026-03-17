@@ -33,7 +33,7 @@ def filter_transcription(text: str, tv_playing: bool = False) -> Optional[str]:
 
     # Known hallucination phrases
     if cleaned.lower() in _HALLUCINATIONS or lowered in _HALLUCINATIONS:
-        logger.info(f"Quality gate: rejected hallucination '{cleaned[:60]}'")
+        logger.info(f"Quality gate: rejected hallucination '{cleaned[:30]}'")
         return None
 
     words = cleaned.split()

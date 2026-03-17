@@ -1,5 +1,6 @@
 """Server configuration for PC backend."""
 import os
+import secrets
 from pathlib import Path
 
 # Server network settings — bind to LAN IP only (not 0.0.0.0)
@@ -111,3 +112,6 @@ GOOGLE_TV_CERT_FILE = str(DATA_DIR / "google_tv_cert.pem")
 GOOGLE_TV_KEY_FILE  = str(DATA_DIR / "google_tv_key.pem")
 GOOGLE_TV_CLIENT_NAME = "Igor"
 ADB_KEY_FILE = str(DATA_DIR / "adbkey")
+
+# Per-boot secret token for audio serving endpoints (Sonos gets it in play_uri URL)
+AUDIO_TOKEN = secrets.token_urlsafe(32)

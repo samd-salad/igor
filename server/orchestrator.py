@@ -61,7 +61,7 @@ from server.config import (
     BENCHMARK_FILE, SPEAKER_EMBEDDINGS_FILE, SPEAKER_SIMILARITY_THRESHOLD,
     CLAUDE_INPUT_COST_PER_M, CLAUDE_OUTPUT_COST_PER_M,
     SONOS_TTS_OUTPUT,
-    SERVER_EXTERNAL_HOST, SERVER_PORT,
+    SERVER_EXTERNAL_HOST, SERVER_PORT, AUDIO_TOKEN,
 )
 from server.brain import get_brain
 from server.routines import log_command, get_patterns
@@ -270,7 +270,7 @@ class Orchestrator:
             logger.warning(f"Transcription too long ({len(transcription)} chars), truncating")
             transcription = transcription[:10_000] + " [truncated]"
 
-        logger.info(f"Transcribed: '{transcription[:100]}{'...' if len(transcription) > 100 else ''}'")
+        logger.info(f"Transcribed: '{transcription[:50]}{'...' if len(transcription) > 50 else ''}'")
         self._log_benchmark('stt', timings['stt'], transcription)
 
         # Collect speaker ID result — join with 2s timeout since STT took longer
@@ -284,7 +284,7 @@ class Orchestrator:
                 if 'duration' in _speaker_result:
                     timings['speaker_id'] = _speaker_result['duration']
                 if speaker_name:
-                    logger.info(f"Identified speaker: {speaker_name} ({speaker_confidence:.0%})")
+                    logger.debug(f"Identified speaker: {speaker_name} ({speaker_confidence:.0%})")
                 else:
                     logger.debug(f"Unknown speaker (best match: {speaker_confidence:.0%})")
 
@@ -373,10 +373,13 @@ class Orchestrator:
             behavior_rules = brain.get_behavior_rules()
             relevant = brain.retrieve_relevant(transcription)
             relevant_memories = brain.format_relevant(relevant)
-            _recent = brain.get_recent_summaries(limit=3)
-            recent_summaries = "\n".join(
-                f"- {s['data'].get('text', '')}" for s in _recent
-            ) if _recent else ""
+
+            # Episodic memory: recent interaction summaries for continuity
+            _recent_eps = brain.get_recent_episodes(limit=5)
+            recent_episodes = brain.format_episodes(_recent_eps)
+
+            # Identity narrative: living profile of the user (cached in base prompt)
+            identity_narrative = brain.get_identity_narrative()
 
             def tool_executor(command_name: str, **kwargs) -> str:
                 """Wrapper: execute command, track in commands_executed list.
@@ -411,7 +414,8 @@ class Orchestrator:
                 speaker=speaker_name,
                 patterns=patterns,
                 relevant_memories=relevant_memories,
-                recent_summaries=recent_summaries,
+                recent_episodes=recent_episodes,
+                identity_narrative=identity_narrative,
             )
             timings['llm'] = time.time() - start
 
@@ -472,7 +476,7 @@ class Orchestrator:
             _snap = self.llm.get_history_snapshot()
             threading.Thread(
                 target=self._run_session_summarizer,
-                args=(_snap, list(commands_executed)),
+                args=(_snap, list(commands_executed), speaker_name or ""),
                 daemon=True,
                 name="SessionSummarizer"
             ).start()
@@ -577,7 +581,7 @@ class Orchestrator:
 
         prefer_sonos = ctx.prefer_sonos if ctx else False
 
-        logger.info(f"Processing text interaction: '{text[:100]}{'...' if len(text) > 100 else ''}'")
+        logger.info(f"Processing text interaction: '{text[:50]}{'...' if len(text) > 50 else ''}'")
 
         # Quality gate
         tv_state = ctx.tv_state if ctx else "unknown"
@@ -625,10 +629,11 @@ class Orchestrator:
         behavior_rules = brain.get_behavior_rules()
         relevant = brain.retrieve_relevant(text)
         relevant_memories = brain.format_relevant(relevant)
-        _recent = brain.get_recent_summaries(limit=3)
-        recent_summaries = "\n".join(
-            f"- {s['data'].get('text', '')}" for s in _recent
-        ) if _recent else ""
+
+        # Episodic memory + identity narrative
+        _recent_eps = brain.get_recent_episodes(limit=5)
+        recent_episodes = brain.format_episodes(_recent_eps)
+        identity_narrative = brain.get_identity_narrative()
 
         def tool_executor(command_name: str, **kwargs) -> str:
             commands_executed.append(command_name)
@@ -649,7 +654,8 @@ class Orchestrator:
             behavior_rules=behavior_rules,
             patterns=patterns,
             relevant_memories=relevant_memories,
-            recent_summaries=recent_summaries,
+            recent_episodes=recent_episodes,
+            identity_narrative=identity_narrative,
         )
 
         if not llm_result:
@@ -886,7 +892,7 @@ class Orchestrator:
                     daemon=True
                 ).start()
                 return True
-            uri = f"http://{SERVER_EXTERNAL_HOST}:{SERVER_PORT}/audio/beep/{beep_type}"
+            uri = f"http://{SERVER_EXTERNAL_HOST}:{SERVER_PORT}/audio/beep/{beep_type}?token={AUDIO_TOKEN}"
             return self._sonos_play_uri(uri, f"beep_{beep_type}")
         except Exception as e:
             logger.warning(f"Sonos beep '{beep_type}' failed: {e}")
@@ -1038,7 +1044,7 @@ class Orchestrator:
             if rs:
                 rs.tts_audio = wav_44k
 
-            uri = f"http://{SERVER_EXTERNAL_HOST}:{SERVER_PORT}/audio/tts/{room_id}"
+            uri = f"http://{SERVER_EXTERNAL_HOST}:{SERVER_PORT}/audio/tts/{room_id}?token={AUDIO_TOKEN}"
             if not self._sonos_play_uri(uri, "Igor", room_id=room_id):
                 return False
             device = self._get_sonos_device(room_id)
@@ -1050,36 +1056,33 @@ class Orchestrator:
             logger.warning(f"Sonos TTS routing failed: {e}")
             return False
 
-    def _run_session_summarizer(self, history_snapshot: list, commands_executed: list = None):
-        """Extract memorable facts from a completed conversation and auto-save to memory.
+    def _run_session_summarizer(self, history_snapshot: list, commands_executed: list = None,
+                                speaker: str = ""):
+        """Extract facts + episode from a conversation and auto-save to memory.
 
         Runs in a background daemon thread — never raises, never blocks interactions.
-        Only saves NEW facts (skips keys already present in memory).
-        Calls LLM.extract_memories() which makes a bare API call expecting JSON back.
+        Uses LLM.analyze_conversation() which combines fact extraction and episode
+        generation in a single API call (zero extra cost vs the old approach).
 
-        Examples of extracted facts:
-          ("preferences", "coffee", "dark roast")
-          ("people", "sister_name", "Laura")
-          ("schedule", "morning_run", "weekdays at 6am")
+        After saving, checks if memory consolidation should run (every 5 episodes
+        or when no identity narrative exists yet).
         """
         try:
-            facts = self.llm.extract_memories(history_snapshot)
-            if not facts:
-                return
-
             from server.brain import get_brain
             from server.commands.memory_cmd import _sanitize
 
-            # Only allow auto-save to these categories — prevents adversarial
-            # conversation content from writing to "behavior" (system prompt rules).
+            # Combined fact extraction + episode generation (single API call)
+            analysis = self.llm.analyze_conversation(history_snapshot, commands_executed)
+
+            brain = get_brain()
+
+            # Save extracted facts
             _ALLOWED_AUTO_CATEGORIES = frozenset({
                 "preferences", "schedule", "people", "personal", "home", "other",
             })
-
-            brain = get_brain()
+            facts = analysis.get("facts", [])
             saved = []
             for cat, key, val in facts:
-                # Sanitize all fields — values are injected into system prompt
                 cat = _sanitize(cat, max_len=50).lower().strip()
                 key = _sanitize(key, max_len=50).lower().strip().replace(" ", "_")
                 val = _sanitize(val, max_len=500)
@@ -1088,18 +1091,66 @@ class Orchestrator:
                 if cat not in _ALLOWED_AUTO_CATEGORIES:
                     logger.debug(f"Session summarizer rejected category '{cat}'")
                     continue
-                # save_memory handles dedup internally — is_update=True means it existed
                 entry_id, is_update = brain.save_memory(cat, key, val)
                 if not is_update:
                     saved.append(f"[{cat}][{key}]")
-
             if saved:
                 logger.info(f"Session summarizer saved: {', '.join(saved)}")
 
-            # Generate a brief conversation summary for cross-session recall
+            # Save episode (episodic memory)
+            episode = analysis.get("episode")
+            if episode and episode.get("summary"):
+                brain.add_episode(
+                    summary=_sanitize(episode["summary"], max_len=300),
+                    topics=episode.get("topics", []),
+                    commands=list(dict.fromkeys(commands_executed or [])),
+                    emotional_tone=episode.get("emotional_tone", ""),
+                    speaker=speaker,
+                )
+                logger.info(f"Episode saved: {episode['summary'][:60]}...")
+
+            # Also save old-style summary for backward compat
             self._save_conversation_summary(history_snapshot, commands_executed or [])
+
+            # Check if consolidation should run (every 5 episodes or missing identity)
+            if brain.should_consolidate():
+                self._run_consolidation()
+
         except Exception as e:
             logger.debug(f"Session summarizer failed (non-critical): {e}")
+
+    def _run_consolidation(self):
+        """Run memory consolidation: regenerate identity narrative from all knowledge.
+
+        Called from session summarizer when trigger conditions are met.
+        Makes one LLM call to synthesize memories + episodes into a living
+        narrative paragraph about the user.
+
+        Also marks processed episodes as consolidated.
+        """
+        try:
+            from server.brain import get_brain
+            brain = get_brain()
+
+            memories = brain.get_all_memories()
+            episodes = brain.get_recent_episodes(limit=10)
+            gaps = brain.get_knowledge_gaps()
+
+            narrative = self.llm.generate_identity_narrative(memories, episodes, gaps)
+            if narrative:
+                brain.update_identity_narrative(narrative)
+                logger.info(f"Identity narrative updated: {narrative[:80]}...")
+
+            # Mark unconsolidated episodes as processed
+            unconsolidated = brain.get_unconsolidated_episodes()
+            if unconsolidated:
+                brain.mark_episodes_consolidated([e["id"] for e in unconsolidated])
+
+            # Run compaction while we're at it
+            brain.compact()
+
+        except Exception as e:
+            logger.debug(f"Consolidation failed (non-critical): {e}")
 
     def _save_conversation_summary(self, history_snapshot: list, commands_executed: list):
         """Generate a brief summary of the conversation and store in brain.

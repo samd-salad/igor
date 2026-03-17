@@ -35,14 +35,14 @@ CHANNELS = 1
 CHUNK = 1024
 FORMAT = pyaudio.paInt16
 SILENCE_THRESHOLD = 100  # Peak-based (BlackShark silence=17-27, speech=333+)
-SILENCE_DURATION = 1.5
+SILENCE_DURATION = 2.0
 MIN_RECORDING = 0.5
-MAX_RECORDING = 15
+MAX_RECORDING = 30
 
 # Wake word defaults
 OWW_CHUNK = 1280  # 80ms frames for OpenWakeWord
-OWW_THRESHOLD = 0.7
-OWW_TRIGGER_FRAMES = 8
+OWW_THRESHOLD = 0.8
+OWW_TRIGGER_FRAMES = 5
 
 # Audio normalization — required for low-gain mics like BlackShark V3 Pro
 # which output RMS ~5-6 even during speech (Razer USB firmware issue).
@@ -229,6 +229,8 @@ def normalize_audio(audio, target_peak: int = NORMALIZE_TARGET_PEAK,
     (peak 333+) gets boosted to proper levels for the classifier.
     """
     import numpy as np
+    if isinstance(audio, (bytes, bytearray)):
+        audio = np.frombuffer(audio, dtype=np.int16).copy()
     peak = int(np.max(np.abs(audio)))
     if peak < floor:
         return audio  # Silence — don't amplify noise floor
@@ -305,8 +307,32 @@ def beep_error(p, spk_idx):
 
 # ── Server communication ────────────────────────────────────────────────────
 
+def normalize_wav(wav_bytes: bytes, target_peak: int = 16000) -> bytes:
+    """Normalize WAV audio to target peak amplitude.
+
+    Required for low-gain mics (BlackShark V3 Pro) where Whisper's VAD
+    rejects the audio as silence due to near-zero amplitude.
+    """
+    import numpy as np
+    buf = io.BytesIO(wav_bytes)
+    with wave.open(buf, "rb") as wf:
+        params = wf.getparams()
+        frames = wf.readframes(wf.getnframes())
+    audio = np.frombuffer(frames, dtype=np.int16).copy()
+    peak = int(np.max(np.abs(audio)))
+    if peak > 0:
+        gain = min(target_peak / peak, 1000.0)
+        audio = np.clip(audio.astype(np.float32) * gain, -32768, 32767).astype(np.int16)
+    out = io.BytesIO()
+    with wave.open(out, "wb") as wf:
+        wf.setparams(params)
+        wf.writeframes(audio.tobytes())
+    return out.getvalue()
+
+
 def send_audio(wav_bytes: bytes, server_url: str) -> dict:
     """Send audio to server and return response."""
+    wav_bytes = normalize_wav(wav_bytes)
     audio_b64 = base64.b64encode(wav_bytes).decode()
     resp = requests.post(
         f"{server_url}/api/process_interaction",
@@ -318,7 +344,7 @@ def send_audio(wav_bytes: bytes, server_url: str) -> dict:
             "client_id": "test_pc",
             "room_id": "default",
         },
-        timeout=30,
+        timeout=60,
     )
     return resp.json()
 
@@ -605,7 +631,7 @@ def mode_wakeword(args):
 
             for i in range(0, len(audio) - OWW_CHUNK, OWW_CHUNK):
                 chunk = audio[i:i + OWW_CHUNK]
-                scores = detector.predict(chunk)
+                scores = detector.predict(normalize_audio(chunk))
                 for name, score in scores.items():
                     peak_score = max(peak_score, score)
                     if score >= threshold:
@@ -672,7 +698,7 @@ def mode_wakeword(args):
     while time.time() < warmup_end:
         try:
             chunk = audio_q.get(timeout=0.2)
-            detector.predict(chunk)
+            detector.predict(normalize_audio(chunk))
         except queue.Empty:
             pass
 
@@ -685,11 +711,17 @@ def mode_wakeword(args):
               pipeline=pipeline)
 
     consecutive = {}
-    speech_countdown = 0  # Sticky window: frames remaining with speech active
+    gap_frames = {}   # Frames since last speech-energy frame per model
+    MAX_GAP = 3       # Allow up to 3 silence frames between speech frames
+    saw_dip = False   # Must see score drop < 0.3 before counting (prevents stale 1.0 triggers)
+    DIP_SCORE = 0.3
+    SPEECH_TRAIL = 10 # OWW detection lags speech by ~6-10 frames (embedding pipeline delay).
+                      # Treat frames as "speech-active" for this many frames after last real speech.
+    frames_since_speech = SPEECH_TRAIL + 1  # Start expired
     score_log = Path("data/wakeword_scores.csv")
     score_log.parent.mkdir(exist_ok=True)
     csv = open(score_log, "w", encoding="utf-8")
-    csv.write("timestamp,model,score,raw_peak,rms,consecutive,speech,triggered\n")
+    csv.write("timestamp,model,score,raw_peak,rms,consecutive,triggered\n")
 
     try:
         while True:
@@ -699,32 +731,31 @@ def mode_wakeword(args):
                 continue
             audio = np.frombuffer(audio_bytes, dtype=np.int16)
             raw_peak = int(np.max(np.abs(audio)))
-
-            # Sticky speech window: high peak resets countdown, stays open
-            # for SPEECH_WINDOW_FRAMES after last speech frame (~1s).
-            # Catches speech onset + model tail (OWW scores stay high
-            # for several frames after the word ends).
-            was_speech = speech_countdown > 0
             if raw_peak >= SPEECH_PEAK_MIN:
-                if not was_speech:
-                    # Speech just started — reset consecutive counter so
-                    # stale 1.0 scores from silence don't carry over
-                    consecutive.clear()
-                speech_countdown = SPEECH_WINDOW_FRAMES
-            elif speech_countdown > 0:
-                speech_countdown -= 1
-            has_speech = speech_countdown > 0
+                frames_since_speech = 0
+            else:
+                frames_since_speech += 1
+            has_speech = frames_since_speech <= SPEECH_TRAIL
 
             rms = int(np.sqrt(np.mean(audio.astype(np.float32) ** 2)))
-            # Feed raw audio to OWW (matches training data levels).
-            # Peak gate handles silence rejection — model handles speech discrimination.
-            scores = detector.predict(audio)
+            # Normalize to peak=16000 to match training data normalization.
+            # Peak gate uses raw_peak (before normalization) for speech detection.
+            norm_audio = normalize_audio(audio)
+            scores = detector.predict(norm_audio)
             ts = time.strftime("%H:%M:%S")
 
             for name, score in scores.items():
                 triggered = False
 
-                if has_speech and score >= threshold:
+                # Detection requires: (1) score dipped below 0.3 recently
+                # (proves new audio entered the buffer, not stale silence),
+                # (2) score >= threshold, (3) frame has speech energy (peak >= 100).
+                if score < DIP_SCORE:
+                    saw_dip = True
+
+                if score >= threshold and has_speech and saw_dip:
+                    # Speech frame with high score after a dip — count it
+                    gap_frames[name] = 0
                     consecutive[name] = consecutive.get(name, 0) + 1
                     if consecutive[name] >= trigger_frames:
                         triggered = True
@@ -734,7 +765,9 @@ def mode_wakeword(args):
                                   score=round(score, 4), rms=rms)
                         detector.reset()
                         consecutive.clear()
-                        speech_countdown = 0
+                        gap_frames.clear()
+                        saw_dip = False
+                        frames_since_speech = SPEECH_TRAIL + 1
 
                         # Full pipeline: beep -> record -> send -> play response
                         if pipeline:
@@ -815,7 +848,7 @@ def mode_wakeword(args):
                                 while time.time() < warmup_end:
                                     try:
                                         chunk = audio_q.get(timeout=0.2)
-                                        detector.predict(chunk)
+                                        detector.predict(normalize_audio(chunk))
                                     except queue.Empty:
                                         pass
                             except Exception as e:
@@ -824,13 +857,25 @@ def mode_wakeword(args):
                                 break
 
                         print()
+                elif score >= threshold and not has_speech:
+                    # High score but silence — don't count, track gap
+                    gap_frames[name] = gap_frames.get(name, 0) + 1
+                    if gap_frames.get(name, 0) > MAX_GAP:
+                        consecutive[name] = 0
+                        gap_frames[name] = 0
                 else:
+                    # Low score — reset
                     consecutive[name] = 0
+                    gap_frames[name] = 0
 
                 if score > 0.01 or has_speech:
-                    speech_tag = "" if has_speech else f"  {YELLOW}[silence]{RESET}"
+                    tags = ""
+                    if not has_speech:
+                        tags += f"  {YELLOW}[silence]{RESET}"
+                    if not saw_dip:
+                        tags += f"  {YELLOW}[no dip]{RESET}"
                     print(f"  [{ts}] {name}: {score:.4f}  peak={raw_peak}  rms={rms}  "
-                          f"consec={consecutive.get(name, 0)}{speech_tag}")
+                          f"consec={consecutive.get(name, 0)}{tags}")
 
                 csv.write(f"{time.time():.3f},{name},{score:.4f},{raw_peak},{rms},"
                           f"{consecutive.get(name, 0)},{has_speech},{triggered}\n")

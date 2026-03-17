@@ -28,10 +28,32 @@ _TYPE_PREFIXES = {
     "feedback": "fbk",
     "reminder": "rem",
     "summary": "sum",
+    "episode": "epi",
+    "identity": "idn",
 }
 
 _MAX_ROUTINES = 1000
 _SUMMARY_ARCHIVE_DAYS = 30
+_MAX_EPISODES = 200
+
+# Profile schema for knowledge gap tracking.
+# Each entry: (category, keywords_to_match, question_to_ask)
+_PROFILE_SCHEMA = [
+    ("personal", ["name"], "What is your name?"),
+    ("personal", ["birthday", "birth", "age"], "When is your birthday or how old are you?"),
+    ("personal", ["job", "work", "career", "profession", "engineer"], "What do you do for work?"),
+    ("people", ["partner", "wife", "husband", "girlfriend", "boyfriend", "spouse", "relationship"], "Are you in a relationship?"),
+    ("people", ["household", "roommate", "lives_with", "family", "kids", "children"], "Who else lives in your home?"),
+    ("people", ["pet", "dog", "cat", "animal"], "Do you have any pets?"),
+    ("preferences", ["music", "genre", "playlist", "song", "artist"], "What kind of music do you enjoy?"),
+    ("preferences", ["food", "cuisine", "diet", "cook", "coffee", "drink"], "What are your food or drink preferences?"),
+    ("preferences", ["hobby", "hobbies", "fun", "interest", "game", "sport"], "What do you do for fun outside of work?"),
+    ("schedule", ["wake", "morning", "alarm"], "What time do you usually wake up?"),
+    ("schedule", ["sleep", "bed", "night"], "When do you usually go to bed?"),
+    ("schedule", ["work_schedule", "office", "remote", "commute", "office_days"], "What does your work schedule look like?"),
+    ("home", ["room", "layout", "house", "apartment", "bedroom", "living"], "What rooms are in your home?"),
+    ("home", ["evening", "routine", "night_routine", "wind_down"], "What does a typical evening look like for you?"),
+]
 
 
 class BrainStore:
@@ -348,34 +370,187 @@ class BrainStore:
         """Get the most recent active summaries."""
         return self.query(entry_type="summary", status="active", limit=limit)
 
+    # ---- Episode-specific helpers ----
+
+    def add_episode(self, summary: str, topics: list[str] = None,
+                    commands: list[str] = None, emotional_tone: str = "",
+                    speaker: str = "") -> str:
+        """Add an episodic memory of an interaction."""
+        tags = ["episode"]
+        if topics:
+            tags.extend(t.lower() for t in topics)
+        data = {
+            "summary": summary,
+            "topics": topics or [],
+            "commands": commands or [],
+            "emotional_tone": emotional_tone,
+            "speaker": speaker,
+            "consolidated": False,
+        }
+        return self.add("episode", data, tags=tags)
+
+    def get_recent_episodes(self, limit: int = 5) -> list[dict]:
+        """Get the most recent active episodes."""
+        return self.query(entry_type="episode", status="active", limit=limit)
+
+    def get_unconsolidated_episodes(self) -> list[dict]:
+        """Get episodes not yet processed by consolidation."""
+        with self._lock:
+            results = []
+            for e in self._entries.values():
+                if (e["type"] == "episode" and e["status"] == "active"
+                        and not e["data"].get("consolidated", False)):
+                    results.append(dict(e))
+            results.sort(key=lambda x: x.get("created", ""), reverse=True)
+            return results
+
+    def mark_episodes_consolidated(self, episode_ids: list[str]):
+        """Mark episodes as processed by consolidation."""
+        with self._lock:
+            for eid in episode_ids:
+                entry = self._entries.get(eid)
+                if entry and entry["type"] == "episode":
+                    entry["data"]["consolidated"] = True
+                    entry["updated"] = datetime.now().isoformat(timespec="seconds")
+            self._save()
+
+    def format_episodes(self, episodes: list[dict]) -> str:
+        """Format episodes for injection into the dynamic prompt."""
+        if not episodes:
+            return ""
+        lines = []
+        for ep in episodes:
+            ts = ep.get("created", "")[:16]  # "2026-03-15T14:30"
+            summary = ep["data"].get("summary", "")
+            tone = ep["data"].get("emotional_tone", "")
+            tone_note = f" ({tone})" if tone else ""
+            lines.append(f"  [{ts}] {summary}{tone_note}")
+        return "\n".join(lines)
+
+    # ---- Identity narrative ----
+
+    def get_identity_narrative(self) -> str:
+        """Get the current identity narrative, or empty string."""
+        with self._lock:
+            for e in self._entries.values():
+                if e["type"] == "identity" and e["status"] == "active":
+                    return e["data"].get("narrative", "")
+        return ""
+
+    def update_identity_narrative(self, narrative: str):
+        """Create or update the single identity narrative entry."""
+        with self._lock:
+            for e in self._entries.values():
+                if e["type"] == "identity" and e["status"] == "active":
+                    e["data"]["narrative"] = narrative
+                    e["updated"] = datetime.now().isoformat(timespec="seconds")
+                    self._save()
+                    return
+            # First time — create the entry
+            entry_id = self._next_id("identity")
+            now = datetime.now().isoformat(timespec="seconds")
+            entry = {
+                "id": entry_id, "type": "identity", "created": now, "updated": now,
+                "tags": ["identity"], "status": "active",
+                "data": {"narrative": narrative},
+            }
+            self._entries[entry_id] = entry
+            self._tag_index["identity"].add(entry_id)
+            self._save()
+
+    # ---- Knowledge gap tracking ----
+
+    def get_knowledge_gaps(self) -> list[str]:
+        """Return questions for unfilled slots in the user profile schema."""
+        memories = self.get_all_memories()
+        gaps = []
+        for category, keywords, question in _PROFILE_SCHEMA:
+            cat_memories = memories.get(category, {})
+            found = False
+            for mk, mv in cat_memories.items():
+                combined = f"{mk} {mv}".lower()
+                if any(kw in combined for kw in keywords):
+                    found = True
+                    break
+            if not found:
+                gaps.append(question)
+        return gaps
+
+    def should_consolidate(self) -> bool:
+        """Check if memory consolidation should run.
+
+        Triggers when: 5+ unconsolidated episodes exist, or no identity
+        narrative yet and there are memories worth consolidating.
+        """
+        unconsolidated = self.get_unconsolidated_episodes()
+        if len(unconsolidated) >= 5:
+            return True
+        # First consolidation: identity narrative doesn't exist yet
+        if not self.get_identity_narrative():
+            with self._lock:
+                has_memories = any(
+                    e["type"] == "memory" and e["status"] == "active"
+                    for e in self._entries.values()
+                )
+            if has_memories:
+                return True
+        return False
+
     # ---- Retrieval (Phase 2) ----
 
+    # Below this count, ALL memories are injected into every prompt.
+    # Relevance filtering is counterproductive when the user has few memories —
+    # the LLM needs to "know" the user's full identity to feel like a real assistant.
+    # Once memories grow past this threshold, switch to tag-based retrieval.
+    _ALWAYS_ALL_THRESHOLD = 50
+
     def retrieve_relevant(self, query: str, limit: int = 10) -> list[dict]:
-        """Retrieve entries most relevant to a query string by tag overlap.
+        """Retrieve entries relevant to a query, or ALL if memory count is small.
 
-        Always includes behavior category entries. Scores by number of
-        matching tags. Returns top N entries.
+        When total active memories are below _ALWAYS_ALL_THRESHOLD (50), returns
+        ALL memories — the full "user profile". This makes the LLM feel like it
+        knows the user (name, schedule, preferences always visible).
+
+        Once memories grow past the threshold, switches to tag-based retrieval
+        with behavior + personal categories always included.
         """
-        query_tokens = self._extract_tags(query)
-        if not query_tokens:
-            # No useful tokens — return behavior entries only
-            return self.query(entry_type="memory", tags=["behavior"])
+        with self._lock:
+            active_memories = [
+                e for e in self._entries.values()
+                if e["type"] == "memory" and e["status"] == "active"
+            ]
 
+            # Small memory count: inject everything — the LLM needs full context
+            if len(active_memories) <= self._ALWAYS_ALL_THRESHOLD:
+                all_entries = list(active_memories)
+                # Also include open feedback and recent summaries
+                for e in self._entries.values():
+                    if e["status"] not in ("active", "open", "pending"):
+                        continue
+                    if e["type"] == "feedback" and e["status"] == "open":
+                        all_entries.append(e)
+                    elif e["type"] == "summary" and e["status"] == "active":
+                        all_entries.append(e)
+                return [dict(e) for e in all_entries]
+
+        # Large memory count: fall back to tag-based relevance retrieval
+        query_tokens = self._extract_tags(query)
         scored = []
         with self._lock:
             for e in self._entries.values():
                 if e["status"] not in ("active", "open", "pending"):
                     continue
-                # Behavior entries always included
+                # Behavior + personal always included
                 if (e["type"] == "memory"
-                        and e["data"].get("category") == "behavior"):
-                    scored.append((e, 100))  # High score ensures inclusion
+                        and e["data"].get("category") in ("behavior", "personal")):
+                    scored.append((e, 100))
                     continue
                 # Score by tag overlap
-                entry_tags = set(e.get("tags", []))
-                overlap = len(entry_tags & query_tokens)
-                if overlap > 0:
-                    scored.append((e, overlap))
+                if query_tokens:
+                    entry_tags = set(e.get("tags", []))
+                    overlap = len(entry_tags & query_tokens)
+                    if overlap > 0:
+                        scored.append((e, overlap))
 
         scored.sort(key=lambda x: -x[1])
         return [dict(e) for e, _ in scored[:limit]]
@@ -478,6 +653,16 @@ class BrainStore:
                 if (e["type"] == "summary" and e["status"] == "active"
                         and e.get("created", "") < cutoff):
                     e["status"] = "archived"
+
+            # Trim episodes to max, keeping newest
+            episodes = [(eid, e) for eid, e in self._entries.items() if e["type"] == "episode"]
+            if len(episodes) > _MAX_EPISODES:
+                episodes.sort(key=lambda x: x[1].get("created", ""))
+                to_remove = episodes[:len(episodes) - _MAX_EPISODES]
+                for eid, e in to_remove:
+                    for tag in e.get("tags", []):
+                        self._tag_index[tag].discard(eid)
+                    del self._entries[eid]
 
             self._save()
 
@@ -630,6 +815,11 @@ class BrainStore:
             }
             tmp.write_text(json.dumps(data, indent=2))
             tmp.replace(self._path)
+            try:
+                import os
+                os.chmod(self._path, 0o600)  # Owner read/write only
+            except OSError:
+                pass  # Windows doesn't support Unix permissions
         except OSError as e:
             logger.error(f"Failed to save brain.json: {e}")
             # In-memory state is still correct; next successful save will persist

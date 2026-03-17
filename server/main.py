@@ -74,17 +74,19 @@ def initialize_services():
     logger.info(f"Connecting to Claude API ({CLAUDE_MODEL})")
     llm = LLM()
 
-    # Initialize Synthesizer
-    logger.info(f"Loading Kokoro TTS (voice={KOKORO_VOICE})")
+    # Initialize Synthesizer (lazy-loads Kokoro model on first synthesis)
     synthesizer = Synthesizer()
-    if not synthesizer.initialize():
-        logger.error("Failed to initialize Kokoro TTS")
-        sys.exit(1)
-
-    # Pre-cache TTS for common short responses (zero-latency on Tier 1 commands)
-    from server.intent_router import get_cacheable_responses
-    cacheable = list(get_cacheable_responses()) + ["Done.", "Didn't catch that."]
-    synthesizer.pre_generate(cacheable)
+    if synthesizer.initialize():
+        # Pre-cache TTS for common short responses (zero-latency on Tier 1 commands)
+        from server.intent_router import get_cacheable_responses
+        from server.llm import _CONFIRMATIONS
+        confirmation_set = set()
+        for pool in _CONFIRMATIONS.values():
+            confirmation_set.update(pool)
+        cacheable = list(get_cacheable_responses()) + sorted(confirmation_set) + ["Didn't catch that."]
+        synthesizer.pre_generate(cacheable)
+    else:
+        logger.warning("Kokoro TTS not available at startup — will retry on first synthesis")
 
     # Initialize Pi callback client (legacy singleton)
     pi_url = f"http://{PI_HOST}:{PI_PORT}"
@@ -132,6 +134,17 @@ def initialize_services():
 
     # Pre-generate beep WAV files for Sonos output
     write_beep_files()
+
+    # Trigger initial memory consolidation if needed (background, non-blocking).
+    # Generates the identity narrative on first startup with existing memories.
+    if brain.should_consolidate():
+        import threading
+        threading.Thread(
+            target=orchestrator._run_consolidation,
+            daemon=True,
+            name="InitialConsolidation",
+        ).start()
+        logger.info("Initial memory consolidation triggered")
 
     logger.info("All services initialized successfully")
     return orchestrator, registry, room_state_mgr, rooms

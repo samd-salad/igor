@@ -1,6 +1,7 @@
 """Common utility functions shared between client and server."""
 import base64
 import logging
+from logging.handlers import RotatingFileHandler
 import time
 from pathlib import Path
 from typing import Optional
@@ -33,7 +34,10 @@ def setup_logging(name: str, level: int = logging.INFO,
         # Avoid duplicate file handlers on re-init
         if not any(isinstance(h, logging.FileHandler) and h.baseFilename
                    == str(Path(log_file).resolve()) for h in root.handlers):
-            fh = logging.FileHandler(str(Path(log_file).resolve()), encoding='utf-8')
+            fh = RotatingFileHandler(
+                str(Path(log_file).resolve()),
+                maxBytes=10*1024*1024, backupCount=3, encoding='utf-8'
+            )
             fh.setFormatter(formatter)
             root.addHandler(fh)
 
