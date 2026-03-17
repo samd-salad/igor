@@ -28,10 +28,10 @@ class LabelWakewordCommand(Command):
         # Find the right Pi callback client for this room
         pi_client = None
         if _ctx and hasattr(self, '_registry'):
-            client_entry = self._registry.get_client(_ctx.client_id)
-            if client_entry and client_entry.get('callback_url'):
+            client_entry = self._registry.get(_ctx.client_id)
+            if client_entry and client_entry.callback_url:
                 from server.pi_callback import PiCallbackClient
-                pi_client = PiCallbackClient(client_entry['callback_url'])
+                pi_client = PiCallbackClient(client_entry.callback_url)
 
         # Fall back to legacy pi_client (single-client setups)
         if pi_client is None and hasattr(self, 'pi_client'):

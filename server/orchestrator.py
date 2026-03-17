@@ -1210,7 +1210,7 @@ class Orchestrator:
         'tv_search_youtube', 'tv_key', 'tv_adb_connect',
     }
 
-    def _execute_command(self, name: str, prefer_sonos: bool = False,
+    def _execute_command(self, command_name: str, prefer_sonos: bool = False,
                          ctx: InteractionContext = None, **kwargs) -> str:
         """Execute a command, handling Sonos redirect and Pi hardware RPC.
 
@@ -1222,8 +1222,12 @@ class Orchestrator:
           3. Local execution: all other commands run directly on the server.
              After TV commands, suppresses Pi wake word for 20s in a background thread.
 
+        IMPORTANT: first arg is 'command_name', NOT 'name', because several
+        tool schemas (set_timer, cancel_timer) pass 'name' as a keyword arg.
+        Using 'name' here causes "got multiple values for argument 'name'".
+
         Args:
-            name: Command name as called by the LLM.
+            command_name: Command name as called by the LLM.
             prefer_sonos: True when Pi output is routed through Sonos.
             ctx: InteractionContext for room-aware routing (optional).
             **kwargs: Command parameters from LLM tool call.
@@ -1231,6 +1235,7 @@ class Orchestrator:
         Returns:
             String result from the command (shown to LLM as tool_result).
         """
+        name = command_name
         if ctx is not None:
             prefer_sonos = ctx.prefer_sonos
 

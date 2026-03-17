@@ -225,6 +225,9 @@ class SetBrightnessCommand(Command):
         bri = int(level / 100 * 65535)
 
         def action(light):
+            # Turn on if setting brightness > 0 (setting brightness on an off light is invisible)
+            if level > 0:
+                light.set_power(65535, duration=0, rapid=True)
             hsbk = list(light.get_color())
             hsbk[2] = bri
             light.set_color(hsbk)
@@ -267,7 +270,11 @@ class SetColorCommand(Command):
         else:
             valid = ", ".join(sorted(NAMED_COLORS))
             return f"Unknown color '{color}'. Use a name ({valid}) or hex (#rrggbb)."
-        return _apply_to_targets(label, lambda l: l.set_color(hsbk), f"Set color to {color} on", _ctx=_ctx)
+        def action(light):
+            light.set_power(65535, duration=0, rapid=True)
+            light.set_color(hsbk)
+
+        return _apply_to_targets(label, action, f"Set color to {color} on", _ctx=_ctx)
 
 
 
