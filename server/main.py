@@ -74,9 +74,29 @@ def initialize_services():
     logger.info(f"Connecting to Claude API ({CLAUDE_MODEL})")
     llm = LLM()
 
-    # Initialize Synthesizer — fully lazy. Kokoro model loads on first
-    # synthesis request (~2s one-time cost). Pre-caching also deferred.
+    # Initialize Synthesizer — model loads + pre-caches in background thread.
+    # Server starts immediately, first request may wait ~2s for model load
+    # but never waits for pre-cache (pre-cache runs independently).
     synthesizer = Synthesizer()
+
+    def _background_tts_init():
+        """Load Kokoro + pre-cache common responses without blocking startup or requests."""
+        if not synthesizer.initialize():
+            logger.warning("Kokoro TTS not available — will retry on first synthesis")
+            return
+        try:
+            from server.intent_router import get_cacheable_responses
+            from server.llm import _CONFIRMATIONS
+            confirmation_set = set()
+            for pool in _CONFIRMATIONS.values():
+                confirmation_set.update(pool)
+            texts = list(get_cacheable_responses()) + sorted(confirmation_set) + ["Didn't catch that."]
+            synthesizer.pre_generate(texts)
+        except Exception as e:
+            logger.debug(f"TTS pre-cache failed (non-critical): {e}")
+
+    import threading
+    threading.Thread(target=_background_tts_init, daemon=True, name="TTSInit").start()
 
     # Initialize Pi callback client (legacy singleton)
     pi_url = f"http://{PI_HOST}:{PI_PORT}"

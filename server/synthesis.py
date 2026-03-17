@@ -74,36 +74,12 @@ class Synthesizer:
         logger.info(f"Synthesizer created (voice={self.voice}, speed={self.speed})")
 
     def _ensure_loaded(self) -> bool:
-        """Lazy-load Kokoro model on first use. Returns True if ready.
-
-        On first successful load, also pre-caches common short responses
-        so subsequent calls for "Done.", "Got it.", etc. are instant.
-        """
+        """Lazy-load Kokoro model on first use. Returns True if ready."""
         if self._kokoro is not None:
             return True
         if self._init_failed:
             return False
-        if not self.initialize():
-            return False
-        # Pre-cache common responses in background — don't block the first request
-        import threading
-        threading.Thread(
-            target=self._pre_cache_common, daemon=True, name="TTSPreCache"
-        ).start()
-        return True
-
-    def _pre_cache_common(self):
-        """Pre-generate TTS for common short responses after lazy init."""
-        try:
-            from server.intent_router import get_cacheable_responses
-            from server.llm import _CONFIRMATIONS
-            confirmation_set = set()
-            for pool in _CONFIRMATIONS.values():
-                confirmation_set.update(pool)
-            texts = list(get_cacheable_responses()) + sorted(confirmation_set) + ["Didn't catch that."]
-            self.pre_generate(texts)
-        except Exception as e:
-            logger.debug(f"Pre-cache failed (non-critical): {e}")
+        return self.initialize()
 
     def initialize(self) -> bool:
         """Load Kokoro model into memory. Returns success.
