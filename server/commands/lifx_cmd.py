@@ -196,7 +196,18 @@ class SetLightCommand(Command):
         power = power.lower().strip()
         if power not in ("on", "off"):
             return "Power must be 'on' or 'off'"
-        return _apply_to_targets(label, lambda l: l.set_power(power), f"Turned {power}", _ctx=_ctx)
+
+        def action(light):
+            if power == "on":
+                light.set_power(65535, duration=0, rapid=True)
+                # Default to 85% brightness on power-on
+                hsbk = list(light.get_color())
+                hsbk[2] = int(0.85 * 65535)
+                light.set_color(hsbk)
+            else:
+                light.set_power(0, duration=500, rapid=False)
+
+        return _apply_to_targets(label, action, f"Turned {power}", _ctx=_ctx)
 
 
 class SetBrightnessCommand(Command):
