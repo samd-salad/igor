@@ -146,6 +146,7 @@ class PCClient:
             json={
                 "audio_base64": audio_b64,
                 "wake_word": "igor",
+                "timestamp": time.time(),
                 "prefer_sonos_output": USE_SONOS_OUTPUT,
                 "client_id": CLIENT_ID,
                 "room_id": ROOM_ID,
