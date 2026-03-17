@@ -22,6 +22,15 @@ _SINGLE_WORD_COMMANDS = frozenset({
     "next", "skip", "previous", "louder", "quieter",
 })
 
+# User explicitly dismissing a false wake word trigger — reject immediately
+# so it never reaches the LLM (saves ~2s + API cost per false trigger).
+_DISMISSALS = (
+    "bad wake word", "bad wakeword", "false trigger",
+    "ignore that", "ignore this", "never mind", "nevermind",
+    "didn't mean to", "not talking to you", "wasn't talking to you",
+    "sorry igor", "sorry, igor", "go away", "not you",
+)
+
 
 def filter_transcription(text: str, tv_playing: bool = False) -> Optional[str]:
     """Return cleaned text if valid, None if rejected."""
@@ -34,6 +43,11 @@ def filter_transcription(text: str, tv_playing: bool = False) -> Optional[str]:
     # Known hallucination phrases
     if cleaned.lower() in _HALLUCINATIONS or lowered in _HALLUCINATIONS:
         logger.info(f"Quality gate: rejected hallucination '{cleaned[:30]}'")
+        return None
+
+    # User dismissing a false wake word trigger
+    if any(d in lowered for d in _DISMISSALS):
+        logger.info(f"Quality gate: rejected dismissal '{cleaned[:30]}'")
         return None
 
     words = cleaned.split()
