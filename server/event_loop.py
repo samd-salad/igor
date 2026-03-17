@@ -175,51 +175,54 @@ class EventLoop:
         except Exception:
             pass
 
-        # Get the correct Pi client for this timer's room
+        # Get the correct client for this timer's room
         pi_client = self._get_pi_client_for_timer(timer)
 
         try:
-            # Step 1: Alert beep — gives immediate audio feedback while TTS synthesizes
-            if pi_client:
-                pi_client.play_beep("alert")
-                time.sleep(0.3)  # Brief gap between beep and speech
-
-            # Step 2: Generate TTS message
-            message = f"{timer.name} timer is done"
-
-            # Step 3: Synthesize and deliver audio (Sonos preferred, Pi fallback)
-            if self._synthesizer:
-                logger.debug(f"Synthesizing timer alert: '{message}'")
-                audio_data = self._synthesizer.synthesize(message)
-
-                if audio_data:
-                    # Try Sonos first, fall back to Pi local playback
-                    if self._sonos_tts_func and self._sonos_tts_func(audio_data):
-                        logger.info(f"Timer alert routed to Sonos: {timer.name}")
-                    elif pi_client:
-                        success = pi_client.play_audio(
-                            audio_data, message, priority="alert"
-                        )
-                        if success:
-                            logger.info(f"Timer alert sent to Pi: {timer.name}")
-                        else:
-                            logger.error(f"Failed to send timer alert to Pi: {timer.name}")
-                    else:
-                        logger.warning(f"No output available for timer alert: {timer.name}")
-                else:
-                    logger.error(f"Failed to synthesize timer alert: {timer.name}")
-                    # Fallback: extra beep so user knows the timer fired even without speech
-                    if pi_client:
-                        pi_client.play_beep("alert")
-            else:
-                logger.warning(f"No synthesizer - cannot play timer alert: {timer.name}")
-
-            # Step 4: Optional per-timer custom callback (for future extensibility)
+            # Step 1: Execute callback FIRST — for delayed commands, the action
+            # (lights off, TV mute) should happen immediately, not after audio.
             if timer.callback:
                 try:
                     timer.callback(timer.name)
                 except Exception as e:
                     logger.error(f"Timer callback failed: {e}")
+
+            # Step 2: Alert beep — gives immediate audio feedback while TTS synthesizes
+            if pi_client:
+                pi_client.play_beep("alert")
+                time.sleep(0.3)  # Brief gap between beep and speech
+
+            # Step 3: Generate TTS message and deliver to the right output
+            message = f"{timer.name} timer is done"
+
+            if self._synthesizer:
+                audio_data = self._synthesizer.synthesize(message)
+
+                if audio_data:
+                    # Route to the timer's room client first; Sonos is fallback
+                    # for rooms without a direct client (e.g. living room Pi is off).
+                    delivered = False
+                    if pi_client:
+                        success = pi_client.play_audio(
+                            audio_data, message, priority="alert"
+                        )
+                        if success:
+                            logger.info(f"Timer alert sent to client: {timer.name}")
+                            delivered = True
+
+                    if not delivered and self._sonos_tts_func:
+                        if self._sonos_tts_func(audio_data):
+                            logger.info(f"Timer alert routed to Sonos: {timer.name}")
+                            delivered = True
+
+                    if not delivered:
+                        logger.warning(f"No output available for timer alert: {timer.name}")
+                else:
+                    logger.error(f"Failed to synthesize timer alert: {timer.name}")
+                    if pi_client:
+                        pi_client.play_beep("alert")
+            else:
+                logger.warning(f"No synthesizer - cannot play timer alert: {timer.name}")
 
         except Exception as e:
             logger.error(f"Error firing timer '{timer.name}': {e}", exc_info=True)
