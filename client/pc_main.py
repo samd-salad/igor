@@ -92,7 +92,7 @@ class PCClient:
                 return False
             self.detector = Model(
                 wakeword_models=[str(f) for f in onnx_files],
-                inference_framework="onnxruntime",
+                inference_framework="onnx",
             )
             logger.info(f"Wake word models loaded: {[f.stem for f in onnx_files]}")
         except Exception as e:
@@ -386,6 +386,12 @@ class PCClient:
 
 def main():
     setup_logging("pc_client", log_file="data/pc_client.log")
+    # Also add console handler to root so all loggers (including __main__) print
+    root = logging.getLogger()
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in root.handlers):
+        ch = logging.StreamHandler()
+        ch.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+        root.addHandler(ch)
     logger.info("Igor PC Client starting...")
 
     client = PCClient()
