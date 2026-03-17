@@ -78,14 +78,19 @@ class Transcriber:
         filtered_segments = []
         for seg in segments:
             if seg.no_speech_prob > 0.7:
-                logger.debug(f"Dropping segment (no_speech={seg.no_speech_prob:.2f}): '{seg.text[:50]}'")
+                logger.info(f"STT dropping segment (no_speech={seg.no_speech_prob:.2f}): '{seg.text[:50]}'")
                 continue
             if seg.avg_logprob < -0.8:
-                logger.debug(f"Dropping segment (logprob={seg.avg_logprob:.2f}): '{seg.text[:50]}'")
+                logger.info(f"STT dropping segment (logprob={seg.avg_logprob:.2f}): '{seg.text[:50]}'")
                 continue
             filtered_segments.append(seg)
         if not filtered_segments:
-            logger.warning("All segments rejected by confidence filter")
+            # Log what was rejected so we can tune thresholds
+            for seg in segments:
+                logger.warning(
+                    f"STT rejected: '{seg.text[:50]}' "
+                    f"(no_speech={seg.no_speech_prob:.2f}, logprob={seg.avg_logprob:.2f})"
+                )
             return None
         segments = filtered_segments
 
