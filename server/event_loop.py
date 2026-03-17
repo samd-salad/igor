@@ -199,20 +199,18 @@ class EventLoop:
                 audio_data = self._synthesizer.synthesize(message)
 
                 if audio_data:
-                    # Route to the timer's room client first; Sonos is fallback
-                    # for rooms without a direct client (e.g. living room Pi is off).
+                    # Sonos preferred (best speakers), client fallback
                     delivered = False
-                    if pi_client:
+                    if self._sonos_tts_func and self._sonos_tts_func(audio_data):
+                        logger.info(f"Timer alert routed to Sonos: {timer.name}")
+                        delivered = True
+
+                    if not delivered and pi_client:
                         success = pi_client.play_audio(
                             audio_data, message, priority="alert"
                         )
                         if success:
                             logger.info(f"Timer alert sent to client: {timer.name}")
-                            delivered = True
-
-                    if not delivered and self._sonos_tts_func:
-                        if self._sonos_tts_func(audio_data):
-                            logger.info(f"Timer alert routed to Sonos: {timer.name}")
                             delivered = True
 
                     if not delivered:
