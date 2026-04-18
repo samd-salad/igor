@@ -1,107 +1,160 @@
-# Igor → Proxmox LXC + Home Assistant Migration
+# Igor → HA Voice Pipeline + Pi5 Docker Container
 
-Started 2026-04-18. Delete this file when migration is complete and notes are absorbed into CLAUDE.md / wiki.
+Started 2026-04-18. Delete this file when migration is complete and the new state is reflected in CLAUDE.md.
+
+> **This is a rewrite.** The earlier "LXC + HA action delegation" plan was scaffolding — superseded once we decided Igor should also drop STT/TTS and become a pure Custom Conversation Agent. The Proxmox LXC at `10.0.30.20` is no longer the destination; tear it down at the end.
 
 ## Why
 
-1. **Move Igor off the user's PC** to dedicated always-on infra (LXC on Proxmox node `Snap` at 10.0.30.10).
-2. **Delegate device actions to Home Assistant** (running at 10.0.40.5, VLAN 40 IoT). HA already integrates LIFX / Sonos / androidtv — drop ~5 Python deps and stop maintaining per-device code.
+1. **Igor stays the brain, drops everything else.** HA owns the entire voice pipeline (wake word, STT, TTS, audio routing, device control). Igor becomes a stateless-ish text-in/text-out service: receive transcribed user text from HA, return response text + tool calls.
+2. **Drastic simplification.** Roughly 40-50% of the codebase deletes. No more `client/`, no Whisper, no Kokoro, no wake word training infra, no ALSA/PyAudio, no Pi-specific code, no PC client, no beep generation, no audio playback callbacks.
+3. **Igor as a Pi5 Docker container.** Per ADR-002, this is exactly the workload tier for "always-on, low-power, stateless services managed by Portainer." After paring down, Igor's working set is ~256MB / 0.5 core idle. ARM-compatible (pure Python: anthropic SDK + FastAPI).
+4. **Cheap voice satellites.** Existing Pi runs `wyoming-satellite` (with our trained `igor.onnx` for wake word — that work is preserved). HA Voice PE drops in later for new rooms; zero Igor code changes when it does.
 
-## Architecture Decisions
+## Final Architecture
 
-- **Igor stays the brain.** Custom prompt, living memory (identity narrative + episodic + consolidation), quality gate, intent router, multi-client routing, Claude tool loop — all stays. We considered HA Voice (Wyoming protocol, Assist) and rejected it: it would replace the brain, not just the mouth.
-- **STT/TTS stay local in Igor.** Faster-whisper small (int8) + Kokoro `am_onyx` are tuned and the voice is part of Igor's identity. HA's Piper voices and Wyoming pipeline aren't worth the loss.
-- **HA owns device actions.** All `lifx_cmd / sonos_cmd / tv_cmd / adb_cmd` get replaced by a thin `ha_client.py` + intent-shaped `Command` classes that call HA REST services.
-- **HA Areas are the source of truth for room → entity mapping.** No more hardcoded device lists in `rooms.yaml`. We query HA at startup (templating API or WS area_registry).
-- **`rooms.yaml` shrinks to client identity only**: `client_id → ha_area + callback_url + prefer_sonos_output + indicator_light`. Everything else comes from HA.
-- **LXC, not VM.** Per ADR-002 (wirenest wiki): no kernel needs, no hardware passthrough. **4 cores / 4GB RAM** to start, resize live if needed.
+```
+[Voice satellite: existing Pi running wyoming-satellite + igor.onnx wakeword]
+        ↓ Wyoming protocol
+[Home Assistant @ 10.0.40.5]
+   ├─ Wyoming-faster-whisper add-on (STT)
+   ├─ Wyoming-piper add-on (TTS)
+   ├─ Conversation agent → Igor (HTTP POST /conversation/process)
+   └─ Audio output → media_player.living_room (Sonos) or satellite speaker
+                ↑
+[Pi5 Docker: igor container — text in, text out, mounted brain.json volume]
+```
 
-## HA Inventory (snapshot 2026-04-18, HA 2026.4.3)
+## Architectural Decisions (locked in this session)
 
-64 entities, key ones for Igor:
-- **Lights (4)**: `light.tall_lamp`, `light.table_lamp`, `light.office_lamp`, `light.corner_lamp`
-- **Media (3)**: `media_player.giant_ass_teevee` (×2 — likely Cast + androidtv), `media_player.living_room` (Sonos)
-- **Remote**: `remote.giant_ass_teevee` (TV nav keys)
-- **Sonos feature switches (6)**: `switch.living_room_{crossfade,loudness,surround_music_full_volume,night_sound,speech_enhancement,surround_enabled}`
-- **Presence**: `person.sam`, `device_tracker.sams_pphone`
-- **Other usable**: `todo` domain (HA shopping/tasks list), `notify.*` services (push to phone via Companion app)
-- **Areas**: confirmed configured by user — use these for room scoping
+- Igor is a **HA Custom Conversation Agent** — endpoint accepts `{text, conversation_id, device_id, language}`, returns `{response, end_conversation}`.
+- **No audio anywhere in Igor.** STT/TTS are HA's job (Wyoming-faster-whisper + Wyoming-piper add-ons). We accept losing Kokoro `am_onyx`; user is fine with Piper voice.
+- **Wake word stays ours**: existing `igor.onnx` (OpenWakeWord) loads into `wyoming-openwakeword` on the satellite. The wake word training pipeline (`record_samples.py`, `onnx_models/wakeword_creation/`) stays in the repo for future retraining.
+- **Igor runs as a Docker container on Pi5**, not the LXC. ARM64 image, alongside Portainer / Uptime Kuma. `brain.json` lives in a bind-mounted volume on the Pi5 host so it survives container rebuilds.
+- **HA Areas are the source of truth for room → entity mapping.** `rooms.yaml` shrinks (or disappears entirely — TBD if it has any value once HA owns rooms).
+- **Per-room context**: HA passes `device_id` in the conversation request → Igor maps to `ha_area` → uses for memory/context (e.g., "the office" reference) and for any room-scoped commands.
+- **Quality gate stays.** Even with HA's STT, hallucination/garbage filtering is still useful pre-LLM.
+- **Intent router stays.** Tier-1 short-phrase commands save tokens and latency.
+- **All device action commands**: thin HA REST calls. `light_cmd`, `media_cmd`, `tv_cmd`, `todo_cmd` (NEW), `notify_cmd` (NEW). One `ha_client.py` underneath.
+
+## What Gets Deleted
+
+| Path | Reason |
+|---|---|
+| `client/` (entire dir — main, wakeword, audio, vad_recorder, hardware, pi_server, suppress, pc_main, pc_audio, pc_server, pc_config) | HA + wyoming-satellite owns the audio side now |
+| `server/transcription.py` | HA does STT |
+| `server/synthesis.py` | HA does TTS |
+| `kokoro/` (model files) | No more local TTS |
+| `server/pi_callback.py` | No Pi to call back to |
+| `server/event_loop.py` (audio delivery parts; keep timer scheduling logic if reused) | HA handles timer alert audio via notify/media_player |
+| `server/beeps.py`, `server/commands/beep` logic | HA pipeline handles audio cues |
+| `server/commands/lifx_cmd.py`, `sonos_cmd.py`, `tv_cmd.py`, `adb_cmd.py` (replaced by HA-backed versions) | HA integrations cover all of this |
+| `server/commands/system_cmd.py` (volume RPC bits) | HA media_player owns volume |
+| `server/pair_google_tv.py`, `enroll_speaker.py` | TV pairing → HA. Speaker ID → reconsider after migration. |
+| `record_samples.py` (move to `tools/`?) | Still useful for wake word retraining; relocate but don't delete |
+| `setup_client.sh`, `setup_server.sh` | Replaced by Dockerfile + docker-compose |
+| `mcp_server.py` audio test tools | Test the conversation endpoint directly instead |
+| `data/rooms.yaml` (likely; possibly slim version remains) | HA Areas replaces it |
+| Deps: `lifxlan, soco, androidtvremote2, adb-shell, faster-whisper, kokoro-onnx, openwakeword, pyaudio, sounddevice` | Server-side deletes; satellite Pi keeps openwakeword via wyoming-openwakeword (separate package) |
 
 ## Sequenced Plan
 
-Order matters: each step is independently testable. A bug in step 2 should not raise doubt about step 1.
+Order matters: each step independently verifiable. A bug at step N shouldn't make us doubt N-1.
 
-### Step 1 — Bare migration to LXC (no refactor)
+### Step 1 — Refactor Igor to Conversation-Agent shape
 
-Goal: Igor running on the LXC with the existing PC code, Pi clients pointing at the new IP, end-to-end interaction working.
+Goal: same Igor brain, but with a single `POST /conversation/process` endpoint replacing the audio pipeline. Run locally or on the LXC for fast iteration.
 
-- [ ] Provision Debian 12 LXC on Snap, 4C / 4GB / ~20GB disk, VLAN 30 (Servers)
-- [ ] Assign static IP — **TODO: pick IP, e.g. 10.0.30.30** — then update `wirenest` services-registry + Pi-hole DNS entry (`igor.kingdahm.com`)
-- [ ] Install system deps: `python3.12 python3-venv git ffmpeg sox alsa-utils` (+ whatever Kokoro needs)
-- [ ] Clone repo, create venv, `pip install -r requirements.txt` (or pyproject)
-- [ ] Copy `data/brain.json` from PC (`~/OneDrive/.../igor/data/`) — preserves memory + feedback
-- [ ] Copy `oww_models/igor.onnx` and `oww_models/igor_verifier.pkl` — wakeword models (only needed by Pi clients, but keep on server for training reruns)
-- [ ] Copy `kokoro/kokoro-v1.0.onnx` + `kokoro/voices-v1.0.bin`
-- [ ] Set env vars: `ANTHROPIC_API_KEY`, `SERVER_HOST=<new LXC IP>`, `SERVER_EXTERNAL_HOST=<same>`, `PI_HOST=192.168.0.3` (or whatever)
-- [ ] Create systemd unit `igor-server.service` — `ExecStart=python -m server.main`, `Restart=on-failure`, `User=igor`
-- [ ] Update each Pi/PC client's `client/config.py` (or env): `SERVER_HOST=<new LXC IP>`
-- [ ] Update `data/rooms.yaml` callback_urls if Pi IPs need to change
-- [ ] Health check: `curl http://<lxc-ip>:8000/api/health`
-- [ ] End-to-end: wake word → "what time is it" → "set a 30 second timer"
-- [ ] Add to Uptime Kuma
+- [ ] Add `POST /conversation/process` to `server/api.py` accepting HA's payload shape (`{text, conversation_id, device_id, language}`) and returning `{response, end_conversation, conversation_id}`
+- [ ] Refactor `Orchestrator` so its core method is `process_text(text, ctx) -> ChatResult` — the existing `process_audio` becomes thin wrapper (will be deleted)
+- [ ] Build `device_id → ha_area → InteractionContext` resolver. HA device_ids are stable UUIDs; cache the mapping at startup (refresh on demand).
+- [ ] Replace device commands with HA-backed versions:
+  - [ ] `server/ha_client.py` — auth, GET `/api/states`, POST `/api/services/{domain}/{service}`, area templating
+  - [ ] `light_cmd.py` (replaces `lifx_cmd`)
+  - [ ] `media_cmd.py` (replaces `sonos_cmd` + Sonos parts of `system_cmd`)
+  - [ ] `tv_cmd.py` (replaces both `tv_cmd` and `adb_cmd` — uses `remote.send_command` + `media_player.*`)
+  - [ ] `todo_cmd.py` — NEW. `add_todo`, `list_todo`, `complete_todo`. Uses HA `todo` domain.
+  - [ ] `notify_cmd.py` — NEW. `notify(message, target, title)`. Uses HA `notify.*`.
+- [ ] Adapt timer alerts (`event_loop.py`) to deliver via HA — `notify` for ambient, `media_player.play_media` for room audio
+- [ ] Keep: `quality_gate`, `intent_router`, `llm`, `brain`, `routines`, `feedback_cmd`, `memory_cmd`, `time_cmd`, `weather_cmd`, `math_cmd`, `network_cmd`, `delayed_command`
+- [ ] Delete: everything in **What Gets Deleted** above
+- [ ] Update `prompt.py` — the persona stays, but examples about audio/Sonos/etc. should reference how HA exposes things now
+- [ ] Tests: unit-test the conversation endpoint with a synthetic HA payload + mocked HA client
 
-### Step 2 — HA action layer refactor (do on the LXC, not the PC)
+### Step 2 — Containerize and deploy to Pi5
 
-Goal: replace per-device commands with HA-backed intent commands. Same LLM tool surface, new implementation.
+- [ ] Write `Dockerfile` (multi-arch base: `python:3.12-slim`, `--platform=linux/arm64`)
+- [ ] Write `docker-compose.yml`:
+  - bind mount `./data:/app/data` (brain.json persists outside container)
+  - env vars: `ANTHROPIC_API_KEY`, `HA_URL=http://10.0.40.5:8123`, `HA_TOKEN` from EnvironmentFile or Docker secret
+  - port mapping: `8000:8000`
+  - `restart: unless-stopped`
+- [ ] Build image — either on Pi5 (`docker build`) or push from LXC/dev box via `docker buildx build --platform linux/arm64`
+- [ ] Copy current `data/brain.json` from PC to Pi5 host data volume — preserves identity narrative, episodes, feedback, routines
+- [ ] Deploy via Portainer (Pi5)
+- [ ] DNS entry on Pi-hole: `igor.kingdahm.com → <Pi5 IP>`
+- [ ] Add to Uptime Kuma — health check `GET /api/health`
+- [ ] Generate fresh HA long-lived token from `http://10.0.40.5:8123/profile/security`, store in Pi5's secret mechanism
 
-- [ ] **Get fresh HA long-lived token on LXC** — Windows token at `C:\Users\samda\.ha_token.txt` (UTF-16 BOM) won't move. Generate new one in HA UI at `http://10.0.40.5:8123/profile/security` and store in `/etc/igor/ha_token` (root-only) or as systemd `EnvironmentFile=` secret.
-- [ ] `server/ha_client.py` — single REST client:
-  - auth, GET `/api/states`, POST `/api/services/{domain}/{service}`
-  - cached entity registry refreshed on startup + every N min (or WS subscribe later)
-  - area lookup via templating API: `POST /api/template` with `{{ area_entities('Office') }}`
-- [ ] Replace `server/commands/lifx_cmd.py` → `light_cmd.py` (HA-backed):
-  - `set_light`, `set_brightness`, `set_color`, `set_color_temp`, `adjust_brightness`, `adjust_color_temp`, `shift_hue`, `list_lights`, `list_scenes`, `set_scene`
-  - All resolve entity_ids by area from `_ctx.room.ha_area`
-- [ ] Replace `sonos_cmd.py` + part of `system_cmd.py` → `media_cmd.py`:
-  - `set_volume / adjust_volume / sonos_mute` for Sonos (and TV media_player)
-  - `play / pause / next / previous`
-  - Entity resolution: room's `media_player` entities, prefer Sonos for music intent
-- [ ] Replace `tv_cmd.py` + `adb_cmd.py` → `tv_cmd.py` (HA-backed):
-  - `tv_power`, `tv_key` → `remote.send_command` on `remote.giant_ass_teevee`
-  - `tv_launch`, `tv_playback`, `tv_skip`, `tv_search_youtube` → `media_player.*` services + `play_media` for YouTube
-  - **Drop the TV state poller entirely** — read `media_player.giant_ass_teevee.state` from HA on demand. Update `_get_tv_playback_state()` to query HA.
-- [ ] **NEW**: `todo_cmd.py`:
-  - `add_todo(item, list)`, `complete_todo(item, list)`, `list_todo(list)`
-  - HA `todo.add_item / update_item / get_items`
-  - List defaults to user's primary HA todo list
-- [ ] **NEW**: `notify_cmd.py`:
-  - `notify(message, target=None, title=None)` — push to phone via HA Companion app
-  - Discover available `notify.*` services on startup
-- [ ] Remove deps: `lifxlan`, `soco`, `androidtvremote2`, `adb-shell` (if no longer used)
-- [ ] Remove `server/pair_google_tv.py` (TV pairing now HA's problem)
+### Step 3 — HA voice pipeline add-ons
 
-### Step 3 — Shrink `rooms.yaml`, switch to HA areas
+- [ ] HA → Settings → Add-ons → install **Whisper** (Wyoming-faster-whisper); pick `small-int8` to match what we had
+- [ ] Install **Piper** (Wyoming-piper); choose voice (suggest `en_US-ryan-high` or browse — listen at piper-voices preview)
+- [ ] HA → Settings → Voice assistants → Create pipeline:
+  - STT: Whisper add-on
+  - TTS: Piper add-on
+  - Conversation agent: **Igor** (added in step 4)
 
-Goal: stop maintaining device lists in two places.
+### Step 4 — Register Igor as HA Custom Conversation Agent
 
-- [ ] New `RoomConfig` shape: `client_id, ha_area, callback_url, prefer_sonos_output, indicator_light` only
-- [ ] Migrate existing `rooms.yaml` (one-time edit, will write a script if there are multiple rooms)
-- [ ] `RoomStateManager`: TV state cache → just call HA on demand (or cache for ≤1s); drop the polling thread
-- [ ] Update `data/rooms.yaml.example` and CLAUDE.md to reflect new shape
+- [ ] In Igor: implement HA's conversation agent contract (response shape, intent matching for HA's expected format)
+- [ ] In HA: add Igor's URL as a custom conversation agent. Two paths:
+  - Option A: Igor exposes a HACS-installable HA integration (cleanest, but more work)
+  - Option B: Use HA's built-in OpenAI Conversation integration pointed at Igor (Igor implements the OpenAI-compatible chat completions endpoint — fastest path, just one endpoint to mock)
+- [ ] Set the new pipeline's conversation agent to Igor
+- [ ] Test from HA UI: Settings → Voice assistants → Pipeline → "Try it" — type a sentence, confirm Igor responds
+
+### Step 5 — Install wyoming-satellite on existing Pi
+
+- [ ] On the Pi: install `wyoming-satellite` + `wyoming-openwakeword`
+- [ ] Copy `oww_models/igor.onnx` to satellite's wakeword model dir
+- [ ] systemd unit for `wyoming-openwakeword` (loads our model)
+- [ ] systemd unit for `wyoming-satellite` (mic + audio out config, points at HA)
+- [ ] HA → Settings → Devices & Services → Wyoming → discovers satellite, assign to Area
+- [ ] Verify: say "Igor", speak a command, response plays through Sonos (or Pi speaker, depending on output config)
+
+### Step 6 — Tear down old infra
+
+- [ ] Stop Igor on user's PC (the original deployment)
+- [ ] Tear down the LXC at `10.0.30.20` on Snap (was scaffolding only)
+- [ ] Decommission existing Pi as Igor client (now repurposed as wyoming-satellite — same hardware, new role)
+- [ ] Update `wirenest` services-registry: HA marked Running, Igor (Pi5 Docker) added, LXC removed
+- [ ] Update `wirenest` adr-002 if needed
+
+### Step 7 — Voice PE (when it arrives)
+
+- [ ] Plug in PE, complete onboarding wizard via HA
+- [ ] Assign to Area
+- [ ] Either retire the wyoming-satellite Pi or keep both for multi-room
+- [ ] No Igor code changes needed
 
 ## Open Questions / TODOs
 
-- LXC IP address — needs to be picked + reserved in pfSense and added to Pi-hole DNS (`igor.kingdahm.com` → IP)
-- The `device_tracker.sams_pphone` data corruption (`sam`s pphone` with replacement char) suggests an encoding issue somewhere — check phone's HA Companion config name
-- HA marked "Planned" in `wirenest` wiki but is actually live — update `services-registry.md` and `adr-002` after Igor migration succeeds
-- Decide where to store Igor secrets on LXC: SOPS-encrypted in `/etc/igor/`, or systemd `EnvironmentFile`, or both. Wiki convention says SOPS — follow that.
+- **OpenAI-compatible vs HACS integration** for the conversation agent — Option B (OpenAI shim) is faster to ship; Option A (HACS) is cleaner long-term. Recommend B for MVP.
+- **`rooms.yaml` fate**: probably deleted entirely once HA Areas drive everything; only survives if we need per-area output preferences (Sonos vs satellite speaker) that HA doesn't model directly.
+- **Speaker identification (`server/speaker_id.py`)**: keep or delete? It was always optional. HA's `person` entity covers "who's home" but not "who just spoke." Defer.
+- **Behavior memory / consolidation**: still runs as a background daemon thread inside the container. Confirm it works fine in a slim Docker setup (no display, no audio).
+- **Timer audio**: HA `notify` for phone push, `media_player.play_media` for room speakers. Replace `event_loop.py` Pi callback mechanism.
+- **Wake word retraining workflow**: `record_samples.py` no longer runs on the original Pi (it's wyoming-satellite now). Keep training script, document new sample collection path (probably from satellite's recordings + HA's logged audio).
 
-## Where We Left Off
+## Where We Left Off (2026-04-18)
 
-Done in this session:
-- Trained new wakeword model (`igor.onnx`) with template-matched windowing — committed `6c1631d`
-- Verified HA is live at 10.0.40.5, enumerated entities, picked architecture
-- Wrote this plan
+Done this session:
+- Trained new wakeword model with template-matched windowing — committed `6c1631d`
+- Stood up Proxmox LXC at `10.0.30.20` (now scaffolding — will tear down at Step 6)
+- Cloned repo into LXC, ssh keys set up, GitHub deploy key added
+- Verified HA live at `10.0.40.5`, enumerated entities (4 lights, 2 TVs, Sonos, switches, person, device_tracker)
+- Architecture pivoted: HA owns voice pipeline; Igor pares down to conversation agent on Pi5 Docker
 
-Not yet started:
-- Step 1 (LXC provisioning) — waiting on IP + token regeneration
+Not started:
+- Step 1 — code refactor. Best to start here next session, can work from any dev env.
