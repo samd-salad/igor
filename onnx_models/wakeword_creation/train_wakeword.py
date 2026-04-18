@@ -39,7 +39,7 @@ MODEL_NAME  = "igor"   # becomes the key in model.predict() results
 
 SAMPLE_RATE  = 16000
 CLIP_SAMPLES = SAMPLE_RATE * 3  # 3-second clips (pad/trim all audio to this)
-N_EPOCHS     = 50
+N_EPOCHS     = 200
 BATCH_SIZE   = 64
 LAYER_DIM    = 64   # increased from 32 — more capacity to discriminate real-world audio
 
@@ -230,6 +230,10 @@ def main():
     # Slice into 16-frame windows (OWW inference window size).
     # A clip of N frames yields (N - 16 + 1) windows — free data augmentation.
     WINDOW = 16
+    # Cosine similarity threshold: auto clips below this are skipped (no wake word found)
+    SIMILARITY_THRESHOLD = 0.7
+    # How many windows to extract around the peak similarity position
+    PEAK_CONTEXT = 3  # windows ending at peak-1, peak, peak+1
 
     def make_windows(emb: np.ndarray) -> np.ndarray:
         """(clips, frames, 96) → (windows, 16, 96)"""
@@ -239,33 +243,80 @@ def main():
                 wins.append(clip[start:start + WINDOW])
         return np.stack(wins).astype(np.float32)
 
-    def make_windows_split(emb: np.ndarray, paths: list) -> np.ndarray:
-        """Like make_windows but skips the silence-heavy start of auto-saved clips:
-        - auto_*.wav: 2.5s pre-detection buffer (~23 frames) + wake word at end (~5 frames)
-                      → only last N windows overlap with the wake word region
-        - sample_*.wav / others: user speaks throughout → use all windows
-        """
-        N_WINDOWS = 4  # last 4 windows of auto_* clips all partially overlap wake word
-        wins = []
-        for clip, path in zip(emb, paths):
-            n = len(clip)
-            max_start = n - WINDOW  # last valid start index (inclusive)
-            if max_start < 0:
-                continue
-            name = Path(path).name
-            if name.startswith("auto_") or name.startswith("dup_auto_"):
-                # Wake word is at the end — take the last N_WINDOWS windows
-                end_at = max_start + 1
-                start_from = max(0, end_at - N_WINDOWS)
-            else:
-                # Directly recorded — wake word present throughout, use all windows
-                start_from = 0
-                end_at = max_start + 1
-            for start in range(start_from, end_at):
-                wins.append(clip[start:start + WINDOW])
-        return np.stack(wins).astype(np.float32) if wins else np.empty((0, WINDOW, 96), dtype=np.float32)
+    def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
+        """Cosine similarity between two flattened vectors."""
+        a_flat, b_flat = a.flatten(), b.flatten()
+        denom = np.linalg.norm(a_flat) * np.linalg.norm(b_flat)
+        if denom < 1e-8:
+            return 0.0
+        return float(np.dot(a_flat, b_flat) / denom)
 
-    pos_wins = make_windows_split(pos_emb, wav_files)
+    # --- Build template embedding from reference samples (sample_*.wav) ---
+    # These are manually recorded, tightly trimmed — wake word present throughout.
+    ref_indices = [i for i, p in enumerate(wav_files) if Path(p).name.startswith("sample_")]
+    auto_indices = [i for i, p in enumerate(wav_files)
+                    if Path(p).name.startswith(("auto_", "dup_auto_", "pc_auto_"))]
+    other_indices = [i for i in range(len(wav_files)) if i not in ref_indices and i not in auto_indices]
+
+    if not ref_indices:
+        print("  Warning: no sample_*.wav reference files found — falling back to all-windows for auto clips")
+        template_emb = None
+    else:
+        # Average the last WINDOW frames of each reference clip (right-aligned, where OWW expects the keyword)
+        ref_windows = []
+        for i in ref_indices:
+            clip = pos_emb[i]
+            # Use the last 16-frame window (right-aligned keyword)
+            ref_windows.append(clip[-WINDOW:])
+        template_emb = np.mean(ref_windows, axis=0)  # (16, 96) average template
+        print(f"  Built template from {len(ref_indices)} reference samples (sample_*.wav)")
+
+    # --- Extract positive windows ---
+    pos_wins_list = []
+    pos_win_file_idx = []  # track which file each window came from
+    n_auto_matched = 0
+    n_auto_skipped = 0
+
+    for i, (clip, path) in enumerate(zip(pos_emb, wav_files)):
+        n = len(clip)
+        max_start = n - WINDOW
+        if max_start < 0:
+            continue
+        name = Path(path).name
+        is_auto = name.startswith(("auto_", "dup_auto_", "pc_auto_"))
+
+        if is_auto and template_emb is not None:
+            # Slide window across clip, find peak cosine similarity to template
+            best_sim = -1.0
+            best_end = max_start  # fallback: last window
+            for start in range(max_start + 1):
+                window = clip[start:start + WINDOW]
+                sim = _cosine_sim(window, template_emb)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_end = start  # start index of best window
+
+            if best_sim < SIMILARITY_THRESHOLD:
+                n_auto_skipped += 1
+                continue  # No region matches the wake word — skip this clip
+
+            n_auto_matched += 1
+            # Extract PEAK_CONTEXT windows centered on the best match
+            for offset in range(-PEAK_CONTEXT // 2, PEAK_CONTEXT // 2 + 1):
+                s = best_end + offset
+                if 0 <= s <= max_start:
+                    pos_wins_list.append(clip[s:s + WINDOW])
+                    pos_win_file_idx.append(i)
+        else:
+            # Reference samples or other files: wake word present throughout, use all windows
+            for start in range(max_start + 1):
+                pos_wins_list.append(clip[start:start + WINDOW])
+                pos_win_file_idx.append(i)
+
+    if auto_indices:
+        print(f"  Auto clips: {n_auto_matched} matched (sim>={SIMILARITY_THRESHOLD}), {n_auto_skipped} skipped")
+
+    pos_wins = np.stack(pos_wins_list).astype(np.float32) if pos_wins_list else np.empty((0, WINDOW, 96), dtype=np.float32)
     neg_wins = make_windows(neg_emb)
     print(f"  Windows — positive: {len(pos_wins)}  negative: {len(neg_wins)}")
 
@@ -274,9 +325,11 @@ def main():
     # ------------------------------------------------------------------
     X = np.vstack([pos_wins, neg_wins])
     y = np.array([1.0] * len(pos_wins) + [0.0] * len(neg_wins), dtype=np.float32)
+    # Track which positive file each sample came from (negatives get -1)
+    file_idx = np.array(pos_win_file_idx + [-1] * len(neg_wins))
 
     perm = np.random.default_rng(0).permutation(len(X))
-    X, y = X[perm], y[perm]
+    X, y, file_idx = X[perm], y[perm], file_idx[perm]
 
     X_t = torch.from_numpy(X)
     y_t = torch.from_numpy(y).unsqueeze(1)
@@ -285,6 +338,7 @@ def main():
     # Define model: Flatten → FC → LN → ReLU → FC → LN → ReLU → FC → Sigmoid
     # Input: (batch, 16, 96)  Output: (batch, 1)
     # ------------------------------------------------------------------
+    torch.manual_seed(42)  # Deterministic weight init for reproducible training
     model = nn.Sequential(
         nn.Flatten(),                               # → (batch, 1536)
         nn.Linear(16 * 96, LAYER_DIM),
@@ -303,12 +357,17 @@ def main():
     # Train
     # ------------------------------------------------------------------
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    # Cosine annealing: LR decays from 1e-3 to 1e-5 over all epochs.
+    # Lets the model explore broadly early, then fine-tune decision boundaries.
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=N_EPOCHS, eta_min=1e-5
+    )
     # Compensate for class imbalance: weight positive examples proportionally
     # so the model doesn't just learn to always predict negative.
     pos_weight = torch.tensor([len(neg_wins) / max(len(pos_wins), 1)])
     loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
-    print(f"\nTraining ({N_EPOCHS} epochs, {len(X)} samples)...")
+    print(f"\nTraining ({N_EPOCHS} epochs, {len(X)} samples, cosine LR 1e-3 -> 1e-5)...")
     for epoch in range(N_EPOCHS):
         model.train()
         perm_t = torch.randperm(len(X_t))
@@ -322,6 +381,7 @@ def main():
             optimizer.step()
             epoch_loss += loss.item()
             n_batches  += 1
+        scheduler.step()
         if (epoch + 1) % 25 == 0:
             print(f"  Epoch {epoch+1:3d}/{N_EPOCHS}  loss={epoch_loss/n_batches:.4f}")
 
@@ -337,6 +397,22 @@ def main():
     print(f"\nTraining scores:")
     print(f"  Positive  mean={pos_scores.mean():.3f}  min={pos_scores.min():.3f}")
     print(f"  Negative  mean={neg_scores.mean():.3f}  max={neg_scores.max():.3f}")
+
+    # Per-file positive score breakdown (find low-scoring positives)
+    pos_mask = y == 1.0
+    pos_file_idx_arr = file_idx[pos_mask]
+    low_pos_files = []
+    for file_i in sorted(set(pos_file_idx_arr)):
+        mask = pos_file_idx_arr == file_i
+        file_scores = pos_scores[mask]
+        file_min = float(file_scores.min())
+        if file_min < 0.3:
+            low_pos_files.append((file_min, float(file_scores.max()), Path(wav_files[file_i]).name))
+    if low_pos_files:
+        low_pos_files.sort()
+        print(f"\n  Low-scoring positive files (min < 0.3):")
+        for fmin, fmax, fname in low_pos_files:
+            print(f"    min={fmin:.3f}  max={fmax:.3f}  {fname}")
 
     if pos_scores.mean() < 0.7:
         print("  Warning: positive scores are low — consider recording more samples.")

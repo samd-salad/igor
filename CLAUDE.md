@@ -369,7 +369,7 @@ USE_SONOS_OUTPUT=True + INDICATOR_LIGHT=None:
 - learning routines from tool calls, not just speech
 - automation choreograph ideas - "good morning"/"goodnight" (as early triggers for circadian rhythym calls), "sexy lightning", "ay carumba"
 - bedtime reminders/nudges?
-- speak directly into mic out
+- speak directly into pc mic out
 - searching online and adding notes to project files
 - smart roomba integration?
 - are pre-synthesized speech segments in a different model?
