@@ -2,6 +2,8 @@
 
 Guidance for Claude Code when working in this repository.
 
+> **Active migration in progress** — see [`MIGRATION.md`](./MIGRATION.md) for the Proxmox LXC + Home Assistant migration plan. Read that first if picking up cross-session work.
+
 ## Dev Session Workflow
 
 At the start of every session, check `data/brain.json` for open feedback entries and proactively offer to fix them. Example: "You have 2 open items: response verbosity after light commands, and Sonos reconnect on stale cache. Want me to work through them?"
