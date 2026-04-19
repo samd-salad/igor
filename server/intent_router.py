@@ -27,21 +27,22 @@ class Tier1Match:
 
 
 # Normalized phrase -> (command_name, params, spoken_response)
+# All commands route through HA-backed implementations in light_cmd / media_cmd / tv_cmd.
 _DIRECT_COMMANDS = {
-    "pause":               ("tv_playback", {"action": "pause"}, "Paused."),
-    "play":                ("tv_playback", {"action": "play"}, "Playing."),
-    "resume":              ("tv_playback", {"action": "play"}, "Resuming."),
-    "stop":                ("tv_playback", {"action": "stop"}, "Stopped."),
-    "next":                ("tv_playback", {"action": "next"}, "Next."),
-    "skip":                ("tv_playback", {"action": "next"}, "Skipped."),
-    "previous":            ("tv_playback", {"action": "previous"}, "Previous."),
+    "pause":               ("play_pause", {}, "Paused."),
+    "play":                ("play_pause", {}, "Playing."),
+    "resume":              ("play_pause", {}, "Resuming."),
+    "stop":                ("play_pause", {}, "Stopped."),
+    "next":                ("next_track", {}, "Next."),
+    "skip":                ("next_track", {}, "Skipped."),
+    "previous":            ("previous_track", {}, "Previous."),
     "lights off":          ("set_light", {"power": "off"}, "Lights off."),
     "lights on":           ("set_light", {"power": "on"}, "Lights on."),
     "turn off the lights": ("set_light", {"power": "off"}, "Lights off."),
     "turn on the lights":  ("set_light", {"power": "on"}, "Lights on."),
     "kill the lights":     ("set_light", {"power": "off"}, "Lights off."),
-    "mute":                ("sonos_mute", {"state": "on"}, "Muted."),
-    "unmute":              ("sonos_mute", {"state": "off"}, "Unmuted."),
+    "mute":                ("mute", {}, "Muted."),
+    "unmute":              ("unmute", {}, "Unmuted."),
 }
 
 # Playback-only subset of _DIRECT_COMMANDS — used by _match_playback_filler
@@ -163,7 +164,7 @@ def _match_volume_set(text: str) -> Optional[Tier1Match]:
     level = int(m.group(1))
     if not 0 <= level <= 100:
         return None
-    return Tier1Match("set_sonos_volume", {"level": level}, f"Volume {level}.")
+    return Tier1Match("set_volume", {"level": level, "label": "music"}, f"Volume {level}.")
 
 
 @_pattern
@@ -182,9 +183,9 @@ def _match_mute(text: str) -> Optional[Tier1Match]:
         return None
     # Check anywhere in core, not just first position ("tv mute" should match)
     if "unmute" in core:
-        return Tier1Match("sonos_mute", {"state": "off"}, "Unmuted.")
+        return Tier1Match("unmute", {}, "Unmuted.")
     if "mute" in core:
-        return Tier1Match("sonos_mute", {"state": "on"}, "Muted.")
+        return Tier1Match("mute", {}, "Muted.")
     return None
 
 

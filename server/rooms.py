@@ -17,6 +17,7 @@ class RoomConfig:
     """Immutable configuration for a single room."""
     room_id: str
     display_name: str
+    ha_area: Optional[str] = None  # HA Area name — source of truth for entity scoping
     sonos_zone: Optional[str] = None
     indicator_light: Optional[str] = None
     tv_host: Optional[str] = None
@@ -66,6 +67,7 @@ def load_rooms(yaml_path: Path) -> dict[str, RoomConfig]:
         rooms[room_id] = RoomConfig(
             room_id=room_id,
             display_name=cfg.get('display_name', room_id),
+            ha_area=cfg.get('ha_area'),
             sonos_zone=cfg.get('sonos_zone'),
             indicator_light=cfg.get('indicator_light'),
             tv_host=cfg.get('tv_host'),

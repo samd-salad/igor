@@ -29,6 +29,8 @@ from threading import Lock
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, Response
+from typing import Optional
+
 from pydantic import BaseModel, Field, ValidationError
 
 from shared.models import (
@@ -173,18 +175,22 @@ def _serve_tts_audio(audio: bytes, req: Request) -> Response:
 
 
 def create_app(
-    orchestrator: Orchestrator,
+    orchestrator: Orchestrator = None,
     registry: ClientRegistry = None,
     room_state_mgr: RoomStateManager = None,
     rooms: dict[str, RoomConfig] = None,
+    conversation_service=None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
     Args:
-        orchestrator: Fully initialised Orchestrator instance.
+        orchestrator: Legacy Orchestrator (audio pipeline). Optional during
+            migration — being deleted in favor of conversation_service.
         registry: ClientRegistry for dynamic client management.
         room_state_mgr: RoomStateManager for per-room state.
         rooms: Dict of room configs keyed by room_id.
+        conversation_service: ConversationService for HA-driven text-only
+            conversation (the new entry point at POST /conversation/process).
     """
     # Defaults for backward compat (single-client mode)
     if registry is None:
@@ -226,6 +232,7 @@ def create_app(
     app.state.registry = registry
     app.state.room_state_mgr = room_state_mgr
     app.state.rooms = rooms
+    app.state.conversation_service = conversation_service
     app.state.start_time = time.time()
 
     _rate_limiter = _RateLimiter(max_requests=10, window_seconds=60)
@@ -356,6 +363,80 @@ def create_app(
         except Exception as e:
             logger.error(f"Error processing text interaction: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Processing failed")
+
+    # ---- HA Custom Conversation Agent ----
+
+    class _ConversationProcessRequest(BaseModel):
+        """Payload from HA's conversation pipeline. Field names follow HA's
+        async_process(conversation.ConversationInput) shape."""
+        text: str = Field(..., min_length=1, max_length=2000)
+        conversation_id: Optional[str] = Field(None, max_length=100)
+        device_id: Optional[str] = Field(None, max_length=100)
+        language: Optional[str] = Field(None, max_length=20)
+
+    def _build_ctx_from_device(device_id: Optional[str]) -> InteractionContext:
+        """Resolve a HA device_id to an InteractionContext.
+
+        device_id → HA area → matching RoomConfig (by ha_area), or a synthesized
+        room with just ha_area set. Returns the default room if nothing maps.
+        """
+        from server.rooms import RoomConfig
+        ha_area = ""
+        if device_id:
+            try:
+                from server.ha_client import get_client
+                ha_area = get_client().area_of_device(device_id)
+            except Exception as e:
+                logger.warning(f"Failed to resolve device_id {device_id}: {e}")
+
+        if ha_area:
+            for room in rooms.values():
+                if (room.ha_area or "").lower() == ha_area.lower():
+                    return InteractionContext(
+                        client_id=device_id or "ha", room=room, client_type="text",
+                        callback_url=None, prefer_sonos=False, tv_state="unknown",
+                    )
+            synthesized = RoomConfig(
+                room_id=ha_area.lower().replace(" ", "_"),
+                display_name=ha_area, ha_area=ha_area,
+            )
+            return InteractionContext(
+                client_id=device_id or "ha", room=synthesized, client_type="text",
+                callback_url=None, prefer_sonos=False, tv_state="unknown",
+            )
+
+        default = next(iter(rooms.values()))
+        return InteractionContext(
+            client_id=device_id or "ha", room=default, client_type="text",
+            callback_url=None, prefer_sonos=False, tv_state="unknown",
+        )
+
+    @app.post("/conversation/process")
+    async def conversation_process(request: _ConversationProcessRequest, req: Request):
+        """HA Custom Conversation Agent endpoint.
+
+        HA's voice pipeline POSTs transcribed user speech here; we run it
+        through Igor's brain and return response text + a flag for whether
+        the satellite should keep listening (open the mic for follow-up).
+        """
+        if conversation_service is None:
+            raise HTTPException(status_code=503, detail="Conversation service not configured")
+        if not _rate_limiter.is_allowed(req.client.host):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        try:
+            ctx = _build_ctx_from_device(request.device_id)
+            result = conversation_service.process(request.text, ctx=ctx)
+            return {
+                "response": result["response"],
+                "conversation_id": request.conversation_id or f"igor-{int(time.time() * 1000)}",
+                "end_conversation": result.get("end_conversation", True),
+                "commands_executed": result.get("commands_executed", []),
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Conversation processing failed: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Conversation processing failed")
 
     # ---- Audio Serving ----
 

@@ -1,192 +1,299 @@
-"""Google TV remote commands via androidtvremote2."""
-import asyncio
-import concurrent.futures
+"""HA-backed TV commands. Replaces the old tv_cmd.py (androidtvremote2)
+and adb_cmd.py (adb-shell) — both now subsumed by the
+`androidtv_remote` integration in Home Assistant.
+
+HA exposes:
+  - remote.<tv>           → send_command, turn_on/off, plus `activity:` deep-link launch
+  - media_player.<tv>     → play_media (apps), volume, play/pause/next/etc.
+                            Already covered by media_cmd.py for shared services.
+
+Service field names verified against /api/services on the live HA (2026-04-18):
+  remote.send_command  → device, command, num_repeats, delay_secs, hold_secs
+  remote.turn_on       → activity (Android intent URL or package/activity)
+
+Key naming: the androidtv_remote integration accepts AndroidKeyEvent constants
+without the KEYCODE_ prefix (e.g. DPAD_UP, MEDIA_PLAY_PAUSE).
+"""
 import logging
+from typing import Optional
+from urllib.parse import quote_plus
 
 from .base import Command
-from server.config import (
-    GOOGLE_TV_HOST,
-    GOOGLE_TV_CERT_FILE,
-    GOOGLE_TV_KEY_FILE,
-    GOOGLE_TV_CLIENT_NAME,
-)
+from server.ha_client import HAError, get_client
 
 logger = logging.getLogger(__name__)
 
-try:
-    from androidtvremote2 import AndroidTVRemote, CannotConnect, ConnectionClosed, InvalidAuth
-    _ATV_AVAILABLE = True
-except ImportError:
-    _ATV_AVAILABLE = False
-    logger.warning("androidtvremote2 not installed; TV commands unavailable. Run: pip install androidtvremote2")
 
+# Friendly key names → AndroidKeyEvent (without KEYCODE_ prefix) accepted by remote.send_command.
 KEY_MAP = {
-    "play":         "KEYCODE_MEDIA_PLAY",
-    "pause":        "KEYCODE_MEDIA_PAUSE",
-    "play_pause":   "KEYCODE_MEDIA_PLAY_PAUSE",
-    "stop":         "KEYCODE_MEDIA_STOP",
-    "home":         "KEYCODE_HOME",
-    "back":         "KEYCODE_BACK",
-    "up":           "KEYCODE_DPAD_UP",
-    "down":         "KEYCODE_DPAD_DOWN",
-    "left":         "KEYCODE_DPAD_LEFT",
-    "right":        "KEYCODE_DPAD_RIGHT",
-    "select":       "KEYCODE_DPAD_CENTER",
-    "volume_up":    "KEYCODE_VOLUME_UP",
-    "volume_down":  "KEYCODE_VOLUME_DOWN",
-    "mute":         "KEYCODE_VOLUME_MUTE",
-    "power":        "KEYCODE_POWER",
+    "play":        "MEDIA_PLAY",
+    "pause":       "MEDIA_PAUSE",
+    "play_pause":  "MEDIA_PLAY_PAUSE",
+    "stop":        "MEDIA_STOP",
+    "next":        "MEDIA_NEXT",
+    "previous":    "MEDIA_PREVIOUS",
+    "rewind":      "MEDIA_REWIND",
+    "fast_forward": "MEDIA_FAST_FORWARD",
+    "home":        "HOME",
+    "back":        "BACK",
+    "menu":        "MENU",
+    "up":          "DPAD_UP",
+    "down":        "DPAD_DOWN",
+    "left":        "DPAD_LEFT",
+    "right":       "DPAD_RIGHT",
+    "select":      "DPAD_CENTER",
+    "ok":          "DPAD_CENTER",
+    "enter":       "DPAD_CENTER",
+    "volume_up":   "VOLUME_UP",
+    "volume_down": "VOLUME_DOWN",
+    "mute":        "VOLUME_MUTE",
+    "power":       "POWER",
+    "channel_up":  "CHANNEL_UP",
+    "channel_down": "CHANNEL_DOWN",
+}
+
+# App name → Android package. The androidtv_remote integration launches via
+# `activity:` on remote.turn_on. For most apps the package alone is enough;
+# HA resolves the launcher activity.
+APP_PACKAGES = {
+    "netflix":     "com.netflix.ninja",
+    "youtube":     "com.google.android.youtube.tv",
+    "smarttube":   "is.xyz.smarttube",
+    "spotify":     "com.spotify.tv.android",
+    "disney":      "com.disney.disneyplus",
+    "disney+":     "com.disney.disneyplus",
+    "hulu":        "com.hulu.plus",
+    "max":         "com.hbo.hbonow",
+    "hbo":         "com.hbo.hbonow",
+    "prime":       "com.amazon.amazonvideo.livingroom",
+    "amazon":      "com.amazon.amazonvideo.livingroom",
+    "prime video": "com.amazon.amazonvideo.livingroom",
+    "plex":        "com.plexapp.android",
+    "twitch":      "tv.twitch.android.app",
+    "apple tv":    "com.apple.atve.androidtv.appletv",
+    "peacock":     "com.peacocktv.peacockandroid",
+    "paramount":   "com.cbs.ott",
+    "paramount+":  "com.cbs.ott",
 }
 
 
-async def _connect(host: str = None) -> tuple:
-    """Connect and wait for is_on to populate. Returns (remote, error_str)."""
-    remote = AndroidTVRemote(
-        client_name=GOOGLE_TV_CLIENT_NAME,
-        certfile=GOOGLE_TV_CERT_FILE,
-        keyfile=GOOGLE_TV_KEY_FILE,
-        host=host or GOOGLE_TV_HOST,
-    )
-    await remote.async_generate_cert_if_missing()
-    try:
-        await remote.async_connect()
-    except InvalidAuth:
-        return None, "TV not paired. Run: python server/pair_google_tv.py"
-    except (CannotConnect, ConnectionClosed, OSError) as e:
-        return None, f"TV unavailable: cannot connect ({e})"
-    # Brief wait for is_on state to be populated after handshake
-    await asyncio.sleep(0.3)
-    if remote.is_on is None:
-        return None, "TV connected but not ready (is_on is None)"
-    return remote, None
+def _resolve_tv_remote(_ctx=None) -> Optional[str]:
+    """Resolve the remote.* entity for the current room, or first available."""
+    ha = get_client()
+    if _ctx is not None and getattr(_ctx, "room", None) is not None:
+        ha_area = getattr(_ctx.room, "ha_area", "") or ""
+        if ha_area:
+            in_area = ha.entities_in_area(ha_area, domain="remote")
+            if in_area:
+                return in_area[0]
+    remotes = ha.states_in_domain("remote")
+    return remotes[0]["entity_id"] if remotes else None
 
 
-async def _async_power(state: str, host: str = None) -> str:
-    """Smart power: uses is_on to avoid toggling in the wrong direction."""
-    remote, err = await _connect(host)
-    if err:
-        return err
-    try:
-        is_on = remote.is_on
-        if state == "on" and is_on:
-            return "TV is already on"
-        if state == "off" and not is_on:
-            return "TV is already off"
-        # KEYCODE_POWER toggles reliably on this TV
-        remote.send_key_command("KEYCODE_POWER")
-        await asyncio.sleep(2.0)
-        return f"Turned TV {'on' if state == 'on' else 'off'}"
-    except Exception as e:
-        return f"TV power failed: {e}"
-    finally:
-        try:
-            remote.disconnect()
-        except Exception:
-            pass
-
-
-async def _async_send_key(keycode: str, host: str = None) -> str:
-    remote, err = await _connect(host)
-    if err:
-        return err
-    try:
-        remote.send_key_command(keycode)
-        await asyncio.sleep(1.0)
-        return f"Sent {keycode} to TV"
-    except Exception as e:
-        return f"TV command failed: {e}"
-    finally:
-        try:
-            remote.disconnect()
-        except Exception:
-            pass
-
-
-
-def _run_tv(coro) -> str:
-    """Run a TV coroutine in a fresh thread (no running event loop) via ThreadPoolExecutor.
-
-    execute() runs on the uvicorn event loop thread, so asyncio.run() would
-    raise RuntimeError. A worker thread has no event loop, making it safe.
-    """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(asyncio.run, coro)
-        try:
-            return future.result(timeout=10)
-        except concurrent.futures.TimeoutError:
-            return "TV command timed out"
-        except Exception as e:
-            return f"TV command error: {e}"
-
-
-def _get_tv_host(_ctx=None) -> str:
-    """Get TV host from context or fall back to config."""
-    if _ctx and hasattr(_ctx, 'room') and _ctx.room.tv_host:
-        return _ctx.room.tv_host
-    return GOOGLE_TV_HOST
-
-
-def _tv_available(_ctx=None) -> str | None:
-    """Return an error string if TV is unusable, None if ready."""
-    if not _ATV_AVAILABLE:
-        return "Google TV unavailable: androidtvremote2 not installed"
-    host = _get_tv_host(_ctx)
-    if not host or "0.X" in host:
-        return "Google TV unavailable: set GOOGLE_TV_HOST in server/config.py or rooms.yaml"
+def _resolve_tv_media_player(_ctx=None) -> Optional[str]:
+    """Resolve the media_player.* (device_class=tv) entity for the current room."""
+    ha = get_client()
+    if _ctx is not None and getattr(_ctx, "room", None) is not None:
+        ha_area = getattr(_ctx.room, "ha_area", "") or ""
+        if ha_area:
+            for eid in ha.entities_in_area(ha_area, domain="media_player"):
+                state = next((s for s in ha.states_in_domain("media_player") if s["entity_id"] == eid), None)
+                if state and (state.get("attributes") or {}).get("device_class") == "tv":
+                    return eid
+    for s in ha.states_in_domain("media_player"):
+        if (s.get("attributes") or {}).get("device_class") == "tv":
+            return s["entity_id"]
     return None
 
 
+def _send_remote_command(remote_entity: str, command: str | list[str], num_repeats: int = 1) -> Optional[str]:
+    """Call remote.send_command. Returns None on success, error string on failure."""
+    try:
+        get_client().call_service("remote", "send_command", {
+            "entity_id": remote_entity,
+            "command": command,
+            "num_repeats": num_repeats,
+        })
+        return None
+    except HAError as e:
+        logger.warning(f"remote.send_command failed: {e}")
+        return f"TV command failed: {e}"
+
+
+# -- commands --
+
 class TvPowerCommand(Command):
     name = "tv_power"
-    description = "Turn the Google TV on, off, or toggle power"
+    description = "Turn the TV on, off, or toggle power"
 
     @property
     def parameters(self) -> dict:
-        return {
-            "state": {
-                "type": "string",
-                "description": "Power action: 'on', 'off', or 'toggle'"
-            }
-        }
+        return {"state": {"type": "string", "description": "'on', 'off', or 'toggle'"}}
 
     def execute(self, state: str, _ctx=None) -> str:
-        err = _tv_available(_ctx)
-        if err:
-            return err
-        state_lower = state.lower().strip()
-        if state_lower not in ("on", "off", "toggle"):
+        s = state.lower().strip()
+        if s not in ("on", "off", "toggle"):
             return f"Unknown state '{state}'. Use: on, off, or toggle."
-        return _run_tv(_async_power(state_lower, host=_get_tv_host(_ctx)))
-
+        remote = _resolve_tv_remote(_ctx)
+        if not remote:
+            return "No TV remote available in Home Assistant"
+        ha = get_client()
+        try:
+            if s == "toggle":
+                ha.call_service("remote", "toggle", {"entity_id": remote})
+            elif s == "on":
+                ha.call_service("remote", "turn_on", {"entity_id": remote})
+            else:
+                ha.call_service("remote", "turn_off", {"entity_id": remote})
+        except HAError as e:
+            return f"TV power failed: {e}"
+        return f"TV {s if s != 'toggle' else 'toggled'}"
 
 
 class TvKeyCommand(Command):
     name = "tv_key"
     description = (
-        "Send a remote key to the Google TV. "
-        "Keys: play, pause, play_pause, stop, home, back, "
-        "up, down, left, right, select, volume_up, volume_down, mute, power"
+        "Send a remote key to the TV. Keys: play, pause, play_pause, stop, "
+        "home, back, menu, up, down, left, right, select, "
+        "volume_up, volume_down, mute, power, channel_up, channel_down, "
+        "next, previous, rewind, fast_forward."
+    )
+
+    @property
+    def parameters(self) -> dict:
+        return {"key": {"type": "string", "description": "Key name (see description)"}}
+
+    def execute(self, key: str, _ctx=None) -> str:
+        key_lower = key.lower().strip()
+        command = KEY_MAP.get(key_lower)
+        if not command:
+            valid = ", ".join(sorted(KEY_MAP))
+            return f"Unknown key '{key}'. Valid keys: {valid}"
+        remote = _resolve_tv_remote(_ctx)
+        if not remote:
+            return "No TV remote available in Home Assistant"
+        err = _send_remote_command(remote, command)
+        return err or f"Sent {key_lower} to TV"
+
+
+class TvLaunchCommand(Command):
+    name = "tv_launch"
+    description = (
+        "Launch an app on the TV by name. "
+        "Supported: netflix, youtube, smarttube, spotify, disney+, hulu, max, "
+        "prime video, plex, twitch, apple tv, peacock, paramount+"
+    )
+
+    @property
+    def parameters(self) -> dict:
+        return {"app": {"type": "string", "description": "App name (e.g. 'youtube', 'netflix')"}}
+
+    def execute(self, app: str, _ctx=None) -> str:
+        app_lower = app.lower().strip()
+        package = APP_PACKAGES.get(app_lower)
+        if not package:
+            return f"Unknown app '{app}'. Supported: {', '.join(sorted(APP_PACKAGES.keys()))}"
+        remote = _resolve_tv_remote(_ctx)
+        if not remote:
+            return "No TV remote available in Home Assistant"
+        try:
+            # remote.turn_on accepts `activity:` — for most apps the package
+            # name alone is enough; HA resolves the launcher activity.
+            get_client().call_service("remote", "turn_on", {
+                "entity_id": remote,
+                "activity": package,
+            })
+        except HAError as e:
+            return f"Failed to launch {app}: {e}"
+        return f"Launched {app} on TV"
+
+
+class TvSkipCommand(Command):
+    name = "tv_skip"
+    description = (
+        "Skip forward or back in the current video by a number of seconds. "
+        "Each press skips ~5s. Default 30 seconds."
     )
 
     @property
     def parameters(self) -> dict:
         return {
-            "key": {
-                "type": "string",
-                "description": (
-                    "Key to send: play, pause, play_pause, stop, home, back, "
-                    "up, down, left, right, select, volume_up, volume_down, mute, power"
-                )
-            }
+            "direction": {"type": "string", "description": "'forward' or 'back'"},
+            "seconds": {"type": "integer", "description": "Approximate seconds to skip (rounded to 5s steps)"},
         }
 
-    def execute(self, key: str, _ctx=None) -> str:
-        err = _tv_available(_ctx)
-        if err:
-            return err
-        key_lower = key.lower().strip()
-        keycode = KEY_MAP.get(key_lower)
-        if not keycode:
-            valid = ", ".join(sorted(KEY_MAP))
-            return f"Unknown key '{key}'. Valid keys: {valid}"
-        return _run_tv(_async_send_key(keycode, host=_get_tv_host(_ctx)))
+    @property
+    def required_parameters(self) -> list:
+        return ["direction"]
+
+    def execute(self, direction: str, seconds: int = 30, _ctx=None) -> str:
+        d = direction.lower().strip()
+        if d in ("forward", "ahead", "right"):
+            command = "DPAD_RIGHT"
+        elif d in ("back", "backward", "rewind", "left"):
+            command = "DPAD_LEFT"
+        else:
+            return f"Unknown direction '{direction}'. Use 'forward' or 'back'."
+        try:
+            seconds = int(seconds)
+        except (ValueError, TypeError):
+            return f"Invalid seconds value '{seconds}'. Use a number."
+        presses = max(1, min(120, round(seconds / 5)))
+        remote = _resolve_tv_remote(_ctx)
+        if not remote:
+            return "No TV remote available in Home Assistant"
+        # remote.send_command's num_repeats handles the loop natively
+        err = _send_remote_command(remote, command, num_repeats=presses)
+        return err or f"Skipped {d} ~{presses * 5}s on TV"
+
+
+class TvSearchYouTubeCommand(Command):
+    name = "tv_search_youtube"
+    description = (
+        "Open YouTube on the TV with a search query. "
+        "Use when the user wants to find or watch something on YouTube."
+    )
+
+    @property
+    def parameters(self) -> dict:
+        return {"query": {"type": "string", "description": "Search query, e.g. 'lo-fi beats'"}}
+
+    def execute(self, query: str, _ctx=None) -> str:
+        remote = _resolve_tv_remote(_ctx)
+        if not remote:
+            return "No TV remote available in Home Assistant"
+        # YouTube TV deep link — opens the search page in the TV YouTube app
+        url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+        try:
+            get_client().call_service("remote", "turn_on", {
+                "entity_id": remote,
+                "activity": url,
+            })
+        except HAError as e:
+            return f"YouTube search failed: {e}"
+        return f"Searching YouTube for '{query}'"
+
+
+class TvCurrentAppCommand(Command):
+    name = "tv_current_app"
+    description = "Report what app or activity is currently shown on the TV."
+
+    @property
+    def parameters(self) -> dict:
+        return {}
+
+    def execute(self, _ctx=None, **_) -> str:
+        remote = _resolve_tv_remote(_ctx)
+        if not remote:
+            return "No TV remote available in Home Assistant"
+        try:
+            state = get_client().get_state(remote)
+        except HAError as e:
+            return f"Failed to read TV state: {e}"
+        attrs = state.get("attributes", {})
+        activity = attrs.get("current_activity") or "(none)"
+        # Try to give a friendly app name when we can map the package back
+        for name, pkg in APP_PACKAGES.items():
+            if pkg in activity:
+                return f"TV is showing {name} ({activity})"
+        return f"TV is showing {activity}"
