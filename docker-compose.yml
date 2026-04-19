@@ -22,7 +22,7 @@ services:
     container_name: igor
     restart: unless-stopped
     ports:
-      - "8088:8000"
+      - "8000:8000"
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       HA_TOKEN:          ${HA_TOKEN}
