@@ -44,12 +44,18 @@ from shared.models import (
     HealthStatus
 )
 from shared.utils import decode_audio_base64
-from server.orchestrator import Orchestrator
 from server.context import InteractionContext
 from server.client_registry import ClientRegistry
 from server.room_state import RoomStateManager
 from server.rooms import RoomConfig
 from server.config import ALLOWED_CLIENT_IPS, AUDIO_TOKEN
+
+# Orchestrator pulls in Whisper/Kokoro/PyAudio at module load — only import
+# it when the legacy audio path is actually configured. Text-only mode
+# (ConversationService) does not need it.
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from server.orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +181,7 @@ def _serve_tts_audio(audio: bytes, req: Request) -> Response:
 
 
 def create_app(
-    orchestrator: Orchestrator = None,
+    orchestrator: "Orchestrator | None" = None,
     registry: ClientRegistry = None,
     room_state_mgr: RoomStateManager = None,
     rooms: dict[str, RoomConfig] = None,

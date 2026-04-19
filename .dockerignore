@@ -1,0 +1,50 @@
+# Keep the Docker build context small and the image free of audio/wakeword
+# artifacts that the text-only server doesn't need.
+
+.git
+.github
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Local user data — never bake into image
+data/*.json
+data/*.jsonl
+data/*.csv
+data/*.log
+data/*.migrated
+data/*.pem
+data/adbkey*
+data/beep_*.wav
+data/rooms.yaml
+data/speaker_embeddings.json
+
+# Audio / wakeword artifacts (being deleted in task 8 anyway)
+client/
+kokoro/
+oww_models/
+wakeword_samples/
+onnx_models/
+record_samples.py
+setup_client.sh
+setup_server.sh
+Screenshot*.png
+
+# Dev/editor cruft
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# HA integration lives in a user's HA config, not in the container
+custom_components/
+
+# Docs/plans
+MIGRATION.md
+CLAUDE.md
+requirements-client.txt

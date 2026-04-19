@@ -1,0 +1,43 @@
+# Igor — text-only conversation agent for Home Assistant.
+#
+# Deploy via Portainer on the Pi5:
+#   Stacks → Add stack → Git repository → https://github.com/samd-salad/igor
+#   Compose path: docker-compose.yml
+#   Environment variables (set in the Portainer stack editor — do NOT check these into the repo):
+#     ANTHROPIC_API_KEY=<your claude key>
+#     HA_TOKEN=<long-lived HA access token>
+#     HA_URL=http://10.0.40.5:8123
+#     IGOR_API_TOKEN=<random secret shared with the HA integration>
+#
+# The `igor_data` named volume keeps brain.json (memory, episodes,
+# identity narrative) across container restarts/rebuilds. To seed it
+# from an existing brain.json, copy once after first start:
+#     docker cp ./data/brain.json igor:/app/data/brain.json
+#     docker restart igor
+
+services:
+  igor:
+    build: .
+    image: igor:latest
+    container_name: igor
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      HA_TOKEN:          ${HA_TOKEN}
+      HA_URL:            ${HA_URL:-http://10.0.40.5:8123}
+      IGOR_API_TOKEN:    ${IGOR_API_TOKEN:-}
+      SERVER_HOST:       "0.0.0.0"
+      SERVER_PORT:       "8000"
+    volumes:
+      - igor_data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  igor_data:

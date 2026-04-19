@@ -121,8 +121,25 @@ The integration lives at `custom_components/igor/` in this repo. ~150 lines: Con
 - [ ] Settings → Voice assistants → create or edit a pipeline → set **Conversation Agent** = Igor
 - [ ] Test: Settings → Voice assistants → Pipeline → "Try it" → type "lights on" → confirm Igor responds and the lights respond
 
-**Run Igor (text-only mode, until Step 6 deletes the audio code):**
-- [ ] `IGOR_API_TOKEN=<random-secret> ANTHROPIC_API_KEY=<...> HA_TOKEN=<long-lived-ha-token> python -m server.main_text` (use the same `IGOR_API_TOKEN` value you entered in the HA integration setup)
+**Run Igor — two paths:**
+
+Option A — **Pi5 Docker via Portainer (recommended)**. Mirrors ADR-002's always-on ARM tier, and Windows Firewall stops being an obstacle.
+- [ ] SSH to Pi5 (or use Portainer's web terminal). Clone and build:
+  ```bash
+  cd /srv && git clone https://github.com/samd-salad/igor.git && cd igor
+  docker compose build
+  ```
+- [ ] In Portainer: **Stacks → Add stack → Web editor** → paste the repo's `docker-compose.yml` (or point it at the git repo). Set the stack env vars:
+  - `ANTHROPIC_API_KEY` = your Claude key
+  - `HA_TOKEN` = a long-lived HA access token
+  - `HA_URL` = `http://10.0.40.5:8123`
+  - `IGOR_API_TOKEN` = the same random secret you entered in the HA integration setup
+- [ ] **Deploy the stack.** Igor comes up at `http://<pi5-ip>:8000`.
+- [ ] (Optional) Seed memory from your old brain.json: `docker cp ./data/brain.json igor:/app/data/brain.json && docker restart igor`
+- [ ] pfSense rule: IoT (HA @ 10.0.40.5) → Servers (Pi5 @ 10.0.30.5) TCP 8000 — just this one pair.
+
+Option B — **Bare metal for dev**. Faster iteration, fights Windows Firewall on incoming connections.
+- [ ] `IGOR_API_TOKEN=<...> ANTHROPIC_API_KEY=<...> HA_TOKEN=<...> SERVER_HOST=0.0.0.0 python -m server.main_text`
 
 ### Step 5 — Install wyoming-satellite on existing Pi
 

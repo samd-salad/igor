@@ -1,0 +1,12 @@
+# Slim server dependencies for text-only Igor (HA conversation agent).
+# No Whisper, no Kokoro, no numpy, no audio libraries — HA handles STT/TTS.
+# Used by the Pi5 Docker image (ARM64) and any text-only deployment.
+
+requests~=2.32.5
+fastapi~=0.128.0
+uvicorn[standard]~=0.40.0
+pydantic~=2.12.5
+simpleeval~=1.0.3
+pint~=0.25.2
+anthropic~=0.84.0
+pyyaml~=6.0.3
