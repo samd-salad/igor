@@ -1,28 +1,27 @@
 # Room configuration for Igor multi-client support.
 # Copy to data/rooms.yaml and edit for your setup.
-# If rooms.yaml doesn't exist, a default room is auto-generated from server/config.py.
+# If rooms.yaml doesn't exist, Igor synthesizes one room per HA Area at startup.
+#
+# In the HA-backed era, the only required field is `ha_area` — that's what
+# scopes the device commands (lights, media players, TVs) to the room. The
+# legacy fields (sonos_zone, tv_host, light_group, indicator_light) are
+# ignored by the HA-backed commands and will be removed entirely once the
+# old audio code is deleted.
 
 rooms:
   living_room:
     display_name: "Living Room"
-    sonos_zone: "Living Room"        # Sonos player name (from soco discovery)
-    indicator_light: "corner lamp"   # LIFX light label for beep flashes (null to disable)
-    tv_host: "192.168.0.20"          # Google TV IP for ADB/androidtvremote2 (null if no TV)
-    light_group:                     # LIFX bulbs in this room
-      - "corner lamp"
-      - "table lamp"
-      - "tall lamp"
-    default_volume_target: "sonos"   # "sonos" or "local" — what "volume up" means
+    ha_area: "Living Room"        # Must match an HA Area name exactly (case-insensitive)
+
+  office:
+    display_name: "Office"
+    ha_area: "Office"
 
   bedroom:
     display_name: "Bedroom"
-    sonos_zone: "Bedroom"
-    indicator_light: null
-    tv_host: null
-    light_group:
-      - "bedroom lamp"
-    default_volume_target: "local"
+    ha_area: "Bedroom"
 
   phone:
     display_name: "Phone"
-    text_only: true                  # No audio I/O — text endpoint only
+    ha_area: "Living Room"        # Phone falls back to living-room scope for ambient commands
+    text_only: true               # No audio I/O — text endpoint only

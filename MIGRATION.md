@@ -105,14 +105,24 @@ Goal: same Igor brain, but with a single `POST /conversation/process` endpoint r
   - TTS: Piper add-on
   - Conversation agent: **Igor** (added in step 4)
 
-### Step 4 — Register Igor as HA Custom Conversation Agent
+### Step 4 — Install Igor HA integration + wire pipeline
 
-- [ ] In Igor: implement HA's conversation agent contract (response shape, intent matching for HA's expected format)
-- [ ] In HA: add Igor's URL as a custom conversation agent. Two paths:
-  - Option A: Igor exposes a HACS-installable HA integration (cleanest, but more work)
-  - Option B: Use HA's built-in OpenAI Conversation integration pointed at Igor (Igor implements the OpenAI-compatible chat completions endpoint — fastest path, just one endpoint to mock)
-- [ ] Set the new pipeline's conversation agent to Igor
-- [ ] Test from HA UI: Settings → Voice assistants → Pipeline → "Try it" — type a sentence, confirm Igor responds
+We picked the custom integration path (not the OpenAI shim — HA's built-in OpenAI Conversation integration doesn't expose a base_url override in 2026.x, and the Extended OpenAI Conversation HACS plugin would force HA's tools/intents on top of Igor, which we don't want).
+
+The integration lives at `custom_components/igor/` in this repo. ~150 lines: ConfigFlow + ConversationEntity that POSTs to Igor's `/conversation/process` and adapts `end_conversation → continue_conversation`.
+
+**Install on HA:**
+- [ ] Get the `custom_components/igor/` folder onto HA. Three options:
+  - **Samba/SSH add-on**: copy `custom_components/igor/` → `<ha_config>/custom_components/igor/`
+  - **Studio Code Server add-on**: drag/drop the folder into `/config/custom_components/`
+  - **`scp`** if HA runs Container/Supervised: `scp -r custom_components/igor root@10.0.40.5:/config/custom_components/`
+- [ ] Restart HA: Settings → System → Restart
+- [ ] Settings → Devices & Services → Add Integration → search "Igor" → enter Igor's URL (e.g. `http://10.0.20.4:8000`) and an optional API key (must match `IGOR_API_TOKEN` env var on Igor)
+- [ ] Settings → Voice assistants → create or edit a pipeline → set **Conversation Agent** = Igor
+- [ ] Test: Settings → Voice assistants → Pipeline → "Try it" → type "lights on" → confirm Igor responds and the lights respond
+
+**Run Igor (text-only mode, until Step 6 deletes the audio code):**
+- [ ] `IGOR_API_TOKEN=<random-secret> ANTHROPIC_API_KEY=<...> HA_TOKEN=<long-lived-ha-token> python -m server.main_text` (use the same `IGOR_API_TOKEN` value you entered in the HA integration setup)
 
 ### Step 5 — Install wyoming-satellite on existing Pi
 

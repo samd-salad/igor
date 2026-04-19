@@ -418,7 +418,17 @@ def create_app(
         HA's voice pipeline POSTs transcribed user speech here; we run it
         through Igor's brain and return response text + a flag for whether
         the satellite should keep listening (open the mic for follow-up).
+
+        Auth: when IGOR_API_TOKEN env var is set, requests must include
+        a matching `X-Igor-Token` header. Unset = no auth (dev mode).
         """
+        import os as _os
+        expected_token = _os.environ.get("IGOR_API_TOKEN", "")
+        if expected_token:
+            provided = req.headers.get("X-Igor-Token", "")
+            if provided != expected_token:
+                logger.warning(f"Conversation request from {req.client.host} with bad/missing token")
+                raise HTTPException(status_code=401, detail="Invalid or missing X-Igor-Token")
         if conversation_service is None:
             raise HTTPException(status_code=503, detail="Conversation service not configured")
         if not _rate_limiter.is_allowed(req.client.host):
@@ -499,12 +509,18 @@ def create_app(
         """Liveness + service status check."""
         try:
             uptime = time.time() - app.state.start_time
-            services = {
-                'whisper': 'loaded' if orchestrator.transcriber.model else 'not_loaded',
-                'claude': 'connected',
-                'kokoro': 'ready',
-            }
-            # Check Pi health for each registered audio client
+            services: dict[str, str] = {}
+            # Audio path (legacy) — only present when orchestrator is configured
+            if orchestrator is not None:
+                services['whisper'] = 'loaded' if orchestrator.transcriber.model else 'not_loaded'
+                services['kokoro'] = 'ready'
+                if orchestrator.pi_client and not registry.list_all():
+                    services['pi'] = 'reachable' if orchestrator.pi_client.check_health() else 'unreachable'
+            # Conversation path (new)
+            if conversation_service is not None:
+                services['conversation'] = 'ready'
+            services['claude'] = 'connected'
+            # Per-client Pi health (audio clients only)
             for client in registry.list_all():
                 if client.client_type == "audio" and client.callback_url:
                     try:
@@ -513,13 +529,6 @@ def create_app(
                         services[f'pi_{client.client_id}'] = 'reachable' if resp.ok else 'unreachable'
                     except Exception:
                         services[f'pi_{client.client_id}'] = 'unreachable'
-
-            # Legacy Pi health check
-            if orchestrator.pi_client and not registry.list_all():
-                if orchestrator.pi_client.check_health():
-                    services['pi'] = 'reachable'
-                else:
-                    services['pi'] = 'unreachable'
 
             return HealthCheckResponse(
                 status=HealthStatus.HEALTHY,

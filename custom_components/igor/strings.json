@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Igor",
+        "description": "Connect Home Assistant to your Igor server. Igor will then be selectable as a conversation agent in voice pipelines.",
+        "data": {
+          "url": "Igor server URL",
+          "api_key": "API key (optional shared secret)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach Igor at that URL. Check that it is running and accessible from Home Assistant."
+    },
+    "abort": {
+      "already_configured": "This Igor server is already configured."
+    }
+  }
+}

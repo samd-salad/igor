@@ -1,0 +1,12 @@
+{
+  "domain": "igor",
+  "name": "Igor",
+  "documentation": "https://github.com/samd-salad/igor",
+  "issue_tracker": "https://github.com/samd-salad/igor/issues",
+  "codeowners": ["@samd-salad"],
+  "config_flow": true,
+  "dependencies": ["conversation"],
+  "iot_class": "local_push",
+  "version": "0.1.0",
+  "requirements": []
+}
