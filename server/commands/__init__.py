@@ -45,18 +45,10 @@ def execute(command_name: str, _ctx=None, **kwargs) -> str:
         kwargs['_ctx'] = _ctx
     return cmd.execute(**kwargs)
 
-def inject_dependencies(registry=None, room_state_mgr=None, pi_client=None):
-    """Inject shared dependencies into commands that need them.
+def inject_dependencies():
+    """Hook for injecting shared dependencies into commands.
 
-    Args:
-        registry: ClientRegistry for dynamic client lookup.
-        room_state_mgr: RoomStateManager for per-room state.
-        pi_client: Legacy PiCallbackClient (fallback for hardware commands).
+    Currently a no-op — kept for future use so callers don't need to change
+    if commands grow dependencies again.
     """
-    for cmd in _registry.values():
-        if registry is not None:
-            cmd._registry = registry
-        if room_state_mgr is not None:
-            cmd._room_state_mgr = room_state_mgr
-        if pi_client is not None and (hasattr(cmd, 'pi_client') or cmd.name in ('set_volume', 'get_volume', 'label_wakeword')):
-            cmd.pi_client = pi_client
+    return

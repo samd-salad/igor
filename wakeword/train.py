@@ -2,14 +2,14 @@
 """Train an OpenWakeWord ONNX model from recorded positive samples.
 
 Workflow:
-  1. Pi:   python record_samples.py           → wakeword_samples/positive/*.wav
+  1. Pi:   python wakeword/record_samples.py   → wakeword/samples/positive/*.wav
   2. PC:   scp or rsync samples to PC
-  3. PC:   python onnx_models/wakeword_creation/train_wakeword.py
-  4. Pi:   scp oww_models/igor.onnx to Pi's oww_models/
+  3. PC:   python wakeword/train.py
+  4. Pi:   scp wakeword/models/igor_v0.1.tflite to Pi's ~/wyoming-openwakeword/custom-models/
 
 Dependencies (install once on PC):
   pip install torch --index-url https://download.pytorch.org/whl/cpu
-  pip install openwakeword
+  pip install openwakeword onnx2tf tensorflow tf-keras onnxruntime
 
 How it works:
   - OWW's frozen backbone (melspectrogram + embedding models, auto-downloaded ~50 MB)
@@ -17,12 +17,13 @@ How it works:
   - A small 2-layer PyTorch DNN learns to classify those embeddings as
     wake word (1) vs not (0).
   - Exported to ONNX; the output node name becomes the key in model.predict().
+  - Also exported to TFLite (fixed batch=1) for wyoming-openwakeword.
 
 Negative samples:
   This script uses synthetic negatives (noise, silence, sine tones) which work
   reasonably well for quiet environments. For fewer false positives in noisy
   conditions, record real negative audio (background speech, TV, music) into
-  wakeword_samples/negative/ and re-train.
+  wakeword/samples/negative/ and re-train.
 """
 
 import sys
@@ -31,10 +32,10 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT        = Path(__file__).parent.parent.parent
-POSITIVE_DIR = ROOT / "wakeword_samples" / "positive"
-NEGATIVE_DIR = ROOT / "wakeword_samples" / "negative"  # optional real negatives
-OUTPUT_DIR  = ROOT / "oww_models"
+ROOT        = Path(__file__).parent.parent
+POSITIVE_DIR = ROOT / "wakeword" / "samples" / "positive"
+NEGATIVE_DIR = ROOT / "wakeword" / "samples" / "negative"  # optional real negatives
+OUTPUT_DIR  = ROOT / "wakeword" / "models"
 MODEL_NAME  = "igor"   # becomes the key in model.predict() results
 
 SAMPLE_RATE  = 16000
@@ -191,7 +192,7 @@ def main():
     # ------------------------------------------------------------------
     neg_audio_list = []
 
-    # Real negatives from wakeword_samples/negative/ (optional)
+    # Real negatives from wakeword/samples/negative/ (optional)
     if NEGATIVE_DIR.exists():
         neg_files = sorted(NEGATIVE_DIR.glob("*.wav"))
         if neg_files:
@@ -217,8 +218,8 @@ def main():
     # ------------------------------------------------------------------
     # Extract embeddings via OWW frozen backbone
     # ------------------------------------------------------------------
-    # print("\nExtracting embeddings (downloading base models ~50 MB on first run)...")
-    # _download_backbone_models()
+    print("\nExtracting embeddings (downloading base models ~50 MB on first run)...")
+    _download_backbone_models()
     feat = AudioFeatures(sr=SAMPLE_RATE, ncpu=4, inference_framework="onnx")
 
     pos_emb = feat.embed_clips(pos_audio, batch_size=64)   # (N, 16, 96)
@@ -438,31 +439,118 @@ def main():
                         pass
 
     # ------------------------------------------------------------------
-    # Export to ONNX
+    # Export to ONNX (kept for backward compatibility / inspection)
     # The output node name (output_names) becomes the key in model.predict().
     # ------------------------------------------------------------------
-    output_path = OUTPUT_DIR / f"{MODEL_NAME}.onnx"
+    onnx_path = OUTPUT_DIR / f"{MODEL_NAME}.onnx"
     dummy_input = torch.rand(1, 16, 96)
 
     torch.onnx.export(
         inference_model,
         dummy_input,
-        str(output_path),
+        str(onnx_path),
         opset_version=18,
         input_names=["input"],
         output_names=[MODEL_NAME],
         dynamic_axes={"input": {0: "batch"}, MODEL_NAME: {0: "batch"}},
         dynamo=False,  # use legacy exporter (avoids emoji crash on Windows cp1252)
     )
+    print(f"\nONNX saved: {onnx_path}  ({onnx_path.stat().st_size / 1024:.0f} KB)")
 
-    size_kb = output_path.stat().st_size / 1024
-    print(f"\nModel saved: {output_path}  ({size_kb:.0f} KB)")
-    print(f"\nDeploy to Pi:")
-    print(f"  scp {output_path} pi@<PI_IP>:~/smart_assistant/oww_models/")
-    print(f"\nThen restart the client:")
-    print(f"  .venv/bin/python -m client.main")
-    print(f"\nTune OWW_THRESHOLD in client/config.py if you get false positives or misses.")
-    print(f"More real negatives in wakeword_samples/negative/ will help with accuracy.")
+    # ------------------------------------------------------------------
+    # Export to TFLite (required by wyoming-openwakeword)
+    # ------------------------------------------------------------------
+    # wyoming-openwakeword only loads .tflite (not .onnx). Filename convention
+    # is `<name>_v<version>.tflite`. The TFLite must have a *fixed* batch
+    # dimension of 1 — dynamic batch loads silently but inference returns
+    # nothing, a known issue with the TFLite runtime for dynamic shapes.
+    #
+    # Re-export ONNX with fixed batch=1, then convert with onnx2tf.
+    tflite_path = OUTPUT_DIR / f"{MODEL_NAME}_v0.1.tflite"
+    _export_tflite(inference_model, dummy_input, tflite_path)
+
+    print(f"\nDeploy to the Pi5 wyoming-satellite host:")
+    print(f"  scp {tflite_path} samda@10.0.30.5:/tmp/")
+    print(f"  # On the Pi5:")
+    print(f"  cp /tmp/{tflite_path.name} ~/wyoming-openwakeword/custom-models/")
+    print(f"  sudo systemctl restart wyoming-openwakeword wyoming-satellite")
+    print(f"\nTune --threshold / --trigger-level in the wyoming-openwakeword service")
+    print(f"file if you get false positives or misses. Threshold 0.5 with trigger-level 1")
+    print(f"is a reasonable starting point.")
+    print(f"More real negatives in wakeword/samples/negative/ will help with accuracy.")
+
+
+def _export_tflite(inference_model, dummy_input, tflite_path: Path) -> None:
+    """Convert the PyTorch inference model to TFLite via ONNX + onnx2tf.
+
+    Forces batch=1 on the intermediate ONNX to avoid a known dynamic-batch
+    inference failure in wyoming-openwakeword's TFLite runtime.
+    """
+    try:
+        import subprocess
+        import shutil
+        import sys
+        import tempfile
+        import torch
+    except ImportError as e:
+        print(f"  Skipping TFLite export: {e}")
+        return
+
+    # Check onnx2tf is importable as a module (works regardless of PATH).
+    try:
+        import onnx2tf  # noqa: F401
+    except ImportError:
+        print("\n  TFLite export skipped: onnx2tf not installed.")
+        print("  Install with: pip install onnx2tf tensorflow tf-keras onnxruntime")
+        return
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        fixed_onnx = tmp_path / "fixed_batch.onnx"
+
+        # Re-export ONNX with FIXED batch=1 (no dynamic_axes).
+        # onnx2tf --batch-size 1 alone doesn't always force input signature fixed.
+        torch.onnx.export(
+            inference_model,
+            dummy_input,
+            str(fixed_onnx),
+            opset_version=18,
+            input_names=["input"],
+            output_names=[MODEL_NAME],
+            # No dynamic_axes — batch is fixed at 1.
+            dynamo=False,
+        )
+
+        # Convert with onnx2tf. -b 1 forces batch=1.
+        # -kat input keeps the input tensor in its original (1, 16, 96) shape
+        # — without it, onnx2tf transposes to NHWC (1, 96, 16) and
+        # wyoming-openwakeword feeds frames in the wrong order, producing
+        # ~zero scores on real audio.
+        result = subprocess.run(
+            [sys.executable, "-m", "onnx2tf",
+             "-i", str(fixed_onnx), "-o", str(tmp_path / "out"),
+             "-b", "1", "-kat", "input"],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            print(f"  onnx2tf failed (exit {result.returncode}):")
+            print("--- stdout ---")
+            print(result.stdout[-2000:] if result.stdout else "(no stdout)")
+            print("--- stderr ---")
+            print(result.stderr[-2000:] if result.stderr else "(no stderr)")
+            return
+
+        # onnx2tf produces several variants — float32 is the one we want.
+        candidates = sorted((tmp_path / "out").glob("*_float32.tflite"))
+        if not candidates:
+            # Fallback: any .tflite
+            candidates = sorted((tmp_path / "out").glob("*.tflite"))
+        if not candidates:
+            print(f"  No .tflite files produced in {tmp_path / 'out'}")
+            return
+
+        shutil.copy(candidates[0], tflite_path)
+        print(f"TFLite saved: {tflite_path}  ({tflite_path.stat().st_size / 1024:.0f} KB)")
 
 
 if __name__ == "__main__":

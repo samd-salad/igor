@@ -18,8 +18,8 @@ import wave
 from pathlib import Path
 
 SAMPLE_RATE  = 16000
-CLIP_SECONDS = 3          # Must match CLIP_SAMPLES in train_wakeword.py
-OUTPUT_DIR   = Path("wakeword_samples/negative")
+CLIP_SECONDS = 3          # Must match CLIP_SAMPLES in train.py
+OUTPUT_DIR   = Path(__file__).parent / "samples" / "negative"
 CHUNK        = 1024
 
 
@@ -100,9 +100,9 @@ def main():
     print(f"\n\nDone. {new_clips} new clips saved ({count} total) → {OUTPUT_DIR}/")
     if count < 100:
         print(f"  Tip: aim for 100+ clips. Run again to record more.")
-    print(f"\nNext: copy wakeword_samples/ to PC and retrain:")
-    print(f"  scp -r pi@192.168.0.3:~/smart_assistant/wakeword_samples/ wakeword_samples/")
-    print(f"  python onnx_models/wakeword_creation/train_wakeword.py")
+    print(f"\nNext: copy samples to PC and retrain:")
+    print(f"  scp -r samda@10.0.30.5:~/igor/wakeword/samples/ wakeword/")
+    print(f"  python wakeword/train.py")
 
 
 if __name__ == "__main__":

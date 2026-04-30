@@ -21,12 +21,13 @@ data/*.migrated
 *.wav
 
 # Trained wake word models (personal voice data, large binaries)
-oww_models/*.onnx
-oww_models/*.pkl
+wakeword/models/*.onnx
+wakeword/models/*.tflite
+wakeword/models/*_tflite_out/
 
 # Wake word samples (personal voice recordings)
-wakeword_samples/positive/*.wav
-wakeword_samples/negative/*.wav
+wakeword/samples/positive/*.wav
+wakeword/samples/negative/*.wav
 
 # Speaker embeddings (biometric voice data)
 data/speaker_embeddings.json
@@ -39,11 +40,8 @@ data/google_tv_key.pem
 data/adbkey
 data/adbkey.pub
 
-# TTS model files (large binaries, downloaded by setup script)
-kokoro/*.onnx
-kokoro/*.bin
-voices/*.onnx
-voices/*.onnx.json
+# Local onnx2tf conversion venv (used for TFLite export)
+.onnx2tf-venv/
 
 # Environment files (may contain API keys)
 .env

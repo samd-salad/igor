@@ -1,0 +1,15 @@
+[Unit]
+Description=Wyoming OpenWakeWord (local wake detection)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=samda
+WorkingDirectory=/home/samda/wyoming-openwakeword
+ExecStart=/home/samda/wyoming-openwakeword/script/run --uri tcp://0.0.0.0:10400 --custom-model-dir /home/samda/wyoming-openwakeword/custom-models --preload-model igor --preload-model okay_nabu --threshold 0.5 --trigger-level 3 --debug
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

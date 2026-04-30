@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Slim text-only entry point — no Whisper, no Kokoro, no Pi callbacks.
-
-This is what HA calls into via /conversation/process. The audio path
-(server/main.py + Orchestrator + transcription/synthesis) is being
-deleted in a follow-up step; this file becomes the single entry point.
+"""Entry point for Igor — text-in/text-out conversation backend for HA.
 
 Run:
     ANTHROPIC_API_KEY=...  HA_TOKEN=...  python -m server.main_text
 """
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import sys
 from pathlib import Path
@@ -26,22 +23,39 @@ from server.config import (
     DATA_DIR,
     SERVER_HOST,
     SERVER_PORT,
-    TRUSTED_IPS,
 )
 from server.conversation import ConversationService
-from server.client_registry import ClientRegistry
 from server.ha_client import HAError, get_client
 from server.llm import LLM
 from server.rooms import RoomConfig, load_rooms
-from shared.utils import setup_logging
 
-logger = setup_logging("server", level=logging.INFO,
-                       log_file=str(DATA_DIR / "server.log"))
+
+def _setup_logging() -> logging.Logger:
+    """Configure root + server logger with a rotating file handler."""
+    log_file = DATA_DIR / "server.log"
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+    )
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+        sh = logging.StreamHandler()
+        sh.setFormatter(formatter)
+        root.addHandler(sh)
+    if not any(isinstance(h, RotatingFileHandler) for h in root.handlers):
+        fh = RotatingFileHandler(str(log_file), maxBytes=10*1024*1024,
+                                  backupCount=3, encoding='utf-8')
+        fh.setFormatter(formatter)
+        root.addHandler(fh)
+    return logging.getLogger("server")
+
+
+logger = _setup_logging()
 
 
 def _build_rooms_from_ha() -> dict[str, RoomConfig]:
-    """Synthesize one RoomConfig per HA area. Used when rooms.yaml is absent
-    or not migrated to the new shape."""
+    """Synthesize one RoomConfig per HA area."""
     try:
         areas = get_client().get_areas()
     except HAError as e:
@@ -52,11 +66,7 @@ def _build_rooms_from_ha() -> dict[str, RoomConfig]:
     rooms: dict[str, RoomConfig] = {}
     for area in areas:
         room_id = area.lower().replace(" ", "_")
-        rooms[room_id] = RoomConfig(
-            room_id=room_id,
-            display_name=area,
-            ha_area=area,
-        )
+        rooms[room_id] = RoomConfig(room_id=room_id, display_name=area, ha_area=area)
     logger.info(f"Synthesized {len(rooms)} room(s) from HA areas: {list(rooms.keys())}")
     return rooms
 
@@ -72,13 +82,9 @@ def main() -> None:
     brain.migrate_legacy_files(DATA_DIR)
 
     rooms_yaml = DATA_DIR / "rooms.yaml"
-    if rooms_yaml.exists():
-        rooms = load_rooms(rooms_yaml)
-    else:
-        rooms = _build_rooms_from_ha()
+    rooms = load_rooms(rooms_yaml) if rooms_yaml.exists() else _build_rooms_from_ha()
 
-    registry = ClientRegistry(trusted_ips=TRUSTED_IPS)
-    inject_dependencies(registry=registry)
+    inject_dependencies()
 
     llm = LLM()
     conversation_service = ConversationService(llm)
@@ -91,14 +97,9 @@ def main() -> None:
         ).start()
         logger.info("Initial memory consolidation triggered")
 
-    app = create_app(
-        orchestrator=None,
-        registry=registry,
-        rooms=rooms,
-        conversation_service=conversation_service,
-    )
+    app = create_app(rooms=rooms, conversation_service=conversation_service)
 
-    logger.info(f"Starting Igor (text-only) on {SERVER_HOST}:{SERVER_PORT}")
+    logger.info(f"Starting Igor on {SERVER_HOST}:{SERVER_PORT}")
     uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT, log_level="info", access_log=True)
 
 

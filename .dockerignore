@@ -22,15 +22,8 @@ data/beep_*.wav
 data/rooms.yaml
 data/speaker_embeddings.json
 
-# Audio / wakeword artifacts (being deleted in task 8 anyway)
-client/
-kokoro/
-oww_models/
-wakeword_samples/
-onnx_models/
-record_samples.py
-setup_client.sh
-setup_server.sh
+# Wakeword training artifacts — not needed in the server container
+wakeword/
 Screenshot*.png
 
 # Dev/editor cruft
@@ -45,6 +38,5 @@ Thumbs.db
 custom_components/
 
 # Docs/plans
-MIGRATION.md
 CLAUDE.md
-requirements-client.txt
+MEMORY_ROADMAP.md

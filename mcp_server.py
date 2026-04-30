@@ -27,44 +27,6 @@ logger = logging.getLogger("mcp_server")
 
 mcp = FastMCP("igor")
 
-# ---------------------------------------------------------------------------
-# Lazy-loaded heavy model singletons — avoids loading Whisper/Kokoro on every
-# MCP startup.  Each is initialized on first call to a tool that needs it.
-# ---------------------------------------------------------------------------
-_transcriber: Optional["Transcriber"] = None
-_synthesizer: Optional["Synthesizer"] = None
-
-
-def _get_transcriber():
-    """Return the shared Transcriber, loading the Whisper model on first call."""
-    global _transcriber
-    if _transcriber is None:
-        from server.transcription import Transcriber
-        _transcriber = Transcriber()
-        if not _transcriber.initialize():
-            _transcriber = None
-            raise RuntimeError("Failed to load Whisper model")
-        logger.info("Whisper model loaded (lazy init)")
-    return _transcriber
-
-
-def _get_synthesizer():
-    """Return the shared Synthesizer, loading Kokoro on first call."""
-    global _synthesizer
-    if _synthesizer is None:
-        from server.synthesis import Synthesizer
-        _synthesizer = Synthesizer()
-        if not _synthesizer.initialize():
-            _synthesizer = None
-            raise RuntimeError("Failed to load Kokoro TTS model")
-        # Pre-cache Tier 1 responses so cache-hit tests work
-        from server.intent_router import get_cacheable_responses
-        cacheable = list(get_cacheable_responses()) + ["Done.", "Didn't catch that."]
-        _synthesizer.pre_generate(cacheable)
-        logger.info("Kokoro TTS loaded (lazy init)")
-    return _synthesizer
-
-
 def _ensure_brain():
     """Initialize BrainStore if not already done (MCP server runs independently)."""
     from server.brain import get_brain, init_brain
@@ -182,119 +144,6 @@ def test_quality_gate(text: str, tv_playing: bool = False) -> str:
 
 
 @mcp.tool()
-def test_tts(text: str, use_streaming: bool = False) -> str:
-    """Synthesize text and return timing + audio metadata (no audio bytes).
-
-    Tests the TTS pipeline end-to-end: preprocessing, cache lookup, Kokoro
-    synthesis.  Reports whether a cache hit occurred, duration, byte size.
-
-    Args:
-        text: Text to synthesize
-        use_streaming: Use streaming synthesis (for long text comparison)
-    """
-    try:
-        synth = _get_synthesizer()
-    except RuntimeError as e:
-        return str(e)
-
-    t0 = time.perf_counter()
-    if use_streaming:
-        audio = synth.synthesize_fast(text)
-    else:
-        audio = synth.synthesize(text)
-    elapsed_ms = (time.perf_counter() - t0) * 1000
-
-    if audio is None:
-        return json.dumps({
-            "status": "error",
-            "text": text,
-            "error": "Synthesis returned None",
-        }, indent=2)
-
-    # Parse WAV header to get duration
-    import io, wave
-    with wave.open(io.BytesIO(audio)) as wf:
-        duration_s = wf.getnframes() / wf.getframerate()
-
-    return json.dumps({
-        "status": "ok",
-        "text": text,
-        "streaming": use_streaming,
-        "synthesis_ms": round(elapsed_ms, 1),
-        "audio_bytes": len(audio),
-        "duration_seconds": round(duration_s, 2),
-        "cache_hit": elapsed_ms < 5,  # cache hits are sub-millisecond
-    }, indent=2)
-
-
-@mcp.tool()
-def test_transcription(wav_path: str) -> str:
-    """Transcribe a WAV file and return text + confidence scores.
-
-    Runs Faster Whisper on the given file and returns per-segment details
-    including no_speech_prob and avg_logprob for debugging transcription
-    quality issues.
-
-    Args:
-        wav_path: Absolute path to a WAV file to transcribe
-    """
-    import os
-    if not os.path.isfile(wav_path):
-        return json.dumps({"error": f"File not found: {wav_path}"}, indent=2)
-
-    try:
-        transcriber = _get_transcriber()
-    except RuntimeError as e:
-        return str(e)
-
-    t0 = time.perf_counter()
-
-    # Run transcription with segment-level detail
-    try:
-        segments_raw, info = transcriber.model.transcribe(
-            wav_path,
-            beam_size=1,
-            language="en",
-            vad_filter=True,
-            condition_on_previous_text=False,
-            compression_ratio_threshold=2.4,
-            log_prob_threshold=-1.0,
-        )
-        segments = list(segments_raw)
-    except Exception as e:
-        return json.dumps({"error": f"Transcription failed: {e}"}, indent=2)
-
-    elapsed_ms = (time.perf_counter() - t0) * 1000
-
-    # Build per-segment detail
-    seg_details = []
-    for seg in segments:
-        seg_details.append({
-            "text": seg.text.strip(),
-            "start": round(seg.start, 2),
-            "end": round(seg.end, 2),
-            "avg_logprob": round(seg.avg_logprob, 3),
-            "no_speech_prob": round(seg.no_speech_prob, 3),
-            "would_drop": seg.no_speech_prob > 0.7 or seg.avg_logprob < -0.8,
-        })
-
-    # Apply the same filtering as production
-    filtered = [s for s in seg_details if not s["would_drop"]]
-    full_text = " ".join(s["text"] for s in filtered) if filtered else None
-
-    return json.dumps({
-        "status": "ok",
-        "transcription_ms": round(elapsed_ms, 1),
-        "text": full_text,
-        "total_segments": len(seg_details),
-        "kept_segments": len(filtered),
-        "dropped_segments": len(seg_details) - len(filtered),
-        "segments": seg_details,
-        "language_probability": round(info.language_probability, 3) if info else None,
-    }, indent=2)
-
-
-@mcp.tool()
 def test_pipeline(text: str, tv_playing: bool = False) -> str:
     """Run text through the full pipeline: quality gate -> intent router -> LLM -> TTS.
 
@@ -351,19 +200,6 @@ def test_pipeline(text: str, tv_playing: bool = False) -> str:
         timings["command_ms"] = round((time.perf_counter() - t0) * 1000, 2)
         stages.append({"stage": "command", "result": cmd_result})
 
-        # Stage 4 (Tier 1): TTS on the pre-baked response
-        t0 = time.perf_counter()
-        try:
-            synth = _get_synthesizer()
-            audio = synth.synthesize(tier1.response)
-            tts_ok = audio is not None
-            tts_bytes = len(audio) if audio else 0
-        except Exception:
-            tts_ok = False
-            tts_bytes = 0
-        timings["tts_ms"] = round((time.perf_counter() - t0) * 1000, 2)
-        stages.append({"stage": "tts", "ok": tts_ok, "bytes": tts_bytes})
-
         return json.dumps({
             "text": text,
             "tv_playing": tv_playing,
@@ -419,19 +255,6 @@ def test_pipeline(text: str, tv_playing: bool = False) -> str:
         "response": llm_text[:500] if llm_text else None,
         "commands_executed": llm_commands,
     })
-
-    # Stage 4 (Tier 2): TTS
-    t0 = time.perf_counter()
-    try:
-        synth = _get_synthesizer()
-        audio = synth.synthesize_fast(llm_text) if llm_text else None
-        tts_ok = audio is not None
-        tts_bytes = len(audio) if audio else 0
-    except Exception:
-        tts_ok = False
-        tts_bytes = 0
-    timings["tts_ms"] = round((time.perf_counter() - t0) * 1000, 2)
-    stages.append({"stage": "tts", "ok": tts_ok, "bytes": tts_bytes})
 
     return json.dumps({
         "text": text,
@@ -491,7 +314,6 @@ def run_benchmark(phrases: str = "") -> str:
             row["tier"] = "-"
             row["command"] = "-"
             row["response"] = "-"
-            row["tts_ms"] = "-"
         else:
             row["gate"] = "OK"
 
@@ -501,20 +323,10 @@ def run_benchmark(phrases: str = "") -> str:
                 row["tier"] = "Tier 1"
                 row["command"] = f"{match.command}({match.params})"
                 row["response"] = match.response
-
-                # TTS timing for the response
-                try:
-                    synth = _get_synthesizer()
-                    t0 = time.perf_counter()
-                    synth.synthesize(match.response)
-                    row["tts_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-                except Exception:
-                    row["tts_ms"] = "error"
             else:
                 row["tier"] = "Tier 2 (LLM)"
                 row["command"] = "-"
                 row["response"] = "-"
-                row["tts_ms"] = "-"
 
         results.append(row)
 
@@ -523,7 +335,7 @@ def run_benchmark(phrases: str = "") -> str:
     try:
         import csv
         write_header = not csv_path.exists()
-        fieldnames = ["timestamp", "phrase", "gate", "tier", "command", "response", "tts_ms"]
+        fieldnames = ["timestamp", "phrase", "gate", "tier", "command", "response"]
         with open(csv_path, "a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             if write_header:
@@ -537,10 +349,10 @@ def run_benchmark(phrases: str = "") -> str:
         csv_note = f"CSV write failed: {e}"
 
     # Format summary table
-    lines = [f"{'PHRASE':<35} {'GATE':<10} {'TIER':<15} {'TTS ms':<8}"]
-    lines.append("-" * 70)
+    lines = [f"{'PHRASE':<35} {'GATE':<10} {'TIER':<15}"]
+    lines.append("-" * 60)
     for r in results:
-        lines.append(f"{r['phrase']:<35} {r['gate']:<10} {r['tier']:<15} {str(r['tts_ms']):<8}")
+        lines.append(f"{r['phrase']:<35} {r['gate']:<10} {r['tier']:<15}")
     lines.append("")
     lines.append(csv_note)
 

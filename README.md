@@ -73,45 +73,38 @@ The wake word detector uses a custom-trained OpenWakeWord model. You need to rec
 ### Step 1 — Record positive samples (on the Pi)
 
 ```bash
-python record_samples.py
+python wakeword/record_samples.py
 ```
 
-Follow the prompts. Aim for **150+ samples** across different styles (volume, speed, distance, background noise). This takes about 15 minutes.
-
-Samples are saved to `wakeword_samples/positive/`.
+Follow the prompts. Aim for **150+ samples** across different styles (volume, speed, distance, background noise). Samples are saved to `wakeword/samples/positive/`.
 
 ### Step 2 — Transfer samples to PC
 
 ```powershell
-# On PC (PowerShell):
-scp -r user@<PI_IP>:~/smart_assistant/wakeword_samples/ wakeword_samples/
+scp -r samda@10.0.30.5:~/igor/wakeword/samples/ wakeword/
 ```
 
 ### Step 3 — Train the model (on PC)
 
 ```bash
-# One-time installs (CPU-only torch ~150 MB):
 pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install openwakeword
+pip install openwakeword onnx2tf tensorflow tf-keras onnxruntime
 
-python onnx_models/wakeword_creation/train_wakeword.py
+python wakeword/train.py
 ```
 
-Output: `oww_models/igor.onnx`
+Outputs: `wakeword/models/igor.onnx` and `wakeword/models/igor_v0.1.tflite`.
 
-The script uses synthetic negatives (noise/silence) by default. For fewer false positives in noisy rooms, record real background audio (TV, music, other speech) into `wakeword_samples/negative/*.wav` — the script picks them up automatically.
+The script uses synthetic negatives (noise/silence) by default. For fewer false positives, record real background audio into `wakeword/samples/negative/*.wav` — the script picks them up automatically.
 
 ### Step 4 — Deploy to Pi
 
 ```bash
-scp oww_models/igor.onnx pi@<PI_IP>:~/smart_assistant/oww_models/
+scp wakeword/models/igor_v0.1.tflite samda@10.0.30.5:~/wyoming-openwakeword/custom-models/
+ssh samda@10.0.30.5 sudo systemctl restart wyoming-openwakeword wyoming-satellite
 ```
 
-The client globs `oww_models/*.onnx` on startup — drop any `.onnx` file there and it becomes a wake word.
-
-### Adding more wake words
-
-Repeat the process with a different phrase. Name the output file accordingly (e.g. `stop.onnx`). Multiple models load simultaneously.
+wyoming-openwakeword loads `.tflite` only; the `.onnx` is kept for reference/future tooling.
 
 ---
 

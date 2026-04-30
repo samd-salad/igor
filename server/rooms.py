@@ -81,18 +81,10 @@ def load_rooms(yaml_path: Path) -> dict[str, RoomConfig]:
 
 
 def make_default_room() -> RoomConfig:
-    """Create a default room from current server/config.py constants."""
-    from server.config import SONOS_DEFAULT_ZONE, GOOGLE_TV_HOST, LIGHT_GROUPS
-
-    # Use living room light group if available
-    light_group = LIGHT_GROUPS.get('living room', [])
-
+    """Create a minimal default room. Actual device targeting is resolved
+    via HA areas (set ha_area in rooms.yaml or via the HA area lookup in
+    main_text.py's _build_rooms_from_ha)."""
     return RoomConfig(
         room_id='default',
-        display_name='Living Room',
-        sonos_zone=SONOS_DEFAULT_ZONE,
-        indicator_light=None,
-        tv_host=GOOGLE_TV_HOST if GOOGLE_TV_HOST and '0.X' not in GOOGLE_TV_HOST else None,
-        light_group=light_group,
-        default_volume_target='sonos',
+        display_name='Default',
     )

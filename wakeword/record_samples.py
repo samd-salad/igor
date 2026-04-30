@@ -2,7 +2,7 @@
 """Record wake word samples for OpenWakeWord training.
 
 Run on any machine with a microphone. Aim for 100+ samples across varied conditions.
-After recording, run train_wakeword.py on the PC to produce oww_models/igor.onnx.
+After recording, run wakeword/train.py on the PC to produce wakeword/models/igor.onnx.
 
 Usage:
     python record_samples.py                  # use default mic
@@ -23,8 +23,9 @@ import pyaudio
 
 SAMPLE_RATE = 16000
 DURATION = 2.0  # seconds -- say the phrase once after the beep
-POSITIVE_DIR = Path("wakeword_samples/positive")
-NEGATIVE_DIR = Path("wakeword_samples/negative")
+ROOT = Path(__file__).parent
+POSITIVE_DIR = ROOT / "samples" / "positive"
+NEGATIVE_DIR = ROOT / "samples" / "negative"
 GOAL = 150
 
 VARIATIONS = [
@@ -249,7 +250,7 @@ def main():
                 print(f"\n\nDone. {count} total {sample_type} samples in {output_dir}/")
                 if count < 50:
                     print(f"Warning: {count} samples is low. Aim for {GOAL}+ for good accuracy.")
-                print(f"\nNext: python onnx_models/wakeword_creation/train_wakeword.py")
+                print(f"\nNext: python wakeword/train.py")
                 break
 
         try:
@@ -263,7 +264,7 @@ def main():
         except KeyboardInterrupt:
             print(f"\n\nDone. {count} total {sample_type} samples in {output_dir}/")
             if is_negative:
-                print(f"\nNext: python onnx_models/wakeword_creation/train_wakeword.py")
+                print(f"\nNext: python wakeword/train.py")
             break
 
     p.terminate()

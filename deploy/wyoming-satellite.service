@@ -1,0 +1,15 @@
+[Unit]
+Description=Wyoming Satellite (Igor voice)
+Wants=network-online.target wyoming-openwakeword.service
+After=network-online.target wyoming-openwakeword.service
+
+[Service]
+Type=simple
+User=samda
+WorkingDirectory=/home/samda/wyoming-satellite
+ExecStart=/home/samda/wyoming-satellite/script/run --name 'Igor Satellite' --uri tcp://0.0.0.0:10700 --mic-command 'arecord -D plughw:CARD=CODEC,DEV=0 -r 16000 -c 1 -f S16_LE -t raw' --snd-command 'aplay -D plughw:CARD=CODEC,DEV=0 -r 22050 -c 1 -f S16_LE -t raw' --wake-uri tcp://127.0.0.1:10400 --wake-word-name igor --mic-auto-gain 0 --debug-recording-dir /home/samda/wakeword-debug
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
