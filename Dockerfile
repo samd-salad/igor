@@ -24,7 +24,6 @@ COPY requirements-server-text.txt ./
 RUN pip install -r requirements-server-text.txt
 
 COPY server ./server
-COPY shared ./shared
 COPY prompt.py ./
 
 # Data directory is a mount point — brain.json, logs, rooms.yaml live here.
