@@ -15,6 +15,7 @@ COGNITION_FORBIDDEN = {
     "requests",
     "sqlite3",
     "fastapi",
+    "mcp",
 }
 HA_IO_FORBIDDEN = {
     "server.external",
@@ -25,6 +26,7 @@ HA_IO_FORBIDDEN = {
     "anthropic",
     "requests",
     "sqlite3",
+    "mcp",
 }
 THIRD_PARTY_LOCKED_TO_EXTERNAL = {
     "anthropic": ("server/external/claude_adapter.py",),
@@ -32,6 +34,8 @@ THIRD_PARTY_LOCKED_TO_EXTERNAL = {
                   "server/external/sqlite_retrieval.py",
                   "server/external/_internal/db.py",
                   "server/external/_internal/brain_json_migration.py"),
+    "mcp":       ("server/external/_internal/mcp_session.py",
+                  "server/external/ha_mcp_executor.py"),
 }
 
 
