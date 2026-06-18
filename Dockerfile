@@ -24,12 +24,11 @@ COPY requirements-server-text.txt ./
 RUN pip install -r requirements-server-text.txt
 
 COPY server ./server
-COPY prompt.py ./
 
-# Data directory is a mount point — brain.json, logs, rooms.yaml live here.
+# Data directory is a mount point — brain.db lives here.
 RUN mkdir -p /app/data
 
 EXPOSE 8000
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["python", "-m", "server.main_text"]
+CMD ["python", "-m", "server.main"]

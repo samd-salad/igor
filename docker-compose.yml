@@ -31,6 +31,7 @@ services:
       SERVER_HOST:       "0.0.0.0"
       SERVER_PORT:       "8000"
       TZ:                "America/New_York"
+      BRAIN_DIR:         "/app/data"
     volumes:
       - igor_data:/app/data
     healthcheck:
