@@ -10,6 +10,12 @@
 
 **Build strategy:** New code lives alongside the existing `server/api.py` and `server/main_text.py`. The container stays deployable through Tasks 1-32. Cutover (Task 33) swaps the entry point. Cleanup (Task 34) removes the old modules.
 
+**Execution notes (added 2026-06-17 during executing-plans review):**
+
+1. **Task 22 wrapper inlining**: `QualityGate` and `IntentRouter` cannot lazy-import from `server/quality_gate.py` / `server/intent_router.py` since Task 33 deletes those files. When implementing Task 22, port the actual filter/route logic into the new modules directly instead of wrapping legacy.
+2. **Task 31 HAClient access**: composition root imports `get_ha_client` from `external/_internal/ha_client`. The runtime guard blocks that path. Re-export `get_client` from `server/external/__init__.py` so the composition root accesses HAClient via the public surface.
+3. **Windows venv**: substitute `.venv/Scripts/python.exe -m pytest` for `.venv/bin/pytest` and similar throughout. Same for pip and onnx2tf invocations.
+
 ---
 
 ## File Structure (created by this plan)
