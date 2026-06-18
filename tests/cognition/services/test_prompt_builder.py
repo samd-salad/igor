@@ -44,6 +44,14 @@ def test_system_prompt_includes_identity_narrative():
     assert "Sam loves dark roast coffee." in p
 
 
+def test_system_prompt_keeps_sardonic_personality():
+    """Igor's namesake. Don't accidentally sand off the personality."""
+    p = build_system_prompt("anything")
+    assert "sardonic" in p.lower()
+    assert "dark humor" in p.lower() or "existential" in p.lower()
+    assert "no groveling" in p.lower()
+
+
 def test_user_context_injects_current_time():
     ctx = build_user_context(_turn(), [], [])
     assert "<current_time>" in ctx
