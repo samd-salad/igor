@@ -12,7 +12,7 @@ def _check_caller() -> None:
         if (name
             and name != _OWN
             and not name.startswith(("importlib", "_frozen_importlib"))):
-            if not name.startswith(_PREFIX):
+            if not (name.startswith(_PREFIX) or name.startswith("tests.")):
                 raise ImportError(
                     f"server.ha_io._internal is private; "
                     f"importing from '{name}' is forbidden. "
