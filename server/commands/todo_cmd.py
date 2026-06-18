@@ -15,7 +15,7 @@ import logging
 from typing import Optional
 
 from .base import Command
-from server.ha_client import HAError, get_client
+from server.external import HAError, get_client
 
 logger = logging.getLogger(__name__)
 

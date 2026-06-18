@@ -20,7 +20,7 @@ from typing import Optional
 
 from .base import Command
 from ._utils import parse_amount, parse_direction_updown
-from server.ha_client import HAError, get_client
+from server.external import HAError, get_client
 
 logger = logging.getLogger(__name__)
 
