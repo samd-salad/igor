@@ -13,4 +13,5 @@ def map_result(result: ConversationResult,
         conversation_id=ha_conversation_id or f"igor-{int(time.time()*1000)}",
         end_conversation=result.end_conversation,
         commands_executed=result.commands_executed,
+        silent=result.silent,
     )

@@ -29,6 +29,7 @@ def _iso_to_dt(s: Optional[str]) -> Optional[datetime]:
 
 def _row_to_episode(row: sqlite3.Row) -> Episode:
     tcs = json.loads(row["tool_calls"]) if row["tool_calls"] else []
+    keys = row.keys()
     return Episode(
         episode_id=row["episode_id"],
         occurred_at=_iso_to_dt(row["occurred_at"]),
@@ -40,6 +41,7 @@ def _row_to_episode(row: sqlite3.Row) -> Episode:
         emotional_tone=row["emotional_tone"],
         summary=row["summary"],
         consolidated_at=_iso_to_dt(row["consolidated_at"]),
+        response_text=row["response_text"] if "response_text" in keys else None,
     )
 
 
@@ -67,8 +69,9 @@ class SqlitePersistence:
         self._conn.execute(
             """INSERT OR REPLACE INTO episodes
                (episode_id, occurred_at, speaker_id, participants, intent,
-                raw_utterance, tool_calls, emotional_tone, summary, consolidated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                raw_utterance, tool_calls, emotional_tone, summary,
+                consolidated_at, response_text)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 episode.episode_id,
                 _dt_to_iso(episode.occurred_at),
@@ -80,6 +83,7 @@ class SqlitePersistence:
                 episode.emotional_tone,
                 episode.summary,
                 _dt_to_iso(episode.consolidated_at) if episode.consolidated_at else None,
+                episode.response_text,
             ),
         )
 

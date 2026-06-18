@@ -1,4 +1,4 @@
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 from server.cognition.aggregates.episode import EpisodeStore
 from server.cognition.aggregates.identity import IdentityStore
 from server.cognition.aggregates.memory import MemoryStore
@@ -12,8 +12,14 @@ from server.external.system_clock import SystemClock
 
 
 class _StubLLM:
+    def __init__(self, text: str = "hi back"):
+        self._text = text
+        self.calls = 0
+
     def chat(self, system_prompt, user_text, tool_schemas, tool_executor, history=None):
-        return ChatResult(text="hi back", commands_executed=[], input_tokens=10, output_tokens=2)
+        self.calls += 1
+        return ChatResult(text=self._text, commands_executed=[],
+                          input_tokens=10, output_tokens=2)
 
 
 class _StubExecutor:
@@ -23,20 +29,28 @@ class _StubExecutor:
         return ""
 
 
-def _turn(text: str, correlation_id: str = "t-1") -> VoiceTurn:
+class _FixedClock:
+    def __init__(self, t: datetime):
+        self._t = t
+    def now(self) -> datetime:
+        return self._t
+
+
+def _turn(text: str, correlation_id: str = "t-1",
+          at: datetime = datetime(2026, 1, 1, tzinfo=UTC)) -> VoiceTurn:
     return VoiceTurn(
-        correlation_id=correlation_id, started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        correlation_id=correlation_id, started_at=at,
         device_id=None, room=RoomConfig("default", "Default"),
         input_text=text, speaker_id=None, metadata={},
     )
 
 
-def _build_conversation(sp):
+def _build_conversation(sp, llm=None, clock=None):
     return Conversation(
         memory=MemoryStore(sp), episodes=EpisodeStore(sp),
         identity=IdentityStore(sp), user_state=UserState(sp),
-        retrieval=TagRetrieval(sp), llm=_StubLLM(),
-        tools=_StubExecutor(), clock=SystemClock(),
+        retrieval=TagRetrieval(sp), llm=llm or _StubLLM(),
+        tools=_StubExecutor(), clock=clock or SystemClock(),
     )
 
 
@@ -57,3 +71,85 @@ def test_conversation_short_circuits_tier1(tmp_path):
     result = conv.process(_turn("pause", correlation_id="t-pause"))
     assert result.response_text == "Paused."
     assert result.commands_executed == ["play_pause"]
+
+
+def test_conversation_persists_response_text_on_llm_turn(tmp_path):
+    """Igor's literal response must be queryable from brain.db after the turn —
+    otherwise the user has no way to audit what he said when something goes weird."""
+    sp = SqlitePersistence(tmp_path / "brain.db")
+    conv = _build_conversation(sp, llm=_StubLLM(text="something witty"))
+    conv.process(_turn("good morning igor", correlation_id="t-morn"))
+    ep = sp.load_episode("t-morn")
+    assert ep is not None
+    assert ep.response_text == "something witty"
+
+
+def test_conversation_persists_response_text_on_tier1_turn(tmp_path):
+    sp = SqlitePersistence(tmp_path / "brain.db")
+    conv = _build_conversation(sp)
+    conv.process(_turn("pause", correlation_id="t-pause2"))
+    ep = sp.load_episode("t-pause2")
+    assert ep is not None
+    assert ep.response_text == "Paused."
+
+
+def test_conversation_suppresses_self_echo_within_window(tmp_path):
+    """When the transcript arriving moments after Igor speaks overlaps
+    heavily with his last response, treat it as the mic catching his own
+    voice. Stay silent — don't run the LLM, don't TTS back."""
+    sp = SqlitePersistence(tmp_path / "brain.db")
+    igor_response = "Sorry, Igor is unreachable right now"
+    llm = _StubLLM(text=igor_response)
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    conv = _build_conversation(sp, llm=llm, clock=_FixedClock(t0))
+
+    first = conv.process(_turn("what time is it", correlation_id="t-1", at=t0))
+    assert first.silent is False
+    assert first.response_text == igor_response
+    assert llm.calls == 1
+
+    # Mic picks up Igor's own response ~2s later
+    echo = conv.process(_turn(
+        "sorry igor is unreachable right now",
+        correlation_id="t-echo",
+        at=t0 + timedelta(seconds=2),
+    ))
+    assert echo.silent is True
+    assert echo.response_text == ""
+    assert llm.calls == 1, "LLM should NOT be called when echo detected"
+
+
+def test_conversation_does_not_suppress_after_echo_window(tmp_path):
+    """A real user reply that happens to share words with Igor's last
+    response, but arrives after the echo window, must NOT be suppressed."""
+    sp = SqlitePersistence(tmp_path / "brain.db")
+    llm = _StubLLM(text="the kitchen lights are dim and warm tonight")
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    conv = _build_conversation(sp, llm=llm, clock=_FixedClock(t0))
+
+    conv.process(_turn("how are the kitchen lights doing", correlation_id="t-a", at=t0))
+    later = conv.process(_turn(
+        "the kitchen lights are too dim and warm tonight",
+        correlation_id="t-b",
+        at=t0 + timedelta(seconds=30),
+    ))
+    assert later.silent is False
+    assert llm.calls == 2
+
+
+def test_conversation_does_not_suppress_unrelated_input(tmp_path):
+    """A reply within the echo window but with low token overlap is a real
+    user turn, not echo — must go through normally."""
+    sp = SqlitePersistence(tmp_path / "brain.db")
+    llm = _StubLLM(text="the kitchen lights are dim and warm tonight")
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    conv = _build_conversation(sp, llm=llm, clock=_FixedClock(t0))
+
+    conv.process(_turn("how are the kitchen lights doing", correlation_id="t-a", at=t0))
+    reply = conv.process(_turn(
+        "what's the weather forecast",
+        correlation_id="t-b",
+        at=t0 + timedelta(seconds=3),
+    ))
+    assert reply.silent is False
+    assert llm.calls == 2

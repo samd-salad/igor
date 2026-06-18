@@ -15,3 +15,4 @@ class ConversationResponse(BaseModel):
     conversation_id: str
     end_conversation: bool
     commands_executed: list[str]
+    silent: bool = False                # HA integration skips TTS when true

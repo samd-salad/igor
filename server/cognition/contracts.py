@@ -46,11 +46,14 @@ class VoiceTurn:
 
 @dataclass(frozen=True)
 class ConversationResult:
-    """Result of Conversation.process(turn). Returned to ha_io for mapping back to HA."""
+    """Result of Conversation.process(turn). Returned to ha_io for mapping back to HA.
+    `silent=True` signals the HA integration to skip TTS — used when Conversation
+    detects its own voice echoing back through the mic."""
     correlation_id: str
     response_text: str
     commands_executed: list[str]
     end_conversation: bool
+    silent: bool = False
 
 
 # ---------- Memory aggregate entities ----------
@@ -86,8 +89,9 @@ class Episode:
     raw_utterance: str
     tool_calls: list[ToolCallRecord]
     emotional_tone: Optional[str]
-    summary: Optional[str]
+    summary: Optional[str]                     # LLM-generated <= 12 word paraphrase
     consolidated_at: Optional[datetime]
+    response_text: Optional[str] = None        # what Igor said back, verbatim
 
 
 # ---------- Identity aggregate sub-collection ----------

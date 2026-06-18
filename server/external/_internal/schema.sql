@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS episodes (
     tool_calls          TEXT,
     emotional_tone      TEXT,
     summary             TEXT,
-    consolidated_at     TEXT
+    consolidated_at     TEXT,
+    response_text       TEXT
 );
 CREATE INDEX IF NOT EXISTS episodes_unconsolidated
     ON episodes(occurred_at) WHERE consolidated_at IS NULL;

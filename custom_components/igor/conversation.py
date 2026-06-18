@@ -77,7 +77,8 @@ class IgorConversationEntity(
             "language": user_input.language,
         }
 
-        speech: str
+        speech: str = ""
+        silent = False
         end_conversation = True
         conv_id: str | None = user_input.conversation_id
 
@@ -96,7 +97,12 @@ class IgorConversationEntity(
                     speech = "Sorry, Igor is unreachable right now."
                 else:
                     data = await resp.json()
-                    speech = data.get("response") or "(no response)"
+                    silent = bool(data.get("silent", False))
+                    if silent:
+                        _LOGGER.debug(
+                            "Igor signaled silent (echo suppression); skipping TTS"
+                        )
+                    speech = data.get("response") or ("" if silent else "(no response)")
                     end_conversation = bool(data.get("end_conversation", True))
                     conv_id = data.get("conversation_id") or conv_id
         except Exception as err:  # noqa: BLE001
@@ -104,7 +110,8 @@ class IgorConversationEntity(
             speech = "Sorry, Igor is unreachable right now."
 
         response = intent.IntentResponse(language=user_input.language)
-        response.async_set_speech(speech)
+        if not silent:
+            response.async_set_speech(speech)
         return conversation.ConversationResult(
             response=response,
             conversation_id=conv_id,

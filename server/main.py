@@ -59,13 +59,14 @@ def build():
     identity = IdentityStore(persistence)
     user_state = UserState(persistence)
 
-    conversation = Conversation(
-        memory=memory, episodes=episodes, identity=identity, user_state=user_state,
-        retrieval=retrieval, llm=llm, tools=tools, clock=clock,
-    )
     summarizer = SessionSummarizer(episodes=episodes, memory=memory,
                                    llm=llm, clock=clock)
     summarizer.start()
+    conversation = Conversation(
+        memory=memory, episodes=episodes, identity=identity, user_state=user_state,
+        retrieval=retrieval, llm=llm, tools=tools, clock=clock,
+        summarizer=summarizer,
+    )
     consolidator = Consolidator(
         memory=memory, episodes=episodes, identity=identity,
         llm=llm, clock=clock,
