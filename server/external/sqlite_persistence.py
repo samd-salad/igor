@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Optional
 
@@ -13,11 +13,18 @@ from server.external._internal.db import open_db
 
 
 def _dt_to_iso(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
     return dt.isoformat()
 
 
 def _iso_to_dt(s: Optional[str]) -> Optional[datetime]:
-    return datetime.fromisoformat(s) if s else None
+    if not s:
+        return None
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
 
 
 def _row_to_episode(row: sqlite3.Row) -> Episode:
