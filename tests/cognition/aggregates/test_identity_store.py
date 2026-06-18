@@ -21,5 +21,5 @@ def test_log_reflection(tmp_path):
     ids = IdentityStore(SqlitePersistence(tmp_path / "brain.db"))
     ids.log_reflection("preambles too long",
                        at=datetime(2026, 1, 1, tzinfo=UTC),
-                       source_episode_id="ep-1")
+                       source_episode_id=None)
     assert any("preambles" in r.note for r in ids.list_recent_reflections(5))
