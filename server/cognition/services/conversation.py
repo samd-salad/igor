@@ -69,7 +69,7 @@ class Conversation:
                 end_conversation=True,
             )
 
-        relevant = self._retrieval.query(turn, k=10)
+        relevant = self._retrieval.query(turn, k=3)
         recent_eps = self._episodes.get_recent(5)
         system_prompt = build_system_prompt(self._identity.get_narrative())
         user_context = build_user_context(turn, relevant, recent_eps)
