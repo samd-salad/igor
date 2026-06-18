@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,7 @@ def _content_to_text(content_blocks: list[Any]) -> str:
 
 async def fetch_tool_catalog(url: str, token: str) -> list[McpTool]:
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    async with streamablehttp_client(url, headers=headers) as (read, write, _):
+    async with streamable_http_client(url, headers=headers) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.list_tools()
@@ -44,7 +44,7 @@ async def fetch_tool_catalog(url: str, token: str) -> list[McpTool]:
 
 async def invoke_tool(url: str, token: str, name: str, arguments: dict) -> str:
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    async with streamablehttp_client(url, headers=headers) as (read, write, _):
+    async with streamable_http_client(url, headers=headers) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(name=name, arguments=arguments)

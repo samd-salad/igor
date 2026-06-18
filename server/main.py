@@ -13,12 +13,16 @@ from server.cognition.services.conversation import Conversation
 from server.cognition.services.consolidator import Consolidator
 from server.cognition.services.session_summarizer import SessionSummarizer
 from server.external import get_client as get_ha_client
+from server.external._internal.async_runner import AsyncRunner
 from server.external._internal.brain_json_migration import migrate_brain_json_if_needed
 from server.external.claude_adapter import ClaudeAdapter
-from server.external.ha_rest_adapter import HARestToolExecutor
+from server.external.composite_executor import CompositeToolExecutor
+from server.external.ha_mcp_executor import HAMCPToolExecutor
+from server.external.igor_native_tools import build_native_registry
 from server.external.sqlite_persistence import SqlitePersistence
 from server.external.sqlite_retrieval import TagRetrieval
 from server.external.system_clock import SystemClock
+from server.external.weather_open_meteo import OpenMeteoWeather
 from server.ha_io.api import build_app
 
 logger = logging.getLogger(__name__)
@@ -52,12 +56,25 @@ def build():
     retrieval = TagRetrieval(persistence)
     llm = ClaudeAdapter()
     clock = SystemClock()
-    tools = HARestToolExecutor()
 
     memory = MemoryStore(persistence)
     episodes = EpisodeStore(persistence)
     identity = IdentityStore(persistence)
     user_state = UserState(persistence)
+
+    ha_url = os.environ.get("HA_URL", "http://10.0.40.5:8123").rstrip("/")
+    ha_token = os.environ.get("HA_TOKEN", "")
+    mcp_url = f"{ha_url}/api/mcp"
+    default_location = os.environ.get("DEFAULT_LOCATION", "Arlington, VA")
+
+    async_runner = AsyncRunner()
+    weather = OpenMeteoWeather()
+    native_tools = build_native_registry(
+        memory=memory, user_state=user_state,
+        weather=weather, default_location=default_location,
+    )
+    ha_tools = HAMCPToolExecutor(mcp_url, ha_token, async_runner)
+    tools = CompositeToolExecutor(native_tools, ha_tools)
 
     summarizer = SessionSummarizer(episodes=episodes, memory=memory,
                                    llm=llm, clock=clock)
