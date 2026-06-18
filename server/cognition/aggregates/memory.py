@@ -39,5 +39,14 @@ class MemoryStore:
     def find_fact(self, category: str, key: str) -> Optional[Fact]:
         return self._p.find_fact(category, key)
 
+    def forget_fact(self, category: str, key: str, now: datetime) -> bool:
+        """Invalidate the active fact at (category, key). Returns whether
+        anything was forgotten (False if no such active fact)."""
+        existing = self._p.find_fact(category, key)
+        if existing is None:
+            return False
+        self._p.invalidate_fact(existing.fact_id, now)
+        return True
+
     def list_active(self) -> list[Fact]:
         return self._p.list_active_facts()
