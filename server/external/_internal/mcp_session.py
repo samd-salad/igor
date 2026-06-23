@@ -2,9 +2,11 @@
 third-party `mcp` import doesn't leak to siblings. Used by HAMCPToolExecutor
 behind AsyncRunner."""
 from __future__ import annotations
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
@@ -26,28 +28,35 @@ def _content_to_text(content_blocks: list[Any]) -> str:
     return "".join(parts)
 
 
-async def fetch_tool_catalog(url: str, token: str) -> list[McpTool]:
+@asynccontextmanager
+async def _session(url: str, token: str):
+    """Open a ClientSession to `url` with Bearer auth carried by a dedicated
+    httpx client. New SDK (1.x) wants headers on the httpx client, not on
+    streamable_http_client itself."""
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    async with streamable_http_client(url, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            result = await session.list_tools()
-            return [
-                McpTool(
-                    name=t.name,
-                    description=t.description or "",
-                    input_schema=t.inputSchema or {"type": "object", "properties": {}},
-                )
-                for t in result.tools
-            ]
+    async with httpx.AsyncClient(headers=headers) as http_client:
+        async with streamable_http_client(url, http_client=http_client) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                yield session
+
+
+async def fetch_tool_catalog(url: str, token: str) -> list[McpTool]:
+    async with _session(url, token) as session:
+        result = await session.list_tools()
+        return [
+            McpTool(
+                name=t.name,
+                description=t.description or "",
+                input_schema=t.inputSchema or {"type": "object", "properties": {}},
+            )
+            for t in result.tools
+        ]
 
 
 async def invoke_tool(url: str, token: str, name: str, arguments: dict) -> str:
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    async with streamable_http_client(url, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            result = await session.call_tool(name=name, arguments=arguments)
-            if result.isError:
-                return f"Error from HA: {_content_to_text(result.content)}"
-            return _content_to_text(result.content) or "(no output)"
+    async with _session(url, token) as session:
+        result = await session.call_tool(name=name, arguments=arguments)
+        if result.isError:
+            return f"Error from HA: {_content_to_text(result.content)}"
+        return _content_to_text(result.content) or "(no output)"
