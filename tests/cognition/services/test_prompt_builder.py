@@ -52,6 +52,32 @@ def test_system_prompt_keeps_sardonic_personality():
     assert "no groveling" in p.lower()
 
 
+def test_system_prompt_forbids_follow_up_questions():
+    """The 'gaming, or just awake?' kind of probe reads as nagging."""
+    p = build_system_prompt("anything")
+    assert "no follow-up questions" in p.lower() or \
+           "don't probe" in p.lower() or \
+           "don't ask back" in p.lower()
+
+
+def test_system_prompt_softens_time_framing():
+    """At 2 AM Friday, the user often thinks Thursday night. Don't lead
+    with the day."""
+    p = build_system_prompt("anything")
+    lowered = p.lower()
+    assert "day" in lowered
+    assert "thursday" in lowered or "friday" in lowered or "day-of-week" in lowered
+
+
+def test_system_prompt_has_ambient_speech_defense():
+    """When the mic catches TV/podcast/other-conversation audio, Claude
+    must have a way to elect silence."""
+    p = build_system_prompt("anything")
+    assert "<ambient_speech>" in p
+    assert "[silent]" in p
+    assert "tv" in p.lower() or "podcast" in p.lower() or "music" in p.lower()
+
+
 def test_user_context_injects_current_time():
     ctx = build_user_context(_turn(), [], [])
     assert "<current_time>" in ctx

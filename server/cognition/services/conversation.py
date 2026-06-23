@@ -26,10 +26,18 @@ logger = logging.getLogger(__name__)
 _ECHO_WINDOW_SECS = 8.0
 _ECHO_OVERLAP_THRESHOLD = 0.5
 _TOKEN_RE = re.compile(r"[a-z0-9']+")
+_SILENT_SENTINEL_RE = re.compile(r"^\s*\[silent\]\s*\.?\s*$", re.IGNORECASE)
 
 
 def _token_set(s: str) -> set[str]:
     return set(_TOKEN_RE.findall(s.lower()))
+
+
+def _is_silent_sentinel(text: str) -> bool:
+    """Claude returns [silent] when it judges the input as ambient room
+    audio not addressed to Igor. Permissive matcher — allows surrounding
+    whitespace and a trailing period (TTS-style)."""
+    return bool(_SILENT_SENTINEL_RE.match(text or ""))
 
 
 class Conversation:
@@ -120,6 +128,17 @@ class Conversation:
             tool_schemas=self._tools.list_schemas(),
             tool_executor=_exec,
         )
+
+        if _is_silent_sentinel(chat.text):
+            logger.info("LLM marked input as ambient; staying silent")
+            self._persist_episode(turn, "", tool_results_log, intent="ambient_silent")
+            return ConversationResult(
+                correlation_id=turn.correlation_id,
+                response_text="",
+                commands_executed=chat.commands_executed,
+                end_conversation=True,
+                silent=True,
+            )
 
         self._persist_episode(turn, chat.text, tool_results_log, intent="llm")
         result = ConversationResult(

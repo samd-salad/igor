@@ -153,3 +153,42 @@ def test_conversation_does_not_suppress_unrelated_input(tmp_path):
     ))
     assert reply.silent is False
     assert llm.calls == 2
+
+
+def test_conversation_stays_silent_when_llm_returns_ambient_sentinel(tmp_path):
+    """Claude returns '[silent]' when it judges the transcript as ambient
+    room audio. Conversation must mark the result silent and store an
+    ambient_silent episode — no echo, no TTS, no follow-up cascade."""
+    sp = SqlitePersistence(tmp_path / "brain.db")
+    llm = _StubLLM(text="[silent]")
+    conv = _build_conversation(sp, llm=llm)
+
+    result = conv.process(_turn("they don't rouse me sexually",
+                                correlation_id="t-amb"))
+    assert result.silent is True
+    assert result.response_text == ""
+    ep = sp.load_episode("t-amb")
+    assert ep is not None
+    assert ep.intent == "ambient_silent"
+
+
+def test_conversation_silent_sentinel_matcher_is_tolerant_of_whitespace(tmp_path):
+    """Whitespace and TTS-style trailing period must still trigger silence —
+    Claude won't always return the exact 7-character string."""
+    sp = SqlitePersistence(tmp_path / "brain.db")
+    for variant in ("[silent]", "  [silent]  ", "[silent].", "[Silent]"):
+        llm = _StubLLM(text=variant)
+        conv = _build_conversation(sp, llm=llm)
+        result = conv.process(_turn("come on come on", correlation_id=f"t-{variant[:3]}"))
+        assert result.silent is True, f"variant {variant!r} did not trigger silence"
+
+
+def test_conversation_does_not_silence_real_responses_containing_silent_word(tmp_path):
+    """The matcher must NOT trigger on natural responses that happen to
+    contain the word 'silent' (e.g. 'I'll keep silent about that.')."""
+    sp = SqlitePersistence(tmp_path / "brain.db")
+    llm = _StubLLM(text="I'll keep silent about that.")
+    conv = _build_conversation(sp, llm=llm)
+    result = conv.process(_turn("don't mention dad's birthday", correlation_id="t-keep"))
+    assert result.silent is False
+    assert "silent" in result.response_text.lower()
