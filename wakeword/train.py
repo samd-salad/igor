@@ -27,10 +27,21 @@ Negative samples:
 """
 
 import sys
-import wave
 from pathlib import Path
 
 import numpy as np
+
+from wakeword._features import embed_clip
+from wakeword._audio import (
+    load_wav, normalize_peak, trim_trailing_silence,
+    left_pad_or_trim,
+)
+from wakeword._augmentation import (
+    apply_rir, mix_with_background, random_snr_db, generate_synthetic_rirs,
+)
+from wakeword._dataset import (
+    build_positive_window, build_negative_windows, WINDOW_FRAMES,
+)
 
 ROOT        = Path(__file__).parent.parent
 POSITIVE_DIR = ROOT / "wakeword" / "samples" / "positive"
@@ -76,32 +87,6 @@ def _download_backbone_models():
 # Audio helpers
 # ---------------------------------------------------------------------------
 
-def load_wav(path: Path) -> np.ndarray:
-    """Load a 16 kHz mono WAV file as int16 numpy array (raw PCM)."""
-    with wave.open(str(path), "rb") as wf:
-        sr = wf.getframerate()
-        ch = wf.getnchannels()
-        if sr != SAMPLE_RATE:
-            raise ValueError(f"Expected 16 kHz, got {sr} Hz")
-        if ch != 1:
-            raise ValueError(f"Expected mono, got {ch} channels")
-        frames = wf.readframes(wf.getnframes())
-    return np.frombuffer(frames, dtype=np.int16).copy()
-
-
-def normalize_peak(audio: np.ndarray, target_peak: int = 16000) -> np.ndarray:
-    """Normalize audio to a consistent peak amplitude.
-
-    Makes the model amplitude-invariant so it works across mics with
-    different gain levels (e.g. Pi mic at peak ~20000 vs PC BlackShark at ~3000).
-    """
-    peak = int(np.max(np.abs(audio)))
-    if peak < 10:
-        return audio  # Digital silence — don't amplify
-    gain = min(target_peak / peak, 1000.0)
-    return np.clip(audio.astype(np.float32) * gain, -32768, 32767).astype(np.int16)
-
-
 def pad_or_trim(audio: np.ndarray, length: int) -> np.ndarray:
     """Right-pad with silence (for negatives — silence at end is fine)."""
     if len(audio) >= length:
@@ -109,60 +94,15 @@ def pad_or_trim(audio: np.ndarray, length: int) -> np.ndarray:
     return np.pad(audio, (0, length - len(audio))).astype(audio.dtype)
 
 
-def left_pad_or_trim(audio: np.ndarray, length: int) -> np.ndarray:
-    """Left-pad with silence (for positives — keeps wake word at the END of
-    the clip, matching how wyoming-openwakeword sees rolling buffer at runtime:
-    the most-recent N frames are the inference window. If the wake word is at
-    the start of training clips and we right-pad, the model learns 'silence
-    after wake word = positive' which causes phantom fires on cold start)."""
-    if len(audio) >= length:
-        return audio[-length:]
-    return np.pad(audio, (length - len(audio), 0)).astype(audio.dtype)
-
-
-def trim_trailing_silence(audio: np.ndarray, threshold: int = 250,
-                          keep_tail_samples: int = 1600) -> np.ndarray:
-    """Strip silence after the last energetic sample.
-
-    record_samples.py records 2 s; the user says "Igor" early then leaves
-    silence at the tail. Trimming that silence before left-padding ensures
-    the wake word actually lands at the end of the 3-sec training clip, so
-    "last K windows" labeling captures the wake word.
-
-    Keeps `keep_tail_samples` (~100 ms) after the last energetic sample so
-    the final syllable doesn't get clipped.
-    """
-    abs_audio = np.abs(audio)
-    nonzero = np.where(abs_audio > threshold)[0]
-    if len(nonzero) == 0:
-        return audio  # all silence — leave as-is (will be discarded later)
-    last_real = nonzero[-1]
-    end = min(len(audio), last_real + keep_tail_samples)
-    return audio[:end]
-
-
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
-    wav_files = sorted(POSITIVE_DIR.glob("*.wav"))
-    if not wav_files:
-        print(f"No WAV files found in {POSITIVE_DIR}/")
-        print("Record samples first: python record_samples.py  (on the Pi)")
-        sys.exit(1)
-
-    print(f"Found {len(wav_files)} positive samples.")
-    if len(wav_files) < 50:
-        print(f"  Warning: {len(wav_files)} is low — aim for 100+ for reliable detection.")
-
     # Check dependencies
     try:
         import torch
         import torch.nn as nn
-        from pyopen_wakeword import OpenWakeWordFeatures
     except ImportError as e:
         print(f"\nMissing dependency: {e}")
         print("Install with:")
@@ -172,129 +112,104 @@ def main():
 
     OUTPUT_DIR.mkdir(exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # Load positive clips — LEFT-PADDED so the wake word lands at the end
-    # of the 3-sec clip (matches wyoming-openwakeword's rolling-buffer
-    # inference: it sees the most recent ~370ms as the classifier window).
-    # Right-padding here is what trained the "silence-prefix = positive"
-    # bug that caused phantom fires at session start.
-    # ------------------------------------------------------------------
-    print("\nLoading positive clips (trim trailing silence, peak-normalize, left-pad)...")
-    pos_audio = []
-    for path in wav_files:
+    # Load positive clips from both real recordings and Piper synthesis.
+    POSITIVE_SYNTH_DIR = ROOT / "wakeword" / "samples" / "positive_synth"
+    all_pos_files = sorted(list(POSITIVE_DIR.glob("*.wav")))
+    if POSITIVE_SYNTH_DIR.exists():
+        all_pos_files += sorted(POSITIVE_SYNTH_DIR.glob("*.wav"))
+    if not all_pos_files:
+        print(f"No positive WAVs found in {POSITIVE_DIR}/ or {POSITIVE_SYNTH_DIR}/.")
+        sys.exit(1)
+    print(f"\nLoading {len(all_pos_files)} positive clips "
+          f"(real + synthetic), trim+normalize+left-pad to {CLIP_SAMPLES//SAMPLE_RATE}s...")
+
+    pos_audio_raw = []
+    for path in all_pos_files:
         try:
             raw = load_wav(path)
             trimmed = trim_trailing_silence(raw)
             audio = normalize_peak(left_pad_or_trim(trimmed, CLIP_SAMPLES))
-            pos_audio.append(audio)
+            pos_audio_raw.append(audio)
         except Exception as e:
             print(f"  Skipping {path.name}: {e}")
-
-    if not pos_audio:
-        print("No valid clips loaded. Check that files are 16 kHz mono WAV.")
+    if not pos_audio_raw:
+        print("No valid positive clips loaded.")
         sys.exit(1)
+    pos_audio_raw = np.stack(pos_audio_raw)
+    print(f"  Loaded {len(pos_audio_raw)} positive clips.")
 
-    pos_audio = np.stack(pos_audio)   # (N, samples)
-    n_pos = len(pos_audio)
+    # ----- Augmentation -----
+    # RIR convolution (50% probability per positive) — adds room acoustics.
+    # SNR-mix with a random real-negative background (75% probability) at
+    # 0-15 dB SNR — teaches the model to recognize the word over backgrounds.
+    print("Generating synthetic RIRs (30 rooms)...")
+    aug_rng = np.random.default_rng(123)
+    rirs = generate_synthetic_rirs(30, aug_rng)
+    print(f"  {len(rirs)} RIRs generated.")
 
-    # ------------------------------------------------------------------
-    # Load real negatives only
-    # ------------------------------------------------------------------
-    # Real negatives only. Synthetic Gaussian-noise / sine-tone negatives
-    # are NOT used — they don't represent the actual mic-noise-floor
-    # distribution and training on them taught the model to phantom-fire
-    # on quiet rooms. Reference workflow (dscripka) uses RIR + SNR-mixed
-    # backgrounds instead (see Tasks 6, 7).
+    # Need backgrounds for SNR mixing — load negatives now so we can mix
     if NEGATIVE_DIR.exists():
-        neg_files = sorted(NEGATIVE_DIR.glob("*.wav"))
+        neg_paths = sorted(NEGATIVE_DIR.glob("*.wav"))
     else:
-        neg_files = []
-    if len(neg_files) < 100:
-        print(f"ERROR: need at least 100 real negative clips in {NEGATIVE_DIR}/,"
-              f" found {len(neg_files)}.")
-        print("Record more on the Pi: python3 wakeword/record_negatives.py")
+        neg_paths = []
+    if len(neg_paths) < 100:
+        print(f"ERROR: need >= 100 real negative clips in {NEGATIVE_DIR}/, "
+              f"found {len(neg_paths)}.")
         sys.exit(1)
-    print(f"Loading {len(neg_files)} real negative clips...")
+    print(f"Loading {len(neg_paths)} real negative clips for backgrounds and training...")
     neg_audio_list = []
-    for path in neg_files:
+    for path in neg_paths:
         try:
             audio = normalize_peak(pad_or_trim(load_wav(path), CLIP_SAMPLES))
             neg_audio_list.append(audio)
         except Exception as e:
             print(f"  Skipping {path.name}: {e}")
-    neg_audio = np.vstack(neg_audio_list) if neg_audio_list else np.empty(
-        (0, CLIP_SAMPLES), dtype=np.float32
+    neg_audio = np.stack(neg_audio_list) if neg_audio_list else np.empty(
+        (0, CLIP_SAMPLES), dtype=np.int16
     )
+    print(f"  {len(neg_audio)} negatives loaded.")
 
-    # ------------------------------------------------------------------
-    # Extract embeddings via pyopen_wakeword's feature pipeline
-    # ------------------------------------------------------------------
-    # IMPORTANT: We use pyopen_wakeword here (not the original openwakeword
-    # library) because wyoming-openwakeword switched to it in mid-2025. The
-    # two libraries emit features at different rates (~43Hz vs ~9.3Hz) and
-    # with different distributions. A model trained against the wrong pipeline
-    # saturates to ~1.0 on production cold-start audio, causing
-    # "Detected at 0" phantom fires every session.
+    # Apply augmentation
+    pos_audio = []
+    for clip in pos_audio_raw:
+        x = clip
+        if aug_rng.random() < 0.5:
+            rir = rirs[aug_rng.integers(0, len(rirs))]
+            x = apply_rir(x, rir)
+        if aug_rng.random() < 0.75 and len(neg_audio) > 0:
+            bg = neg_audio[aug_rng.integers(0, len(neg_audio))]
+            snr = random_snr_db(aug_rng, low=0.0, high=15.0)
+            x = mix_with_background(x, bg, snr_db=snr, rng=aug_rng)
+        pos_audio.append(x)
+    pos_audio = np.stack(pos_audio)
+    n_pos = len(pos_audio)
+    print(f"Augmented positives: {n_pos}")
+
+    # ----- Embed and window -----
     print("\nExtracting embeddings via pyopen_wakeword features...")
-    feats = OpenWakeWordFeatures.from_builtin()
-    CHUNK_BYTES = 320  # 10 ms @ 16 kHz, 16-bit mono
-
-    def embed_clip(audio_int16: np.ndarray) -> np.ndarray:
-        """Stream a single clip through pyopen_wakeword features.
-        Returns (T, 96) where T depends on clip length (~43 frames per second)."""
-        feats.reset()
-        raw = audio_int16.astype(np.int16).tobytes()
-        out = []
-        for i in range(0, len(raw) - CHUNK_BYTES + 1, CHUNK_BYTES):
-            for f in feats.process_streaming(raw[i:i+CHUNK_BYTES]):
-                out.append(f.squeeze())  # (96,)
-        if not out:
-            return np.empty((0, 96), dtype=np.float32)
-        return np.stack(out).astype(np.float32)
-
     pos_emb = np.stack([embed_clip(c) for c in pos_audio])  # (N, T, 96)
     neg_emb = np.stack([embed_clip(c) for c in neg_audio])  # (M, T, 96)
+    print(f"  Positive emb: {pos_emb.shape}  Negative emb: {neg_emb.shape}")
 
-    n_frames = pos_emb.shape[1]
-    print(f"  Positive: {pos_emb.shape}  Negative: {neg_emb.shape}")
-    print(f"  Frame rate: {n_frames / 3.0:.1f} features/sec ({3000/n_frames:.1f} ms hop)")
-
-    # Slice into 16-frame windows (OWW inference window size).
-    WINDOW = 16
-    # For positives, take only the LAST N windows of each clip. After trimming
-    # trailing silence + left-padding, the wake word lives at the end of the
-    # 3-sec clip; the last N windows are the ones whose 374 ms span actually
-    # overlaps it. Labeling earlier windows (silence/zero-padding) positive
-    # is what causes phantom fire-at-0 at session start in production.
-    POSITIVE_WINDOWS_PER_CLIP = 25  # ~580 ms of end-of-clip context
-
-    def make_windows(emb: np.ndarray) -> np.ndarray:
-        """(clips, frames, 96) → (windows, 16, 96). All windows of all clips."""
-        wins = []
-        for clip in emb:
-            for start in range(len(clip) - WINDOW + 1):
-                wins.append(clip[start:start + WINDOW])
-        return np.stack(wins).astype(np.float32)
-
-    # --- Extract positive windows (only end-of-clip windows) ---
+    # ONE positive window per clip with ±200ms jitter (reference-aligned).
+    win_rng = np.random.default_rng(7)
     pos_wins_list = []
     pos_win_file_idx = []
     n_too_short = 0
-    for i, clip in enumerate(pos_emb):
-        max_start = len(clip) - WINDOW
-        if max_start < 0:
-            n_too_short += 1
-            continue
-        # Last K windows whose start index is in [max_start - K + 1, max_start]
-        first = max(0, max_start - POSITIVE_WINDOWS_PER_CLIP + 1)
-        for start in range(first, max_start + 1):
-            pos_wins_list.append(clip[start:start + WINDOW])
+    for i, clip_emb in enumerate(pos_emb):
+        try:
+            win = build_positive_window(clip_emb, jitter_ms=200.0, rng=win_rng)
+            pos_wins_list.append(win)
             pos_win_file_idx.append(i)
+        except ValueError:
+            n_too_short += 1
     if n_too_short:
-        print(f"  Skipped {n_too_short} positive clip(s) too short for a {WINDOW}-frame window")
+        print(f"  Skipped {n_too_short} clip(s) too short for a {WINDOW_FRAMES}-frame window")
+    pos_wins = np.stack(pos_wins_list).astype(np.float32) if pos_wins_list else \
+        np.empty((0, WINDOW_FRAMES, 96), dtype=np.float32)
 
-    pos_wins = np.stack(pos_wins_list).astype(np.float32) if pos_wins_list else np.empty((0, WINDOW, 96), dtype=np.float32)
-    neg_wins = make_windows(neg_emb)
+    # All windows of all negatives (stride=1 — heaviest learning signal)
+    neg_wins = build_negative_windows(neg_emb, stride=1)
     print(f"  Windows — positive: {len(pos_wins)}  negative: {len(neg_wins)}")
 
     # ------------------------------------------------------------------
@@ -384,7 +299,7 @@ def main():
         file_scores = pos_scores[mask]
         file_min = float(file_scores.min())
         if file_min < 0.3:
-            low_pos_files.append((file_min, float(file_scores.max()), Path(wav_files[file_i]).name))
+            low_pos_files.append((file_min, float(file_scores.max()), Path(all_pos_files[file_i]).name))
     if low_pos_files:
         low_pos_files.sort()
         print(f"\n  Low-scoring positive files (min < 0.3):")
@@ -404,7 +319,7 @@ def main():
                     try:
                         audio = pad_or_trim(load_wav(path), CLIP_SAMPLES)
                         emb = np.stack([embed_clip(audio)])  # (1, T, 96)
-                        wins = make_windows(emb)
+                        wins = build_negative_windows(emb, stride=1)
                         with torch.no_grad():
                             scores = inference_model(torch.from_numpy(wins)).squeeze().numpy()
                         peak = float(np.atleast_1d(scores).max())
