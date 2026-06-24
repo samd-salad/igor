@@ -43,6 +43,20 @@ data/adbkey.pub
 # Local onnx2tf conversion venv (used for TFLite export)
 .onnx2tf-venv/
 
+# Wakeword training venv (Py 3.12, contains torch/tf/onnx2tf — large)
+.venv-wake/
+
+# Wakeword training scratch (log + intermediate TF outputs)
+wakeword/_train.log
+wakeword/_tf_out/
+wakeword/models/igor_fixed_batch.onnx
+
+# Piper TTS voices (downloaded; regenerate as needed)
+wakeword/piper_voices/
+
+# Piper-generated synthetic positive samples (regenerate via synthesize_positives.py)
+wakeword/samples/positive_synth/
+
 # Environment files (may contain API keys)
 .env
 .env.*
