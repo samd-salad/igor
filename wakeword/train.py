@@ -29,6 +29,14 @@ Negative samples:
 import sys
 from pathlib import Path
 
+# Allow direct invocation as `python wakeword/train.py` (in addition to
+# `python -m wakeword.train`) — adding wakeword's package as a subpackage
+# in Task 8 broke the script-style invocation by removing the implicit
+# namespace package fallback.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import numpy as np
 
 from wakeword._features import embed_clip
@@ -315,7 +323,7 @@ def main():
     # nothing, a known issue with the TFLite runtime for dynamic shapes.
     #
     # Re-export ONNX with fixed batch=1, then convert with onnx2tf.
-    tflite_path = OUTPUT_DIR / f"{MODEL_NAME}_v0.1.tflite"
+    tflite_path = OUTPUT_DIR / f"{MODEL_NAME}_v0.3.tflite"
     _export_tflite(inference_model, dummy_input, tflite_path)
 
     print(f"\nDeploy to the Pi5 wyoming-satellite host:")
