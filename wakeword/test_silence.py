@@ -46,15 +46,19 @@ def _generate_tests() -> dict[str, np.ndarray]:
     N = SAMPLE_RATE * DURATION_S
     t = np.arange(N) / SAMPLE_RATE
     return {
-        "pure_zeros":      np.zeros(N, dtype=np.int16),
-        "mic_floor_quiet": rng.normal(0, 30, N).astype(np.int16),
-        "mic_floor_mid":   rng.normal(0, 200, N).astype(np.int16),
-        "mic_floor_loud":  rng.normal(0, 800, N).astype(np.int16),
-        "fridge_hum_60":   (np.sin(2*np.pi*60*t) * 200).astype(np.int16),
-        "fan_hum_120":     (np.sin(2*np.pi*120*t) * 300).astype(np.int16),
-        "fan_tone_300":    (np.sin(2*np.pi*300*t) * 200).astype(np.int16),
-        "high_pitch_1k":   (np.sin(2*np.pi*1000*t) * 200).astype(np.int16),
-        "high_pitch_2k":   (np.sin(2*np.pi*2000*t) * 200).astype(np.int16),
+        "pure_zeros":       np.zeros(N, dtype=np.int16),
+        # Sub-audible noise floor — production false-fires on v0.3 trace to
+        # exactly this regime (σ=5-10 in int16 = -70 to -76 dBFS).
+        "mic_dead_silence": rng.normal(0, 5, N).astype(np.int16),
+        "mic_floor_very_q": rng.normal(0, 10, N).astype(np.int16),
+        "mic_floor_quiet":  rng.normal(0, 30, N).astype(np.int16),
+        "mic_floor_mid":    rng.normal(0, 200, N).astype(np.int16),
+        "mic_floor_loud":   rng.normal(0, 800, N).astype(np.int16),
+        "fridge_hum_60":    (np.sin(2*np.pi*60*t) * 200).astype(np.int16),
+        "fan_hum_120":      (np.sin(2*np.pi*120*t) * 300).astype(np.int16),
+        "fan_tone_300":     (np.sin(2*np.pi*300*t) * 200).astype(np.int16),
+        "high_pitch_1k":    (np.sin(2*np.pi*1000*t) * 200).astype(np.int16),
+        "high_pitch_2k":    (np.sin(2*np.pi*2000*t) * 200).astype(np.int16),
     }
 
 

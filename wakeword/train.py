@@ -118,10 +118,20 @@ def main():
     OUTPUT_DIR.mkdir(exist_ok=True)
 
     # Load positive clips from both real recordings and Piper synthesis.
+    # The en_GB Piper voices scored ~0.017 in v0.3 — the model treated them
+    # as effectively negative. They're noise in the positive set; skip them
+    # so positives represent a tighter "Igor said in American prosody"
+    # distribution and don't drag the decision boundary.
     POSITIVE_SYNTH_DIR = ROOT / "wakeword" / "samples" / "positive_synth"
+    SKIP_SYNTH_VOICES = ("en_GB-",)
     all_pos_files = sorted(list(POSITIVE_DIR.glob("*.wav")))
     if POSITIVE_SYNTH_DIR.exists():
-        all_pos_files += sorted(POSITIVE_SYNTH_DIR.glob("*.wav"))
+        synth_files = sorted(POSITIVE_SYNTH_DIR.glob("*.wav"))
+        synth_files = [
+            f for f in synth_files
+            if not any(skip in f.name for skip in SKIP_SYNTH_VOICES)
+        ]
+        all_pos_files += synth_files
     if not all_pos_files:
         print(f"No positive WAVs found in {POSITIVE_DIR}/ or {POSITIVE_SYNTH_DIR}/.")
         sys.exit(1)
@@ -162,10 +172,17 @@ def main():
               f"found {len(neg_paths)}.")
         sys.exit(1)
     print(f"Loading {len(neg_paths)} real negative clips for backgrounds and training...")
+    # DO NOT normalize_peak negatives — the user's recording mic puts the
+    # quietest negatives at RMS ~100, but normalize_peak scales them all to
+    # peak=16000. This taught v0.3/v0.4 that "anything = loud at inference"
+    # — and the model false-fired on quiet mic-floor audio because it had
+    # never seen the genuinely low-amplitude regime during training.
+    # Use natural amplitudes so the inference-time mic-floor distribution
+    # is represented.
     neg_audio_list = []
     for path in neg_paths:
         try:
-            audio = normalize_peak(pad_or_trim(load_wav(path), CLIP_SAMPLES))
+            audio = pad_or_trim(load_wav(path), CLIP_SAMPLES)
             neg_audio_list.append(audio)
         except Exception as e:
             print(f"  Skipping {path.name}: {e}")
@@ -183,7 +200,13 @@ def main():
             x = apply_rir(x, rir)
         if aug_rng.random() < 0.75 and len(neg_audio) > 0:
             bg = neg_audio[aug_rng.integers(0, len(neg_audio))]
-            snr = random_snr_db(aug_rng, low=0.0, high=15.0)
+            # SNR floor of 10 dB: positive content must remain audibly
+            # dominant. Lower floors created a shortcut where the model
+            # learned "quiet noise = positive" because positive+bg at 0 dB
+            # SNR is half-noise but still gets the positive label. Range
+            # 10-25 dB ensures positives stay the dominant signal at all
+            # mixing depths while still teaching robustness to backgrounds.
+            snr = random_snr_db(aug_rng, low=10.0, high=25.0)
             x = mix_with_background(x, bg, snr_db=snr, rng=aug_rng)
         pos_audio.append(x)
     pos_audio = np.stack(pos_audio)
@@ -319,7 +342,7 @@ def main():
     # nothing, a known issue with the TFLite runtime for dynamic shapes.
     #
     # Re-export ONNX with fixed batch=1, then convert with onnx2tf.
-    tflite_path = OUTPUT_DIR / f"{MODEL_NAME}_v0.3.tflite"
+    tflite_path = OUTPUT_DIR / f"{MODEL_NAME}_v0.5.tflite"
     _export_tflite(inference_model, dummy_input, tflite_path)
 
     print(f"\nDeploy to the Pi5 wyoming-satellite host:")
