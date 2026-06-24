@@ -10,9 +10,9 @@
 
 ## Global Constraints
 
-- pyopen_wakeword emits embeddings at **~12 Hz** (EMB_STEP=8 × 80ms frames). This is the truth; current code claims ~43 Hz and is wrong. All frame-count math must use 12 Hz.
-- 16-frame window = **~1.3 seconds** (not ~370ms).
-- 3-second clip → **~37 frames**, not ~129.
+- pyopen_wakeword emits embeddings at **~42.67 Hz** empirically (128 frames per 3-second clip). The research report's `MELS_PER_SECOND/EMB_STEP = 12 Hz` math does NOT reflect what `process_streaming` actually emits — there is sliding-window overlap. The existing `FEATURE_RATE_HZ = 42.7` in `wakeword/contracts.py` is correct; do NOT change it.
+- 16-frame window = **~374 ms** of audio.
+- 3-second clip → **~128 frames**.
 - Use the `.venv-wake` Python 3.12 venv for all training-related code; main `.venv` (3.13) doesn't have TensorFlow.
 - Never delete user-recorded `samples/positive/` or `samples/negative/` clips — they are the user's labour.
 - Output TFLite filename: `igor_v0.3.tflite` (Pi currently has v0.2 which phantom-fires; v0.3 is the path-B retrain).
@@ -27,7 +27,7 @@
 
 **New files (all Python 3.12 / training-time only):**
 - `wakeword/_audio.py` — `load_wav`, `normalize_peak`, `trim_trailing_silence`, `pad_or_trim`, `left_pad_or_trim`
-- `wakeword/_features.py` — `embed_clip(audio_int16) -> (T, 96)`, `EMB_RATE_HZ=12.13`, `frames_per_seconds(seconds)`
+- `wakeword/_features.py` — `embed_clip(audio_int16) -> (T, 96)`, `EMB_RATE_HZ=42.67`, `frames_per_seconds(seconds)`
 - `wakeword/_augmentation.py` — `mix_with_background(pos, bg, snr_db)`, `apply_rir(audio, rir)`, `random_snr_db(rng)`, `generate_synthetic_rirs(n, rng)`
 - `wakeword/_dataset.py` — `build_positive_windows(clips, jitter_ms)`, `build_negative_windows(clips)`, `WINDOW_FRAMES=16`
 - `wakeword/_training.py` — `WakewordModel` class, `train_model(X, y, epochs)`, `hard_negative_filter(preds, labels, low, high)`
@@ -38,7 +38,7 @@
 **Modified files:**
 - `wakeword/train.py` — slimmed to orchestrator that calls into helpers
 - `wakeword/contracts.py:7` — fix `FEATURE_RATE_HZ` constant from `42.7` to `12.13`
-- `CLAUDE.md` — wake-word section updated for ~12 Hz feature rate
+- (CLAUDE.md unchanged — current ~43 Hz / ~370 ms claims are empirically correct.)
 - `deploy/wyoming-openwakeword.service` — add `--vad-threshold 0.5`
 
 **Test files:**
@@ -50,20 +50,21 @@
 
 ---
 
-### Task 1: Fix frame-rate constant + documentation
+### Task 1: Encapsulate feature extraction in a testable wrapper
 
 **Files:**
-- Modify: `wakeword/contracts.py`
-- Modify: `CLAUDE.md` (the wake-word section)
-- Modify: `wakeword/train.py:289` (comment claiming "~43 features/sec")
+- Create: `wakeword/_features.py`
 - Test: `tests/wakeword/test_features.py` (new)
+- NOTE: `wakeword/contracts.py` and `CLAUDE.md` are NOT changed in this task. The empirical frame rate is ~42.67 Hz, matching `FEATURE_RATE_HZ = 42.7` already in `contracts.py`. The research report's "~12 Hz" claim was wrong (it reflected the math of `MELS_PER_SECOND/EMB_STEP` but not what `process_streaming` actually emits due to sliding-window overlap).
 
 **Interfaces:**
-- Produces: `wakeword.contracts.FEATURE_RATE_HZ = 12.13`. This value is consumed by Task 2 (window labeling) and Task 11 (silence smoke test).
+- Produces: `wakeword._features.embed_clip(audio_int16) -> (T, 96)` and `wakeword._features.EMB_RATE_HZ = 42.67`. These are consumed by Task 2 (window labeling) and downstream tasks. Tasks downstream import from `wakeword._features` for the rate constant; do NOT re-read `wakeword.contracts.FEATURE_RATE_HZ` (the existing constant is preserved as-is for backward compatibility, but new code routes through `_features`).
 
-- [ ] **Step 1: Confirm actual rate empirically**
+- [ ] **Step 1: Confirm actual rate empirically (pre-validated by controller)**
 
-Run from repo root:
+Pre-validated empirical result (already measured): 128 frames for 3-second silence → **42.67 Hz**.
+
+Optional re-verification:
 
 ```bash
 .venv-wake/Scripts/python.exe -c "
@@ -81,7 +82,7 @@ print(f'rate Hz: {len(out)/3:.2f}')
 "
 ```
 
-Expected: `frames for 3s audio: 36` and `rate Hz: 12.13` (or close).
+Expected: `frames for 3s audio: 128`, `rate Hz: 42.67`.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -90,27 +91,25 @@ Create `tests/wakeword/test_features.py`:
 ```python
 import numpy as np
 
-from wakeword.contracts import FEATURE_RATE_HZ
-from wakeword._features import embed_clip, frames_per_seconds
+from wakeword._features import embed_clip, frames_per_seconds, EMB_RATE_HZ
 
 
-def test_feature_rate_constant_matches_pyopen_wakeword():
-    # pyopen_wakeword EMB_STEP=8 mel frames, MELS_PER_SECOND=97
-    # So embeddings come at 97/8 = 12.125 Hz
-    assert 12.0 <= FEATURE_RATE_HZ <= 12.2
+def test_emb_rate_hz_matches_empirical_measurement():
+    # Empirically: 128 frames for 3 seconds = 42.67 Hz
+    assert 42.0 <= EMB_RATE_HZ <= 43.0
 
 
 def test_embed_clip_produces_expected_frame_count_for_3_seconds():
     silence_3s = np.zeros(16000 * 3, dtype=np.int16)
     emb = embed_clip(silence_3s)
-    # 3 seconds × 12.13 Hz ≈ 36-37 frames
-    assert 34 <= emb.shape[0] <= 38
+    # 3 seconds × 42.67 Hz ≈ 128 frames
+    assert 124 <= emb.shape[0] <= 132
     assert emb.shape[1] == 96
 
 
 def test_frames_per_seconds_helper():
-    assert 34 <= frames_per_seconds(3.0) <= 38
-    assert 11 <= frames_per_seconds(1.0) <= 13
+    assert 124 <= frames_per_seconds(3.0) <= 132
+    assert 40 <= frames_per_seconds(1.0) <= 44
 ```
 
 - [ ] **Step 3: Run test — confirm fails**
@@ -130,9 +129,11 @@ from __future__ import annotations
 import numpy as np
 from pyopen_wakeword import OpenWakeWordFeatures
 
-# pyopen_wakeword constants: MELS_PER_SECOND=97, EMB_STEP=8 mel frames per
-# emitted embedding => 97/8 = 12.125 Hz. NOT 43 Hz as previously claimed.
-EMB_RATE_HZ = 12.125
+# Empirically measured: 128 frames per 3-second clip = 42.67 Hz.
+# pyopen_wakeword's MELS_PER_SECOND/EMB_STEP nominal arithmetic (97/8 ≈
+# 12.125) does NOT reflect the actual emission rate because
+# process_streaming uses sliding-window overlap. Trust the measurement.
+EMB_RATE_HZ = 42.67
 FEATURE_DIM = 96
 CHUNK_BYTES = 320  # 10ms @ 16kHz, 16-bit mono
 
@@ -143,7 +144,7 @@ def frames_per_seconds(seconds: float) -> int:
 
 def embed_clip(audio_int16: np.ndarray) -> np.ndarray:
     """Stream a single int16 clip through pyopen_wakeword features.
-    Returns (T, 96) where T ≈ duration_seconds × 12.13."""
+    Returns (T, 96) where T ≈ duration_seconds × 42.67."""
     feats = OpenWakeWordFeatures.from_builtin()
     feats.reset()
     raw = audio_int16.astype(np.int16).tobytes()
@@ -156,21 +157,7 @@ def embed_clip(audio_int16: np.ndarray) -> np.ndarray:
     return np.stack(out).astype(np.float32)
 ```
 
-- [ ] **Step 5: Update `wakeword/contracts.py`**
-
-Find and replace:
-
-```python
-FEATURE_RATE_HZ = 42.7
-```
-
-with:
-
-```python
-FEATURE_RATE_HZ = 12.125
-```
-
-- [ ] **Step 6: Run test — verify passes**
+- [ ] **Step 5: Run test — verify passes**
 
 ```bash
 .venv-wake/Scripts/python.exe -m pytest tests/wakeword/test_features.py -v
@@ -178,21 +165,18 @@ FEATURE_RATE_HZ = 12.125
 
 Expected: 3 passed.
 
-- [ ] **Step 7: Update CLAUDE.md wake-word notes**
-
-Find any reference to `~43 Hz`, `~370ms`, or `MODEL_INPUT_SHAPE` math in CLAUDE.md and reword. Specifically the line claiming "feature rate" should say `~12 Hz`.
-
-- [ ] **Step 8: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add wakeword/_features.py wakeword/contracts.py CLAUDE.md tests/wakeword/test_features.py
-git commit -m "wakeword: correct embedding rate to ~12 Hz (was wrongly claimed ~43 Hz)
+git add wakeword/_features.py tests/wakeword/test_features.py
+git commit -m "wakeword: encapsulate pyopen_wakeword feature extraction
 
-pyopen_wakeword emits at EMB_RATE_HZ = 97/8 = 12.125 Hz, not the ~43 Hz our
-contracts and training script assumed. This was a silent ~3.6x error that
-caused 'last N windows' positive labeling to span the entire clip instead
-of just the wake-word tail — directly producing the phantom-fire-on-silence
-symptom we've been chasing."
+New wakeword/_features.py exposes embed_clip(audio) -> (T, 96), the rate
+constant EMB_RATE_HZ = 42.67 (empirically measured, NOT 12.125 which the
+research report had wrong), FEATURE_DIM, and a frames_per_seconds helper.
+
+Downstream tasks build on this single source of truth so frame-rate math
+is consistent across the rebuild. contracts.FEATURE_RATE_HZ unchanged."
 ```
 
 ---
@@ -340,15 +324,15 @@ def test_window_frames_constant_is_16():
 
 
 def test_positive_window_shape_is_16_by_96():
-    # 37 frames of fake embeddings (3-second clip rate-12 Hz)
-    clip_emb = np.arange(37 * 96, dtype=np.float32).reshape(37, 96)
+    # 128 frames of fake embeddings (3-second clip at 42.67 Hz)
+    clip_emb = np.arange(128 * 96, dtype=np.float32).reshape(128, 96)
     rng = np.random.default_rng(0)
     win = build_positive_window(clip_emb, jitter_ms=0, rng=rng)
     assert win.shape == (16, 96)
 
 
 def test_positive_window_aligns_to_end_with_zero_jitter():
-    clip_emb = np.arange(37 * 96, dtype=np.float32).reshape(37, 96)
+    clip_emb = np.arange(128 * 96, dtype=np.float32).reshape(128, 96)
     rng = np.random.default_rng(0)
     win = build_positive_window(clip_emb, jitter_ms=0, rng=rng)
     # With jitter=0, the window should be the LAST 16 frames
@@ -356,7 +340,7 @@ def test_positive_window_aligns_to_end_with_zero_jitter():
 
 
 def test_positive_window_with_jitter_stays_in_bounds():
-    clip_emb = np.arange(37 * 96, dtype=np.float32).reshape(37, 96)
+    clip_emb = np.arange(128 * 96, dtype=np.float32).reshape(128, 96)
     rng = np.random.default_rng(0)
     for _ in range(50):
         win = build_positive_window(clip_emb, jitter_ms=200, rng=rng)
@@ -364,7 +348,7 @@ def test_positive_window_with_jitter_stays_in_bounds():
 
 
 def test_positive_window_jitter_actually_shifts_window():
-    clip_emb = np.arange(37 * 96, dtype=np.float32).reshape(37, 96)
+    clip_emb = np.arange(128 * 96, dtype=np.float32).reshape(128, 96)
     rng = np.random.default_rng(42)
     starts_seen = set()
     for _ in range(50):
@@ -436,13 +420,17 @@ git commit -m "wakeword: reference-aligned positive window labeling — one wind
 
 dscripka's official notebook labels exactly one positive window per clip,
 end-anchored to the trim-aligned wake-word end with ±200ms jitter. Our
-prior code labeled the LAST 25 windows per clip; at the correct 12 Hz
-frame rate (Task 1) those 25 windows span ~2 seconds — almost the entire
-clip — and effectively labeled leading silence as positive.
+prior code labeled the LAST 25 windows per clip; at the empirical 42.67 Hz
+frame rate (Task 1) those 25 windows span ~580 ms, which over-represents
+each utterance and can leak some pre-word silence into the positive class
+depending on how trim_trailing_silence aligned the end.
+
+The reference one-window-per-clip approach is cleaner and matches what
+wyoming-openwakeword sees at runtime (a single rolling inference window).
 
 build_positive_window now produces a single (16, 96) window per clip with
 configurable jitter. Old POSITIVE_WINDOWS_PER_CLIP loop in train.py will
-be replaced by Task 4."
+be replaced by Task 6."
 ```
 
 ---
@@ -1803,6 +1791,6 @@ git push
 
 **Placeholder scan:** None present. Every code step shows full code; every command shows expected output.
 
-**Type consistency:** `build_positive_window(clip_emb, jitter_ms, rng)` signature used identically in Tasks 2 and 6. `mix_with_background(positive, background, snr_db, rng)` matches Tasks 4 and 6. `WakewordModel(layer_dim, inference)` and `train_model(X, y, *, epochs, batch_size, lr, layer_dim)` consistent in Tasks 7 and beyond. `EMB_RATE_HZ = 12.125` consistent across Tasks 1, 2, 6. `FEATURE_RATE_HZ = 12.125` in `wakeword/contracts.py` Task 1.
+**Type consistency:** `build_positive_window(clip_emb, jitter_ms, rng)` signature used identically in Tasks 2 and 6. `mix_with_background(positive, background, snr_db, rng)` matches Tasks 4 and 6. `WakewordModel(layer_dim, inference)` and `train_model(X, y, *, epochs, batch_size, lr, layer_dim)` consistent in Tasks 7 and beyond. `EMB_RATE_HZ = 42.67` (Tasks 1+) is consistent with `contracts.FEATURE_RATE_HZ = 42.7` (unchanged) — both reflect the empirically measured ~128 frames/3s emission rate of pyopen_wakeword.
 
 **Operational dependency:** Task 9 (user records silence on Pi) gates Task 10 (deploy). Tasks 1-8 can be done back-to-back with no Pi interaction. Recommended order: 1→2→3→4→5→6→7→8 (all code) → 9 (user records on Pi, ~30 min) → 10 (retrain + deploy + verify).
