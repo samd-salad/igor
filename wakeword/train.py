@@ -53,8 +53,6 @@ SAMPLE_RATE  = 16000
 CLIP_SAMPLES = SAMPLE_RATE * 3  # 3-second clips (pad/trim all audio to this)
 N_EPOCHS     = 50   # capped to prevent sigmoid saturation; v0.2 at 200 collapsed to hard 0/1
 BATCH_SIZE   = 64
-LAYER_DIM    = 64   # increased from 32 — more capacity to discriminate real-world audio
-DROPOUT      = 0.4  # bumped from 0.2 to force softer decisions and improve generalization
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +100,6 @@ def main():
     # Check dependencies
     try:
         import torch
-        import torch.nn as nn
     except ImportError as e:
         print(f"\nMissing dependency: {e}")
         print("Install with:")
@@ -226,56 +223,18 @@ def main():
     X_t = torch.from_numpy(X)
     y_t = torch.from_numpy(y).unsqueeze(1)
 
-    # ------------------------------------------------------------------
-    # Define model: Flatten → FC → LN → ReLU → FC → LN → ReLU → FC → Sigmoid
-    # Input: (batch, 16, 96)  Output: (batch, 1)
-    # ------------------------------------------------------------------
-    torch.manual_seed(42)  # Deterministic weight init for reproducible training
-    model = nn.Sequential(
-        nn.Flatten(),                               # → (batch, 1536)
-        nn.Linear(16 * 96, LAYER_DIM),
-        nn.LayerNorm(LAYER_DIM), nn.ReLU(),
-        nn.Dropout(DROPOUT),
-        nn.Linear(LAYER_DIM, LAYER_DIM),
-        nn.LayerNorm(LAYER_DIM), nn.ReLU(),
-        nn.Dropout(DROPOUT),
-        nn.Linear(LAYER_DIM, 1),
-        # No Sigmoid here — BCEWithLogitsLoss takes raw logits
-    )
-    # Inference model wraps with Sigmoid for ONNX export (expects 0-1 output)
-    inference_model = nn.Sequential(model, nn.Sigmoid())
+    # ----- Train (reference-aligned) -----
+    from wakeword._training import train_model
 
-    # ------------------------------------------------------------------
-    # Train
-    # ------------------------------------------------------------------
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    # Cosine annealing: LR decays from 1e-3 to 1e-5 over all epochs.
-    # Lets the model explore broadly early, then fine-tune decision boundaries.
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=N_EPOCHS, eta_min=1e-5
+    inference_model_pt = train_model(
+        X.astype(np.float32),
+        y.astype(np.float32),
+        epochs=N_EPOCHS,
+        batch_size=BATCH_SIZE,
+        lr=1e-4,
+        layer_dim=128,
     )
-    # Compensate for class imbalance: weight positive examples proportionally
-    # so the model doesn't just learn to always predict negative.
-    pos_weight = torch.tensor([len(neg_wins) / max(len(pos_wins), 1)])
-    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-    print(f"\nTraining ({N_EPOCHS} epochs, {len(X)} samples, cosine LR 1e-3 -> 1e-5)...")
-    for epoch in range(N_EPOCHS):
-        model.train()
-        perm_t = torch.randperm(len(X_t))
-        epoch_loss = 0.0
-        n_batches  = 0
-        for i in range(0, len(X_t), BATCH_SIZE):
-            idx = perm_t[i:i + BATCH_SIZE]
-            loss = loss_fn(model(X_t[idx]), y_t[idx])
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
-            n_batches  += 1
-        scheduler.step()
-        if (epoch + 1) % 25 == 0:
-            print(f"  Epoch {epoch+1:3d}/{N_EPOCHS}  loss={epoch_loss/n_batches:.4f}")
+    inference_model = inference_model_pt  # alias for downstream ONNX export
 
     # ------------------------------------------------------------------
     # Evaluate on training set
