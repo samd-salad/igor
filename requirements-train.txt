@@ -1,0 +1,18 @@
+# Training-only deps for wakeword/train.py. Install in .venv-wake (Python 3.12).
+# These are NOT installed by the runtime container.
+torch>=2.0
+tensorflow>=2.16
+tf-keras
+onnx>=1.15
+onnxruntime
+onnx2tf
+ai_edge_litert
+psutil
+sng4onnx
+onnx_graphsurgeon
+onnxsim
+openwakeword
+pyopen_wakeword>=1.1
+piper-tts>=1.2
+pyroomacoustics>=0.7
+scipy
