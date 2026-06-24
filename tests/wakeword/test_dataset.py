@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from wakeword._dataset import (
-    build_positive_window, WINDOW_FRAMES,
+    build_positive_window, build_negative_windows, WINDOW_FRAMES,
 )
 
 
@@ -51,3 +51,26 @@ def test_positive_window_short_clip_raises():
     rng = np.random.default_rng(0)
     with pytest.raises(ValueError, match="too short"):
         build_positive_window(short, jitter_ms=0, rng=rng)
+
+
+def test_build_negative_windows_slides_over_clips():
+    # 2 clips, each 20 frames of (96-dim) embeddings
+    clips_emb = np.zeros((2, 20, 96), dtype=np.float32)
+    clips_emb[0, :, 0] = np.arange(20)   # marker
+    clips_emb[1, :, 0] = np.arange(100, 120)
+    wins = build_negative_windows(clips_emb, stride=1)
+    # 2 clips × (20-16+1) = 10 windows
+    assert wins.shape == (10, 16, 96)
+
+
+def test_build_negative_windows_respects_stride():
+    clips_emb = np.zeros((1, 20, 96), dtype=np.float32)
+    wins = build_negative_windows(clips_emb, stride=2)
+    # (20-16)//2 + 1 = 3 windows
+    assert wins.shape == (3, 16, 96)
+
+
+def test_build_negative_windows_skips_too_short_clips():
+    clips_emb = np.zeros((2, 10, 96), dtype=np.float32)
+    wins = build_negative_windows(clips_emb, stride=1)
+    assert wins.shape == (0, 16, 96)

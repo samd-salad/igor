@@ -31,3 +31,20 @@ def build_positive_window(clip_emb: np.ndarray, jitter_ms: float,
     if start_idx < 0:
         start_idx, end_idx = 0, WINDOW_FRAMES
     return clip_emb[start_idx:end_idx].astype(np.float32)
+
+
+def build_negative_windows(clips_emb: np.ndarray, stride: int = 1) -> np.ndarray:
+    """Slide 16-frame windows over each (T, 96) clip in clips_emb.
+    Returns (N, 16, 96). Clips shorter than 16 frames are skipped.
+    stride > 1 reduces window count proportionally (use to keep memory in check
+    when the real-negative pool is large)."""
+    out = []
+    for clip in clips_emb:
+        if clip.shape[0] < WINDOW_FRAMES:
+            continue
+        max_start = clip.shape[0] - WINDOW_FRAMES
+        for start in range(0, max_start + 1, stride):
+            out.append(clip[start:start + WINDOW_FRAMES])
+    if not out:
+        return np.empty((0, WINDOW_FRAMES, 96), dtype=np.float32)
+    return np.stack(out).astype(np.float32)

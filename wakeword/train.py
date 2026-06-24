@@ -141,36 +141,6 @@ def trim_trailing_silence(audio: np.ndarray, threshold: int = 250,
     return audio[:end]
 
 
-def generate_synthetic_negatives(n: int, clip_length: int) -> np.ndarray:
-    """
-    Generate synthetic negative clips: Gaussian noise, silence, and sine tones.
-    These are sufficient for quiet environments; for noisy rooms record real negatives.
-    """
-    rng = np.random.default_rng(42)
-    clips = []
-    third = n // 3
-
-    def to_int16(f: np.ndarray) -> np.ndarray:
-        return np.clip(f * 32767, -32768, 32767).astype(np.int16)
-
-    # White noise at varied amplitudes
-    for amp in np.linspace(0.005, 0.35, third):
-        c = rng.normal(0, float(amp), clip_length).astype(np.float32)
-        clips.append(to_int16(c))
-
-    # Near-silence (just noise floor)
-    for _ in range(third):
-        c = rng.normal(0, 0.001, clip_length).astype(np.float32)
-        clips.append(to_int16(c))
-
-    # Sine tones
-    remainder = n - 2 * third
-    for freq in np.linspace(80, 5000, remainder):
-        t = np.arange(clip_length, dtype=np.float32) / SAMPLE_RATE
-        amp = float(rng.uniform(0.05, 0.3))
-        clips.append(to_int16(amp * np.sin(2 * np.pi * freq * t)))
-
-    return np.stack(clips[:n])
 
 
 # ---------------------------------------------------------------------------
@@ -228,32 +198,33 @@ def main():
     n_pos = len(pos_audio)
 
     # ------------------------------------------------------------------
-    # Load or generate negative clips
+    # Load real negatives only
     # ------------------------------------------------------------------
-    neg_audio_list = []
-
-    # Real negatives from wakeword/samples/negative/ (optional)
+    # Real negatives only. Synthetic Gaussian-noise / sine-tone negatives
+    # are NOT used — they don't represent the actual mic-noise-floor
+    # distribution and training on them taught the model to phantom-fire
+    # on quiet rooms. Reference workflow (dscripka) uses RIR + SNR-mixed
+    # backgrounds instead (see Tasks 6, 7).
     if NEGATIVE_DIR.exists():
         neg_files = sorted(NEGATIVE_DIR.glob("*.wav"))
-        if neg_files:
-            print(f"Loading {len(neg_files)} real negative clips from {NEGATIVE_DIR.name}/...")
-            for path in neg_files:
-                try:
-                    audio = normalize_peak(pad_or_trim(load_wav(path), CLIP_SAMPLES))
-                    neg_audio_list.append(audio)
-                except Exception as e:
-                    print(f"  Skipping {path.name}: {e}")
-
-    # Synthetic negatives to reach at least 3× positive count
-    n_synthetic = max(0, n_pos * 3 - len(neg_audio_list))
-    if n_synthetic > 0:
-        print(f"Generating {n_synthetic} synthetic negative clips (noise/silence/tones)...")
-        synthetic = generate_synthetic_negatives(n_synthetic, CLIP_SAMPLES)
-        neg_audio_list.append(synthetic)
-
-    neg_audio = np.vstack(neg_audio_list) if neg_audio_list else np.empty((0, CLIP_SAMPLES), dtype=np.float32)
-    n_neg = len(neg_audio)
-    print(f"  Total negatives: {n_neg}")
+    else:
+        neg_files = []
+    if len(neg_files) < 100:
+        print(f"ERROR: need at least 100 real negative clips in {NEGATIVE_DIR}/,"
+              f" found {len(neg_files)}.")
+        print("Record more on the Pi: python3 wakeword/record_negatives.py")
+        sys.exit(1)
+    print(f"Loading {len(neg_files)} real negative clips...")
+    neg_audio_list = []
+    for path in neg_files:
+        try:
+            audio = normalize_peak(pad_or_trim(load_wav(path), CLIP_SAMPLES))
+            neg_audio_list.append(audio)
+        except Exception as e:
+            print(f"  Skipping {path.name}: {e}")
+    neg_audio = np.vstack(neg_audio_list) if neg_audio_list else np.empty(
+        (0, CLIP_SAMPLES), dtype=np.float32
+    )
 
     # ------------------------------------------------------------------
     # Extract embeddings via pyopen_wakeword's feature pipeline
