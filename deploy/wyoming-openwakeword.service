@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=samda
 WorkingDirectory=/home/samda/wyoming-openwakeword
-ExecStart=/home/samda/wyoming-openwakeword/script/run --uri tcp://0.0.0.0:10400 --custom-model-dir /home/samda/wyoming-openwakeword/custom-models --preload-model igor --preload-model okay_nabu --threshold 0.5 --trigger-level 3 --vad-threshold 0.5 --debug
+ExecStart=/home/samda/wyoming-openwakeword/script/run --uri tcp://0.0.0.0:10400 --custom-model-dir /home/samda/wyoming-openwakeword/custom-models --preload-model igor --preload-model okay_nabu --threshold 0.5 --trigger-level 3 --debug
 Restart=always
 RestartSec=5
 
