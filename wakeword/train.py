@@ -228,13 +228,10 @@ def main():
     perm = np.random.default_rng(0).permutation(len(X))
     X, y, file_idx = X[perm], y[perm], file_idx[perm]
 
-    X_t = torch.from_numpy(X)
-    y_t = torch.from_numpy(y).unsqueeze(1)
-
     # ----- Train (reference-aligned) -----
     from wakeword._training import train_model
 
-    inference_model_pt = train_model(
+    inference_model = train_model(
         X.astype(np.float32),
         y.astype(np.float32),
         epochs=N_EPOCHS,
@@ -242,14 +239,13 @@ def main():
         lr=1e-4,
         layer_dim=128,
     )
-    inference_model = inference_model_pt  # alias for downstream ONNX export
 
     # ------------------------------------------------------------------
     # Evaluate on training set
     # ------------------------------------------------------------------
     inference_model.eval()
     with torch.no_grad():
-        all_preds = inference_model(X_t).squeeze().numpy()
+        all_preds = inference_model(torch.from_numpy(X)).squeeze().numpy()
 
     pos_scores = all_preds[y == 1.0]
     neg_scores = all_preds[y == 0.0]
@@ -277,23 +273,23 @@ def main():
         print("  Warning: positive scores are low — consider recording more samples.")
     if neg_scores.max() > 0.5:
         print("  Warning: some negatives score high — consider adding real negative recordings.")
-        # Identify which negative FILES are scoring high (per-clip max score)
-        if NEGATIVE_DIR.exists():
-            neg_files = sorted(NEGATIVE_DIR.glob("*.wav"))
-            if neg_files:
-                print("\n  Top-scoring negative files (possible contamination):")
-                for path in neg_files:
-                    try:
-                        audio = pad_or_trim(load_wav(path), CLIP_SAMPLES)
-                        emb = np.stack([embed_clip(audio)])  # (1, T, 96)
-                        wins = build_negative_windows(emb, stride=1)
-                        with torch.no_grad():
-                            scores = inference_model(torch.from_numpy(wins)).squeeze().numpy()
-                        peak = float(np.atleast_1d(scores).max())
-                        if peak > 0.5:
-                            print(f"    {peak:.3f}  {path.name}")
-                    except Exception:
-                        pass
+        # Identify which negative FILES are scoring high (per-clip max score).
+        # Reuse the file list from the augmentation phase so the diagnostic
+        # matches what was actually used for training.
+        if neg_paths:
+            print("\n  Top-scoring negative files (possible contamination):")
+            for path in neg_paths:
+                try:
+                    audio = pad_or_trim(load_wav(path), CLIP_SAMPLES)
+                    emb = np.stack([embed_clip(audio)])  # (1, T, 96)
+                    wins = build_negative_windows(emb, stride=1)
+                    with torch.no_grad():
+                        scores = inference_model(torch.from_numpy(wins)).squeeze().numpy()
+                    peak = float(np.atleast_1d(scores).max())
+                    if peak > 0.5:
+                        print(f"    {peak:.3f}  {path.name}")
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Export to ONNX (kept for backward compatibility / inspection)
