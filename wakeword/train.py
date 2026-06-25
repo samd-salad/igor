@@ -59,8 +59,13 @@ MODEL_NAME  = "igor"   # becomes the key in model.predict() results
 
 SAMPLE_RATE  = 16000
 CLIP_SAMPLES = SAMPLE_RATE * 3  # 3-second clips (pad/trim all audio to this)
-N_EPOCHS     = 50   # capped to prevent sigmoid saturation; v0.2 at 200 collapsed to hard 0/1
+N_EPOCHS     = 100  # bumped from 50 — v0.5 loss still decreasing at epoch 50
 BATCH_SIZE   = 64
+N_AUG_VARIANTS = 10   # augmented variants per real positive
+NEG_STRIDE     = 1    # MUST be 1 — stride=10 in v0.6 fed the model 10%
+                      # of windows; the unseen 90% all fired at the gate
+                      # because the model only saw striped subsamples.
+                      # Full coverage is non-negotiable.
 
 
 # ---------------------------------------------------------------------------
@@ -117,26 +122,18 @@ def main():
 
     OUTPUT_DIR.mkdir(exist_ok=True)
 
-    # Load positive clips from both real recordings and Piper synthesis.
-    # The en_GB Piper voices scored ~0.017 in v0.3 — the model treated them
-    # as effectively negative. They're noise in the positive set; skip them
-    # so positives represent a tighter "Igor said in American prosody"
-    # distribution and don't drag the decision boundary.
-    POSITIVE_SYNTH_DIR = ROOT / "wakeword" / "samples" / "positive_synth"
-    SKIP_SYNTH_VOICES = ("en_GB-",)
+    # REAL POSITIVES ONLY. v0.5 used Piper synth: hundreds scored 0.02
+    # post-train (model classified them as negatives), fragmenting the
+    # positive cluster and stranding the decision boundary. The user's
+    # actual voice is the only thing the runtime ever hears — train on
+    # that distribution directly and rely on per-clip augmentation
+    # (N_AUG_VARIANTS variants per real clip) to multiply coverage.
     all_pos_files = sorted(list(POSITIVE_DIR.glob("*.wav")))
-    if POSITIVE_SYNTH_DIR.exists():
-        synth_files = sorted(POSITIVE_SYNTH_DIR.glob("*.wav"))
-        synth_files = [
-            f for f in synth_files
-            if not any(skip in f.name for skip in SKIP_SYNTH_VOICES)
-        ]
-        all_pos_files += synth_files
     if not all_pos_files:
-        print(f"No positive WAVs found in {POSITIVE_DIR}/ or {POSITIVE_SYNTH_DIR}/.")
+        print(f"No positive WAVs found in {POSITIVE_DIR}/.")
         sys.exit(1)
-    print(f"\nLoading {len(all_pos_files)} positive clips "
-          f"(real + synthetic), trim+normalize+left-pad to {CLIP_SAMPLES//SAMPLE_RATE}s...")
+    print(f"\nLoading {len(all_pos_files)} real positive clips, "
+          f"trim+normalize+left-pad to {CLIP_SAMPLES//SAMPLE_RATE}s...")
 
     pos_audio_raw = []
     for path in all_pos_files:
@@ -191,27 +188,30 @@ def main():
     )
     print(f"  {len(neg_audio)} negatives loaded.")
 
-    # Apply augmentation
+    # Apply augmentation — N_AUG_VARIANTS variants per real positive.
+    # Each variant gets its own independent random RIR + SNR mix to
+    # produce a diverse training cluster from a small recording pool.
+    # The original CLEAN clip is also kept (variant 0) so the model
+    # sees the unaugmented prosody as well.
     pos_audio = []
-    for clip in pos_audio_raw:
-        x = clip
-        if aug_rng.random() < 0.5:
-            rir = rirs[aug_rng.integers(0, len(rirs))]
-            x = apply_rir(x, rir)
-        if aug_rng.random() < 0.75 and len(neg_audio) > 0:
-            bg = neg_audio[aug_rng.integers(0, len(neg_audio))]
-            # SNR floor of 10 dB: positive content must remain audibly
-            # dominant. Lower floors created a shortcut where the model
-            # learned "quiet noise = positive" because positive+bg at 0 dB
-            # SNR is half-noise but still gets the positive label. Range
-            # 10-25 dB ensures positives stay the dominant signal at all
-            # mixing depths while still teaching robustness to backgrounds.
-            snr = random_snr_db(aug_rng, low=10.0, high=25.0)
-            x = mix_with_background(x, bg, snr_db=snr, rng=aug_rng)
-        pos_audio.append(x)
+    pos_audio_src_idx = []  # parent real-clip index for diagnostics
+    for src_i, clip in enumerate(pos_audio_raw):
+        pos_audio.append(clip)
+        pos_audio_src_idx.append(src_i)
+        for _ in range(N_AUG_VARIANTS - 1):
+            x = clip
+            if aug_rng.random() < 0.7:
+                rir = rirs[aug_rng.integers(0, len(rirs))]
+                x = apply_rir(x, rir)
+            if aug_rng.random() < 0.85 and len(neg_audio) > 0:
+                bg = neg_audio[aug_rng.integers(0, len(neg_audio))]
+                snr = random_snr_db(aug_rng, low=10.0, high=25.0)
+                x = mix_with_background(x, bg, snr_db=snr, rng=aug_rng)
+            pos_audio.append(x)
+            pos_audio_src_idx.append(src_i)
     pos_audio = np.stack(pos_audio)
     n_pos = len(pos_audio)
-    print(f"Augmented positives: {n_pos}")
+    print(f"Augmented positives: {n_pos} ({len(pos_audio_raw)} real × ~{N_AUG_VARIANTS} variants)")
 
     # ----- Embed and window -----
     print("\nExtracting embeddings via pyopen_wakeword features...")
@@ -219,7 +219,9 @@ def main():
     neg_emb = np.stack([embed_clip(c) for c in neg_audio])  # (M, T, 96)
     print(f"  Positive emb: {pos_emb.shape}  Negative emb: {neg_emb.shape}")
 
-    # ONE positive window per clip with ±200ms jitter (reference-aligned).
+    # ONE positive window per (augmented) clip with ±200ms jitter.
+    # Track by SOURCE real-clip index (pos_audio_src_idx) so the per-file
+    # diagnostic reports parent recordings, not augmentation variants.
     win_rng = np.random.default_rng(7)
     pos_wins_list = []
     pos_win_file_idx = []
@@ -228,7 +230,7 @@ def main():
         try:
             win = build_positive_window(clip_emb, jitter_ms=200.0, rng=win_rng)
             pos_wins_list.append(win)
-            pos_win_file_idx.append(i)
+            pos_win_file_idx.append(pos_audio_src_idx[i])
         except ValueError:
             n_too_short += 1
     if n_too_short:
@@ -236,9 +238,15 @@ def main():
     pos_wins = np.stack(pos_wins_list).astype(np.float32) if pos_wins_list else \
         np.empty((0, WINDOW_FRAMES, 96), dtype=np.float32)
 
-    # All windows of all negatives (stride=1 — heaviest learning signal)
-    neg_wins = build_negative_windows(neg_emb, stride=1)
-    print(f"  Windows — positive: {len(pos_wins)}  negative: {len(neg_wins)}")
+    # stride=1 is mandatory. v0.6 tried stride=10 to reduce class imbalance,
+    # but the model perfectly classified the strided windows during training
+    # (mean=0.017, max=0.160) while ALL 2913 files fired the gate at stride=1
+    # — the unseen 90% of windows lived in feature space the model never had
+    # gradient on. With 10x positive augmentation (2310 windows) and pos_weight
+    # auto-set to ~143, the 1:143 imbalance is workable.
+    neg_wins = build_negative_windows(neg_emb, stride=NEG_STRIDE)
+    print(f"  Windows — positive: {len(pos_wins)}  negative: {len(neg_wins)}  "
+          f"(ratio 1:{len(neg_wins)/max(1, len(pos_wins)):.1f})")
 
     # ------------------------------------------------------------------
     # Prepare training tensors
@@ -260,7 +268,9 @@ def main():
         epochs=N_EPOCHS,
         batch_size=BATCH_SIZE,
         lr=1e-4,
-        layer_dim=128,
+        layer_dim=192,  # bumped from 128 — v0.6.1 had 98 hard-stuck
+                        # negatives; bigger model gets more capacity for
+                        # a tighter decision boundary
     )
 
     # ------------------------------------------------------------------
@@ -294,25 +304,50 @@ def main():
 
     if pos_scores.mean() < 0.7:
         print("  Warning: positive scores are low — consider recording more samples.")
-    if neg_scores.max() > 0.5:
-        print("  Warning: some negatives score high — consider adding real negative recordings.")
-        # Identify which negative FILES are scoring high (per-clip max score).
-        # Reuse the file list from the augmentation phase so the diagnostic
-        # matches what was actually used for training.
-        if neg_paths:
-            print("\n  Top-scoring negative files (possible contamination):")
-            for path in neg_paths:
-                try:
-                    audio = pad_or_trim(load_wav(path), CLIP_SAMPLES)
-                    emb = np.stack([embed_clip(audio)])  # (1, T, 96)
-                    wins = build_negative_windows(emb, stride=1)
-                    with torch.no_grad():
-                        scores = inference_model(torch.from_numpy(wins)).squeeze().numpy()
-                    peak = float(np.atleast_1d(scores).max())
-                    if peak > 0.5:
-                        print(f"    {peak:.3f}  {path.name}")
-                except Exception:
-                    pass
+
+    # ------------------------------------------------------------------
+    # SHIPPING GATE: real-audio false-positive check.
+    # v0.5 passed a synthetic-noise smoke test then fired ~every 30s in
+    # production because synthetic Gaussian/tonal noise didn't represent
+    # actual mic floor. This gate scores EVERY recorded negative file at
+    # stride=1 (most aggressive) and counts FP files at the production
+    # threshold (0.5). If too many fire, we ship a known-broken model.
+    # ------------------------------------------------------------------
+    print("\nShipping gate: scoring every recorded negative at stride=1...")
+    fp_per_file: list[tuple[float, str]] = []
+    for path in neg_paths:
+        try:
+            audio = pad_or_trim(load_wav(path), CLIP_SAMPLES)
+            emb = np.stack([embed_clip(audio)])
+            wins = build_negative_windows(emb, stride=1)
+            if len(wins) == 0:
+                continue
+            with torch.no_grad():
+                scores = inference_model(torch.from_numpy(wins)).squeeze().numpy()
+            fp_per_file.append((float(np.atleast_1d(scores).max()), path.name))
+        except Exception as e:
+            print(f"  Skip {path.name}: {e}")
+
+    fp_per_file.sort(reverse=True)
+    above_05 = [x for x in fp_per_file if x[0] > 0.5]
+    above_07 = [x for x in fp_per_file if x[0] > 0.7]
+    above_085 = [x for x in fp_per_file if x[0] > 0.85]
+    total = len(fp_per_file)
+    print(f"  Real-audio FP rate: >0.5: {len(above_05)}/{total} "
+          f"({100*len(above_05)/max(1,total):.1f}%)  "
+          f">0.7: {len(above_07)}  >0.85: {len(above_085)}")
+    if above_05[:20]:
+        print("  Top-scoring real negatives:")
+        for peak, name in above_05[:20]:
+            print(f"    {peak:.3f}  {name}")
+
+    # Gate (informational): < 1% of recorded negatives may score > 0.5.
+    # Reported but NOT enforced via sys.exit — the model is always exported
+    # so deploy decisions can be made on production behavior, not just the
+    # offline stride=1 worst-case (production uses smoothing + trigger_level).
+    fp_rate = len(above_05) / max(1, total)
+    gate_status = "PASS" if fp_rate <= 0.01 else "FAIL"
+    print(f"\n{gate_status}: {fp_rate*100:.2f}% real-negative FP rate (gate: <1%).")
 
     # ------------------------------------------------------------------
     # Export to ONNX (kept for backward compatibility / inspection)
@@ -342,7 +377,7 @@ def main():
     # nothing, a known issue with the TFLite runtime for dynamic shapes.
     #
     # Re-export ONNX with fixed batch=1, then convert with onnx2tf.
-    tflite_path = OUTPUT_DIR / f"{MODEL_NAME}_v0.5.tflite"
+    tflite_path = OUTPUT_DIR / f"{MODEL_NAME}_v0.6.3.tflite"
     _export_tflite(inference_model, dummy_input, tflite_path)
 
     print(f"\nDeploy to the Pi5 wyoming-satellite host:")

@@ -12,7 +12,7 @@ import torch.nn as nn
 
 def build_neg_weight_schedule(epochs: int,
                               start: float = 1.0,
-                              end: float = 4.0) -> list[float]:
+                              end: float = 8.0) -> list[float]:
     """Linear ramp of the negative-class weight from start at epoch 0 to end
     at the final epoch. Pushes the model to be more confident on negatives
     later in training."""
