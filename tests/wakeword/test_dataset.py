@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 
 from wakeword._dataset import (
-    build_positive_window, build_negative_windows, WINDOW_FRAMES,
+    build_positive_window, build_negative_windows, split_indices,
+    WINDOW_FRAMES,
 )
 
 
@@ -74,3 +75,41 @@ def test_build_negative_windows_skips_too_short_clips():
     clips_emb = np.zeros((2, 10, 96), dtype=np.float32)
     wins = build_negative_windows(clips_emb, stride=1)
     assert wins.shape == (0, 16, 96)
+
+
+def test_split_indices_is_disjoint_and_covers_all():
+    train, holdout = split_indices(100, holdout_frac=0.2, seed=0)
+    assert len(train) == 80
+    assert len(holdout) == 20
+    assert set(train.tolist()).isdisjoint(set(holdout.tolist()))
+    assert set(train.tolist()) | set(holdout.tolist()) == set(range(100))
+
+
+def test_split_indices_is_deterministic_for_same_seed():
+    a_train, a_hold = split_indices(100, holdout_frac=0.2, seed=42)
+    b_train, b_hold = split_indices(100, holdout_frac=0.2, seed=42)
+    assert np.array_equal(a_train, b_train)
+    assert np.array_equal(a_hold, b_hold)
+
+
+def test_split_indices_changes_with_seed():
+    a_hold = split_indices(100, holdout_frac=0.2, seed=0)[1]
+    b_hold = split_indices(100, holdout_frac=0.2, seed=1)[1]
+    assert not np.array_equal(a_hold, b_hold)
+
+
+def test_split_indices_rejects_invalid_frac():
+    with pytest.raises(ValueError):
+        split_indices(100, holdout_frac=0.0, seed=0)
+    with pytest.raises(ValueError):
+        split_indices(100, holdout_frac=1.0, seed=0)
+    with pytest.raises(ValueError):
+        split_indices(100, holdout_frac=-0.1, seed=0)
+
+
+def test_split_indices_rounds_holdout_to_nearest_clip():
+    # 4250 clips × 0.2 = 850.0 exact — but verify rounding behavior with awkward sizes
+    train, holdout = split_indices(7, holdout_frac=0.2, seed=0)
+    # round(7 * 0.2) = round(1.4) = 1
+    assert len(holdout) == 1
+    assert len(train) == 6

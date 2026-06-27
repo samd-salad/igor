@@ -102,9 +102,10 @@ def train_model(
     Returns the inference-wired model (sigmoid output).
 
     Neg-weight schedule: pos_weight is STATIC (n_neg/n_pos, handles class
-    imbalance). neg_w ramps 1.0→4.0 and is applied as a per-sample multiplier
-    on negative-labeled rows only, growing the penalty on hard negatives over
-    training without disturbing positive-class weighting.
+    imbalance). neg_w ramps from build_neg_weight_schedule defaults (1.0→8.0)
+    and is applied as a per-sample multiplier on negative-labeled rows only,
+    growing the penalty on hard negatives over training without disturbing
+    positive-class weighting.
     """
     torch.manual_seed(42)
     model = WakewordModel(layer_dim=layer_dim, inference=False)

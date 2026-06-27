@@ -48,7 +48,7 @@ from wakeword._augmentation import (
     apply_rir, mix_with_background, random_snr_db, generate_synthetic_rirs,
 )
 from wakeword._dataset import (
-    build_positive_window, build_negative_windows, WINDOW_FRAMES,
+    build_positive_window, build_negative_windows, split_indices, WINDOW_FRAMES,
 )
 
 ROOT        = Path(__file__).parent.parent
@@ -66,6 +66,8 @@ NEG_STRIDE     = 1    # MUST be 1 — stride=10 in v0.6 fed the model 10%
                       # of windows; the unseen 90% all fired at the gate
                       # because the model only saw striped subsamples.
                       # Full coverage is non-negotiable.
+NEG_HOLDOUT_FRAC = 0.20  # file-level; never seen during training or augmentation
+NEG_HOLDOUT_SEED = 4317  # change only when you want a different held-out partition
 
 
 # ---------------------------------------------------------------------------
@@ -161,14 +163,31 @@ def main():
 
     # Need backgrounds for SNR mixing — load negatives now so we can mix
     if NEGATIVE_DIR.exists():
-        neg_paths = sorted(NEGATIVE_DIR.glob("*.wav"))
+        neg_paths_all = sorted(NEGATIVE_DIR.glob("*.wav"))
     else:
-        neg_paths = []
-    if len(neg_paths) < 100:
+        neg_paths_all = []
+    if len(neg_paths_all) < 100:
         print(f"ERROR: need >= 100 real negative clips in {NEGATIVE_DIR}/, "
-              f"found {len(neg_paths)}.")
+              f"found {len(neg_paths_all)}.")
         sys.exit(1)
-    print(f"Loading {len(neg_paths)} real negative clips for backgrounds and training...")
+
+    # File-level holdout split. Holdout clips never enter training data or the
+    # augmentation background pool — the only place they touch the model is the
+    # post-train shipping gate. That gate is the only honest signal we have for
+    # generalization; previously we evaluated on the same negatives we trained
+    # on at stride=1, which the hard-neg-mining loop drove to ~0 by design and
+    # told us nothing about runtime FPs.
+    train_idx, holdout_idx = split_indices(
+        len(neg_paths_all),
+        holdout_frac=NEG_HOLDOUT_FRAC,
+        seed=NEG_HOLDOUT_SEED,
+    )
+    neg_paths = [neg_paths_all[i] for i in train_idx]
+    neg_holdout_paths = [neg_paths_all[i] for i in holdout_idx]
+    print(f"Negative split: {len(neg_paths_all)} total -> "
+          f"{len(neg_paths)} train / {len(neg_holdout_paths)} holdout "
+          f"(seed={NEG_HOLDOUT_SEED}, frac={NEG_HOLDOUT_FRAC})")
+    print(f"Loading {len(neg_paths)} train negatives for backgrounds and training...")
     # DO NOT normalize_peak negatives — the user's recording mic puts the
     # quietest negatives at RMS ~100, but normalize_peak scales them all to
     # peak=16000. This taught v0.3/v0.4 that "anything = loud at inference"
@@ -205,7 +224,12 @@ def main():
                 x = apply_rir(x, rir)
             if aug_rng.random() < 0.85 and len(neg_audio) > 0:
                 bg = neg_audio[aug_rng.integers(0, len(neg_audio))]
-                snr = random_snr_db(aug_rng, low=10.0, high=25.0)
+                # SNR range 0-10 dB: positive comparable in volume to bg
+                # (matches dscripka's reference notebook). v0.6's 10-25 dB
+                # had positives much louder than bg — the model never trained
+                # on the hard "wake word over loud TV" case and learned to
+                # equate "loud + clean" with "positive."
+                snr = random_snr_db(aug_rng, low=0.0, high=10.0)
                 x = mix_with_background(x, bg, snr_db=snr, rng=aug_rng)
             pos_audio.append(x)
             pos_audio_src_idx.append(src_i)
@@ -306,16 +330,21 @@ def main():
         print("  Warning: positive scores are low — consider recording more samples.")
 
     # ------------------------------------------------------------------
-    # SHIPPING GATE: real-audio false-positive check.
+    # SHIPPING GATE: held-out real-audio false-positive check.
+    #
+    # Scores the HOLDOUT 20% of negatives (never seen during training or
+    # augmentation) at stride=1. This is the only honest generalization
+    # signal — scoring the training-set negatives is pointless because
+    # hard-neg mining drove them to ~0 by construction.
+    #
     # v0.5 passed a synthetic-noise smoke test then fired ~every 30s in
     # production because synthetic Gaussian/tonal noise didn't represent
-    # actual mic floor. This gate scores EVERY recorded negative file at
-    # stride=1 (most aggressive) and counts FP files at the production
-    # threshold (0.5). If too many fire, we ship a known-broken model.
+    # actual mic floor. Real held-out audio is the only true gate.
     # ------------------------------------------------------------------
-    print("\nShipping gate: scoring every recorded negative at stride=1...")
+    print(f"\nShipping gate: scoring {len(neg_holdout_paths)} HELD-OUT negatives "
+          f"(unseen during training) at stride=1...")
     fp_per_file: list[tuple[float, str]] = []
-    for path in neg_paths:
+    for path in neg_holdout_paths:
         try:
             audio = pad_or_trim(load_wav(path), CLIP_SAMPLES)
             emb = np.stack([embed_clip(audio)])
@@ -333,21 +362,21 @@ def main():
     above_07 = [x for x in fp_per_file if x[0] > 0.7]
     above_085 = [x for x in fp_per_file if x[0] > 0.85]
     total = len(fp_per_file)
-    print(f"  Real-audio FP rate: >0.5: {len(above_05)}/{total} "
+    print(f"  Holdout FP rate: >0.5: {len(above_05)}/{total} "
           f"({100*len(above_05)/max(1,total):.1f}%)  "
           f">0.7: {len(above_07)}  >0.85: {len(above_085)}")
     if above_05[:20]:
-        print("  Top-scoring real negatives:")
+        print("  Top-scoring holdout negatives:")
         for peak, name in above_05[:20]:
             print(f"    {peak:.3f}  {name}")
 
-    # Gate (informational): < 1% of recorded negatives may score > 0.5.
+    # Gate (informational): < 1% of held-out negatives may score > 0.5.
     # Reported but NOT enforced via sys.exit — the model is always exported
     # so deploy decisions can be made on production behavior, not just the
     # offline stride=1 worst-case (production uses smoothing + trigger_level).
     fp_rate = len(above_05) / max(1, total)
     gate_status = "PASS" if fp_rate <= 0.01 else "FAIL"
-    print(f"\n{gate_status}: {fp_rate*100:.2f}% real-negative FP rate (gate: <1%).")
+    print(f"\n{gate_status}: {fp_rate*100:.2f}% holdout FP rate (gate: <1%).")
 
     # ------------------------------------------------------------------
     # Export to ONNX (kept for backward compatibility / inspection)
@@ -377,7 +406,7 @@ def main():
     # nothing, a known issue with the TFLite runtime for dynamic shapes.
     #
     # Re-export ONNX with fixed batch=1, then convert with onnx2tf.
-    tflite_path = OUTPUT_DIR / f"{MODEL_NAME}_v0.6.3.tflite"
+    tflite_path = OUTPUT_DIR / f"{MODEL_NAME}_v0.7.tflite"
     _export_tflite(inference_model, dummy_input, tflite_path)
 
     print(f"\nDeploy to the Pi5 wyoming-satellite host:")

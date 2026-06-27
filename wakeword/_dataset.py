@@ -33,6 +33,27 @@ def build_positive_window(clip_emb: np.ndarray, jitter_ms: float,
     return clip_emb[start_idx:end_idx].astype(np.float32)
 
 
+def split_indices(n: int, holdout_frac: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """Deterministically partition indices 0..n-1 into (train_idx, holdout_idx).
+
+    File-level split (not window-level): callers pass a FILE count so an
+    individual clip's training windows can never leak into the holdout
+    evaluation set. With same `seed`, the split is byte-for-byte stable
+    across runs — same model, same holdout, comparable gate metrics.
+
+    holdout_frac must be in (0.0, 1.0) exclusive. Size of holdout =
+    round(n * holdout_frac); train gets the remainder.
+    """
+    if not 0.0 < holdout_frac < 1.0:
+        raise ValueError(
+            f"holdout_frac must be in (0.0, 1.0), got {holdout_frac}"
+        )
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(n)
+    holdout_size = int(round(n * holdout_frac))
+    return perm[holdout_size:], perm[:holdout_size]
+
+
 def build_negative_windows(clips_emb: np.ndarray, stride: int = 1) -> np.ndarray:
     """Slide 16-frame windows over each (T, 96) clip in clips_emb.
     Returns (N, 16, 96). Clips shorter than 16 frames are skipped.
