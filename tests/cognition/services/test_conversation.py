@@ -6,6 +6,7 @@ from server.cognition.aggregates.user_state import UserState
 from server.cognition.contracts import VoiceTurn, RoomConfig
 from server.cognition.ports.llm import ChatResult
 from server.cognition.services.conversation import Conversation
+from server.cognition.services.intent_router import IntentRouter, Tier1Match
 from server.external.sqlite_persistence import SqlitePersistence
 from server.external.sqlite_retrieval import TagRetrieval
 from server.external.system_clock import SystemClock
@@ -45,12 +46,13 @@ def _turn(text: str, correlation_id: str = "t-1",
     )
 
 
-def _build_conversation(sp, llm=None, clock=None):
+def _build_conversation(sp, llm=None, clock=None, tools=None, intent_router=None):
     return Conversation(
         memory=MemoryStore(sp), episodes=EpisodeStore(sp),
         identity=IdentityStore(sp), user_state=UserState(sp),
         retrieval=TagRetrieval(sp), llm=llm or _StubLLM(),
-        tools=_StubExecutor(), clock=clock or SystemClock(),
+        tools=tools or _StubExecutor(), clock=clock or SystemClock(),
+        intent_router=intent_router,
     )
 
 
@@ -65,12 +67,17 @@ def test_conversation_writes_episode_with_correlation_id(tmp_path):
     assert ep.raw_utterance == "hello there"
 
 
-def test_conversation_short_circuits_tier1(tmp_path):
+def test_pause_now_falls_through_to_llm(tmp_path):
+    """Regression: Tier 1 used to short-circuit 'pause' to a non-existent
+    `play_pause` tool, returning a canned 'Paused.' while nothing happened.
+    Patterns are gone; 'pause' must reach the LLM so it can pick the real
+    HA media tool."""
     sp = SqlitePersistence(tmp_path / "brain.db")
-    conv = _build_conversation(sp)
+    llm = _StubLLM(text="paused for real this time")
+    conv = _build_conversation(sp, llm=llm)
     result = conv.process(_turn("pause", correlation_id="t-pause"))
-    assert result.response_text == "Paused."
-    assert result.commands_executed == ["play_pause"]
+    assert llm.calls == 1
+    assert result.response_text == "paused for real this time"
 
 
 def test_conversation_persists_response_text_on_llm_turn(tmp_path):
@@ -84,13 +91,33 @@ def test_conversation_persists_response_text_on_llm_turn(tmp_path):
     assert ep.response_text == "something witty"
 
 
-def test_conversation_persists_response_text_on_tier1_turn(tmp_path):
+def test_tier1_dispatch_failure_falls_through_to_llm(tmp_path):
+    """If a Tier 1 pattern ever matches a tool no executor handles, we must
+    NOT serve the canned tier1 response (that's the bug that hid the
+    HA-MCP migration mismatch for months). Detect the executor's
+    'Unknown tool:' / 'Error ' return, log it, and hand the turn to the LLM."""
+
+    class _AlwaysMatchRouter:
+        def route(self, turn):
+            return Tier1Match("frob", {}, "Frobbed.")
+
+    class _FailingExecutor:
+        def list_schemas(self):
+            return []
+        def execute(self, name, args, turn):
+            return f"Unknown tool: {name}"
+
     sp = SqlitePersistence(tmp_path / "brain.db")
-    conv = _build_conversation(sp)
-    conv.process(_turn("pause", correlation_id="t-pause2"))
-    ep = sp.load_episode("t-pause2")
-    assert ep is not None
-    assert ep.response_text == "Paused."
+    llm = _StubLLM(text="i don't actually know how to frob")
+    conv = _build_conversation(
+        sp, llm=llm, tools=_FailingExecutor(),
+        intent_router=_AlwaysMatchRouter(),
+    )
+    result = conv.process(_turn("frobnicate the widget", correlation_id="t-frob"))
+
+    assert llm.calls == 1, "LLM must run when Tier 1 dispatch fails"
+    assert result.response_text == "i don't actually know how to frob"
+    assert result.response_text != "Frobbed.", "must not serve canned tier1 response on dispatch failure"
 
 
 def test_conversation_suppresses_self_echo_within_window(tmp_path):

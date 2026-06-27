@@ -28,6 +28,18 @@ _ECHO_OVERLAP_THRESHOLD = 0.5
 _TOKEN_RE = re.compile(r"[a-z0-9']+")
 _SILENT_SENTINEL_RE = re.compile(r"^\s*\[silent\]\s*\.?\s*$", re.IGNORECASE)
 
+_DISPATCH_FAILURE_PREFIXES = (
+    "Unknown tool:", "Unknown native tool:", "Unknown HA tool:",
+    "Error in ", "Error calling ",
+)
+
+
+def _looks_like_dispatch_failure(exec_result: str) -> bool:
+    """Tool executors return error strings rather than raising. Treat a
+    failure-shaped return as 'dispatch did not happen' so Tier 1 can fall
+    through to Tier 2 instead of serving a canned success message."""
+    return any(exec_result.startswith(p) for p in _DISPATCH_FAILURE_PREFIXES)
+
 
 def _token_set(s: str) -> set[str]:
     return set(_TOKEN_RE.findall(s.lower()))
@@ -52,6 +64,7 @@ class Conversation:
         tools: ToolExecutorPort,
         clock: ClockPort,
         summarizer: Optional[SessionSummarizer] = None,
+        intent_router: Optional[IntentRouter] = None,
     ):
         self._memory = memory
         self._episodes = episodes
@@ -63,7 +76,7 @@ class Conversation:
         self._clock = clock
         self._summarizer = summarizer
         self._quality_gate = QualityGate()
-        self._intent_router = IntentRouter()
+        self._intent_router = intent_router or IntentRouter()
         self._last_response: Optional[tuple[datetime, set[str]]] = None
 
     def process(self, turn: VoiceTurn) -> ConversationResult:
@@ -92,24 +105,35 @@ class Conversation:
 
         tier1: Tier1Match | None = self._intent_router.route(turn)
         if tier1 is not None:
+            dispatch_failed = False
             try:
-                self._tools.execute(tier1.command, tier1.params, turn)
+                exec_result = self._tools.execute(tier1.command, tier1.params, turn)
             except Exception:
-                logger.exception("Tier1 execution failed")
-            result = ConversationResult(
-                correlation_id=turn.correlation_id,
-                response_text=tier1.response,
-                commands_executed=[tier1.command],
-                end_conversation=True,
-            )
-            self._persist_episode(
-                turn, tier1.response,
-                [ToolCallRecord(tier1.command, tier1.params, tier1.response)],
-                intent="tier1",
-            )
-            self._remember_response(result.response_text)
-            self._enqueue_summary(turn, result)
-            return result
+                logger.exception("Tier1 execution raised; falling through to LLM")
+                dispatch_failed = True
+            else:
+                if _looks_like_dispatch_failure(exec_result):
+                    logger.warning(
+                        "Tier 1 matched %s but executor reported failure: %r — falling through to LLM",
+                        tier1.command, exec_result,
+                    )
+                    dispatch_failed = True
+
+            if not dispatch_failed:
+                result = ConversationResult(
+                    correlation_id=turn.correlation_id,
+                    response_text=tier1.response,
+                    commands_executed=[tier1.command],
+                    end_conversation=True,
+                )
+                self._persist_episode(
+                    turn, tier1.response,
+                    [ToolCallRecord(tier1.command, tier1.params, tier1.response)],
+                    intent="tier1",
+                )
+                self._remember_response(result.response_text)
+                self._enqueue_summary(turn, result)
+                return result
 
         relevant = self._retrieval.query(turn, k=3)
         recent_eps = self._episodes.get_recent(5)
