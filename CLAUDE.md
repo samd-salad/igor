@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+<!-- doc-verified: 2026-06-26 -->
+
 Guidance for Claude Code when working in this repository.
 
 ## Dev Session Workflow

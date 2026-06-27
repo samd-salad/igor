@@ -80,7 +80,7 @@ Follow the prompts. Aim for **150+ samples** across different styles (volume, sp
 
 ### Step 2 — Transfer samples to PC
 
-```powershell
+```bash
 scp -r samda@10.0.30.5:~/igor/wakeword/samples/ wakeword/
 ```
 
