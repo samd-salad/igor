@@ -6,7 +6,6 @@ Lazy-loads on first call so test startup is cheap.
 from __future__ import annotations
 from typing import Optional
 
-import numpy as np
 from fastembed import TextEmbedding
 
 
@@ -23,7 +22,7 @@ class EmbeddingEncoder:
         if self._model is None:
             self._model = TextEmbedding(model_name=self._model_name)
         vec = next(self._model.embed([text]))
-        arr = np.asarray(vec, dtype=np.float32)
+        arr = vec.astype("float32")
         if arr.shape != (_EMBED_DIM,):
             raise RuntimeError(
                 f"unexpected embedding shape {arr.shape}, expected ({_EMBED_DIM},)"
