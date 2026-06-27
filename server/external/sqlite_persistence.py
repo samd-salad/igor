@@ -149,6 +149,12 @@ class SqlitePersistence:
         ).fetchone()
         return _row_to_fact(row) if row else None
 
+    def find_fact_by_id(self, fact_id: str) -> Optional[Fact]:
+        row = self._conn.execute(
+            "SELECT * FROM facts WHERE fact_id = ? LIMIT 1", (fact_id,)
+        ).fetchone()
+        return _row_to_fact(row) if row else None
+
     def list_active_facts(self) -> list[Fact]:
         rows = self._conn.execute(
             "SELECT * FROM facts WHERE invalid_at IS NULL"

@@ -104,3 +104,23 @@ def test_save_fact_respects_precomputed_embedding(tmp_path):
     sp.save_fact(fact)
     stored = sp.find_fact("prefs", "tea")
     assert stored.embedding == pre
+
+
+def test_find_fact_by_id_returns_the_fact(tmp_path):
+    sp = SqlitePersistence(tmp_path / "brain.db")
+    fid = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    sp.save_fact(Fact(
+        fact_id=fid, category="prefs", key="coffee", value="dark roast",
+        tags=[], source_episode_id=None, embedding=None,
+        valid_at=now, invalid_at=None, created_at=now,
+    ))
+    found = sp.find_fact_by_id(fid)
+    assert found is not None
+    assert found.fact_id == fid
+    assert found.value == "dark roast"
+
+
+def test_find_fact_by_id_returns_none_when_missing(tmp_path):
+    sp = SqlitePersistence(tmp_path / "brain.db")
+    assert sp.find_fact_by_id("nonexistent") is None
