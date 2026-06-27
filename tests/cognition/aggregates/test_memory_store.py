@@ -5,6 +5,21 @@ from server.cognition.contracts import Episode
 from server.external.sqlite_persistence import SqlitePersistence
 
 
+class _FakePersistence:
+    """Just enough PersistencePort surface for writer-routing tests."""
+    def __init__(self):
+        self.saved: list = []
+    def save_fact(self, fact): self.saved.append(fact)
+    def find_fact(self, category, key): return None
+    def invalidate_fact(self, fact_id, at): pass
+
+
+class _FakeWriter:
+    def __init__(self):
+        self.enqueued: list = []
+    def enqueue(self, fact): self.enqueued.append(fact)
+
+
 def _seed_episode(sp, episode_id: str, minute: int = 0) -> None:
     EpisodeStore(sp).add(Episode(
         episode_id=episode_id,
@@ -40,3 +55,22 @@ def test_invalidate_then_replace(tmp_path):
     matches = [f for f in active if f.category == "prefs" and f.key == "coffee"]
     assert len(matches) == 1
     assert matches[0].value == "dark roast oat milk"
+
+
+def test_save_fact_uses_persistence_when_no_writer_set():
+    p = _FakePersistence()
+    ms = MemoryStore(p)
+    ms.save_fact("prefs", "coffee", "dark roast", [], None, datetime.now(UTC))
+    assert len(p.saved) == 1
+    assert p.saved[0].value == "dark roast"
+
+
+def test_save_fact_routes_through_writer_when_set():
+    p = _FakePersistence()
+    w = _FakeWriter()
+    ms = MemoryStore(p, fact_writer=w)
+    ms.save_fact("prefs", "coffee", "dark roast", [], None, datetime.now(UTC))
+    # writer got the fact, persistence did NOT (the writer will flush to it eventually)
+    assert len(w.enqueued) == 1
+    assert w.enqueued[0].value == "dark roast"
+    assert p.saved == []

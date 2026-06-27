@@ -2,15 +2,25 @@
 from __future__ import annotations
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Protocol
 
 from server.cognition.contracts import Fact
 from server.cognition.ports.persistence import PersistencePort
 
 
+class _FactWriter(Protocol):
+    def enqueue(self, fact: Fact) -> None: ...
+
+
 class MemoryStore:
-    def __init__(self, persistence: PersistencePort):
+    def __init__(
+        self,
+        persistence: PersistencePort,
+        *,
+        fact_writer: Optional[_FactWriter] = None,
+    ):
         self._p = persistence
+        self._writer = fact_writer
 
     def save_fact(
         self, category: str, key: str, value: str,
@@ -23,7 +33,10 @@ class MemoryStore:
             embedding=None,
             valid_at=now, invalid_at=None, created_at=now,
         )
-        self._p.save_fact(fact)
+        if self._writer is not None:
+            self._writer.enqueue(fact)
+        else:
+            self._p.save_fact(fact)
         return fact
 
     def update_fact(

@@ -52,12 +52,31 @@ def build():
 
     migrate_brain_json_if_needed(brain_dir / "brain.json", brain_dir / "brain.db")
 
-    persistence = SqlitePersistence(brain_dir / "brain.db")
-    retrieval = TagRetrieval(persistence)
+    embeddings_disabled = os.environ.get("IGOR_EMBEDDING_DISABLED") == "1"
+
+    if embeddings_disabled:
+        persistence = SqlitePersistence(brain_dir / "brain.db")
+        retrieval = TagRetrieval(persistence)
+        fact_writer = None
+    else:
+        # Lazy-import embedding modules so IGOR_EMBEDDING_DISABLED=1 boots don't pay
+        # an ImportError when fastembed isn't installed in the environment.
+        from server.external.embedding_encoder import EmbeddingEncoder
+        from server.external.vector_store import VectorStore
+        from server.external.async_fact_writer import AsyncFactWriter
+        from server.cognition.hybrid_retrieval import HybridRetrieval
+
+        encoder = EmbeddingEncoder()
+        persistence = SqlitePersistence(brain_dir / "brain.db", encoder=encoder)
+        tag_retrieval = TagRetrieval(persistence)
+        vector_store = VectorStore(persistence._conn)
+        retrieval = HybridRetrieval(tag_retrieval, vector_store, encoder, persistence)
+        fact_writer = AsyncFactWriter(persistence)
+
     llm = ClaudeAdapter()
     clock = SystemClock()
 
-    memory = MemoryStore(persistence)
+    memory = MemoryStore(persistence, fact_writer=fact_writer)
     episodes = EpisodeStore(persistence)
     identity = IdentityStore(persistence)
     user_state = UserState(persistence)

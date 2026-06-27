@@ -23,6 +23,9 @@ RUN apt-get update \
 COPY requirements-server-text.txt ./
 RUN pip install -r requirements-server-text.txt
 
+# Warm the fastembed model cache so the first request doesn't pay download latency.
+RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5')"
+
 COPY server ./server
 
 # Data directory is a mount point — brain.db lives here.
