@@ -27,9 +27,10 @@ def sp(tmp_path):
 def test_enqueue_returns_fast(sp):
     writer = AsyncFactWriter(sp)
     try:
+        facts = [_fact("dark roast coffee") for _ in range(10)]
         t0 = time.perf_counter()
-        for _ in range(10):
-            writer.enqueue(_fact("dark roast coffee"))
+        for f in facts:
+            writer.enqueue(f)
         elapsed_ms = (time.perf_counter() - t0) * 1000
         assert elapsed_ms < 50, f"enqueue too slow: {elapsed_ms} ms"
     finally:
