@@ -59,8 +59,11 @@ def build():
         retrieval = TagRetrieval(persistence)
         fact_writer = None
     else:
-        # Lazy-import embedding modules so IGOR_EMBEDDING_DISABLED=1 boots don't pay
-        # an ImportError when fastembed isn't installed in the environment.
+        # Construct the embedding pipeline only when the bypass is off.
+        # (Imports stay here too — keeps the disabled branch a touch lighter.
+        # Note: server/external/sqlite_persistence.py still imports EmbeddingEncoder
+        # at module top, so fastembed is loaded regardless. This block skips the
+        # encoder + writer instantiation, not the underlying module import.)
         from server.external.embedding_encoder import EmbeddingEncoder
         from server.external.vector_store import VectorStore
         from server.external.async_fact_writer import AsyncFactWriter
