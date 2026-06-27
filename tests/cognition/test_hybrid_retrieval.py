@@ -28,7 +28,7 @@ class FakeTagRetrieval:
 
 class FakeVectorStore:
     def __init__(self, ranking):
-        self._ranking = ranking  # list[(fact_id, distance)]
+        self._ranking = ranking  # list[fact_id], nearest first
 
     def search(self, query_embedding, top_k):
         return self._ranking[:top_k]
@@ -61,7 +61,7 @@ def test_rrf_combines_tag_and_vector_rankings():
     f2 = _fact("b", "beta")
     f3 = _fact("c", "gamma")
     tag = FakeTagRetrieval({"coffee": [f1, f2]})   # ranks a > b
-    vec = FakeVectorStore([("b", 0.1), ("c", 0.2), ("a", 0.3)])  # ranks b > c > a
+    vec = FakeVectorStore(["b", "c", "a"])  # ranks b > c > a
     store = FakeFactLookup([f1, f2, f3])
     hr = HybridRetrieval(tag, vec, FakeEncoder(), store, k=60)
 
@@ -87,7 +87,7 @@ def test_top_k_truncates():
 def test_facts_only_in_vector_results_are_still_returned():
     f1 = _fact("a", "alpha")
     tag = FakeTagRetrieval({})
-    vec = FakeVectorStore([("a", 0.1)])
+    vec = FakeVectorStore(["a"])
     store = FakeFactLookup([f1])
     hr = HybridRetrieval(tag, vec, FakeEncoder(), store, k=60)
     out = hr.query(_turn("anything"), k=5)

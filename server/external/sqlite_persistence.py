@@ -1,8 +1,13 @@
-"""SQLite implementation of cognition.ports.PersistencePort."""
+"""SQLite implementation of cognition.ports.PersistencePort.
+
+Stores Fact.embedding as bytes verbatim — does NOT encode. Encoding is a
+cognition-layer concern owned by AsyncFactWriter. The persistence adapter
+just persists whatever bytes show up on the Fact, and mirrors them into
+the sqlite-vec sidecar index when present.
+"""
 from __future__ import annotations
 import json
 import sqlite3
-from dataclasses import replace
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Optional
@@ -11,7 +16,6 @@ from server.cognition.contracts import (
     Episode, Fact, Reflection, FeedbackEntry, Reminder, ToolCallRecord,
 )
 from server.external._internal.db import open_db
-from server.external.embedding_encoder import EmbeddingEncoder
 from server.external.vector_store import VectorStore
 
 
@@ -64,9 +68,8 @@ def _row_to_fact(row: sqlite3.Row) -> Fact:
 class SqlitePersistence:
     """Concrete PersistencePort. Single SQLite file."""
 
-    def __init__(self, db_path: Path, *, encoder: Optional[EmbeddingEncoder] = None):
+    def __init__(self, db_path: Path):
         self._conn = open_db(db_path)
-        self._encoder = encoder
         self._vec = VectorStore(self._conn)
 
     # ---- Episodes ----
@@ -120,10 +123,6 @@ class SqlitePersistence:
 
     # ---- Facts ----
     def save_fact(self, fact: Fact) -> None:
-        embedding = fact.embedding
-        if embedding is None and self._encoder is not None:
-            embedding = self._encoder.encode(fact.value)
-            fact = replace(fact, embedding=embedding)
         self._conn.execute(
             """INSERT OR REPLACE INTO facts
                (fact_id, category, key, value, tags, source_episode_id,
@@ -132,14 +131,14 @@ class SqlitePersistence:
             (
                 fact.fact_id, fact.category, fact.key, fact.value,
                 json.dumps(fact.tags), fact.source_episode_id,
-                embedding,
+                fact.embedding,
                 _dt_to_iso(fact.valid_at),
                 _dt_to_iso(fact.invalid_at) if fact.invalid_at else None,
                 _dt_to_iso(fact.created_at),
             ),
         )
-        if embedding is not None:
-            self._vec.upsert(fact.fact_id, embedding)
+        if fact.embedding is not None:
+            self._vec.upsert(fact.fact_id, fact.embedding)
 
     def find_fact(self, category: str, key: str) -> Optional[Fact]:
         row = self._conn.execute(

@@ -37,11 +37,11 @@ def test_caches_tool_catalog_on_construction(runner):
     with patch("server.external.ha_mcp_executor.fetch_tool_catalog", new=fake_fetch):
         ex = HAMCPToolExecutor("http://10.0.40.5:8123/api/mcp", "tok", runner)
     schemas = ex.list_schemas()
-    names = [s["name"] for s in schemas]
+    names = [s.name for s in schemas]
     assert names == ["HassTurnOn", "HassTurnOff"]
     for s in schemas:
-        assert "description" in s
-        assert s["input_schema"]["type"] == "object"
+        assert s.description
+        assert s.input_schema["type"] == "object"
 
 
 def test_handles_returns_true_for_cached_tool_name(runner):

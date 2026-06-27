@@ -1,7 +1,7 @@
 from datetime import datetime, UTC
 from unittest.mock import MagicMock
 
-from server.cognition.contracts import RoomConfig, VoiceTurn
+from server.cognition.contracts import RoomConfig, ToolSchema, VoiceTurn
 from server.external.igor_native_tools import (
     IgorTool, IgorNativeToolExecutor, build_native_registry,
 )
@@ -25,11 +25,11 @@ def test_executor_lists_registered_tool_schemas():
     )
     ex = IgorNativeToolExecutor([tool])
     schemas = ex.list_schemas()
-    assert schemas == [{
-        "name": "ping",
-        "description": "say pong",
-        "input_schema": {"type": "object", "properties": {}},
-    }]
+    assert schemas == [ToolSchema(
+        name="ping",
+        description="say pong",
+        input_schema={"type": "object", "properties": {}},
+    )]
     assert ex.handles("ping")
     assert not ex.handles("unknown")
 
@@ -61,7 +61,7 @@ def test_build_native_registry_includes_expected_tools():
     weather.current.return_value = "65°F and clear in Arlington."
     ex = build_native_registry(memory=memory, user_state=user_state,
                                weather=weather, default_location="Arlington, VA")
-    names = {s["name"] for s in ex.list_schemas()}
+    names = {s.name for s in ex.list_schemas()}
     assert {"save_memory", "forget_memory", "log_feedback",
             "get_weather", "calculate"} <= names
 

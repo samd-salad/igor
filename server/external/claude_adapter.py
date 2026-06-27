@@ -7,9 +7,20 @@ from typing import Callable, Optional
 
 import anthropic  # boundary_check enforces this only-here import
 
+from server.cognition.contracts import ToolSchema
 from server.cognition.ports.llm import ChatResult
 
 logger = logging.getLogger(__name__)
+
+
+def _to_anthropic_schema(s: ToolSchema) -> dict:
+    """Translate vendor-neutral ToolSchema → Anthropic's tool dict shape.
+    All Anthropic-specific schema knowledge lives in this one function."""
+    return {
+        "name": s.name,
+        "description": s.description,
+        "input_schema": s.input_schema,
+    }
 
 
 class ClaudeAdapter:
@@ -26,7 +37,7 @@ class ClaudeAdapter:
         self,
         system_prompt: str,
         user_text: str,
-        tool_schemas: list[dict],
+        tool_schemas: list[ToolSchema],
         tool_executor: Callable[[str, dict], str],
         history: list[dict] | None = None,
     ) -> ChatResult:
@@ -36,13 +47,14 @@ class ClaudeAdapter:
         out_tok = 0
         last_text = ""
 
+        anthropic_tools = [_to_anthropic_schema(s) for s in tool_schemas]
         for _ in range(self._max_rounds):
             resp = self._client.messages.create(
                 model=self._model,
                 max_tokens=self._max_tokens,
                 system=system_prompt,
                 messages=messages,
-                tools=tool_schemas or [],
+                tools=anthropic_tools,
             )
             in_tok += getattr(resp.usage, "input_tokens", 0)
             out_tok += getattr(resp.usage, "output_tokens", 0)

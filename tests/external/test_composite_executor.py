@@ -1,6 +1,6 @@
 from datetime import datetime, UTC
 
-from server.cognition.contracts import RoomConfig, VoiceTurn
+from server.cognition.contracts import RoomConfig, ToolSchema, VoiceTurn
 from server.external.composite_executor import CompositeToolExecutor
 
 
@@ -24,11 +24,15 @@ def _turn() -> VoiceTurn:
     )
 
 
+def _schema(name: str) -> ToolSchema:
+    return ToolSchema(name=name, description="", input_schema={})
+
+
 def test_list_schemas_concatenates_in_order():
-    a = _Stub([{"name": "a1"}, {"name": "a2"}], {})
-    b = _Stub([{"name": "b1"}], {})
+    a = _Stub([_schema("a1"), _schema("a2")], {})
+    b = _Stub([_schema("b1")], {})
     c = CompositeToolExecutor(a, b)
-    assert [s["name"] for s in c.list_schemas()] == ["a1", "a2", "b1"]
+    assert [s.name for s in c.list_schemas()] == ["a1", "a2", "b1"]
 
 
 def test_execute_routes_to_first_executor_that_handles():

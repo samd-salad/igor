@@ -14,7 +14,7 @@ from typing import Callable
 
 from server.cognition.aggregates.memory import MemoryStore
 from server.cognition.aggregates.user_state import UserState
-from server.cognition.contracts import VoiceTurn
+from server.cognition.contracts import ToolSchema, VoiceTurn
 from server.external.weather_open_meteo import OpenMeteoWeather
 
 logger = logging.getLogger(__name__)
@@ -36,10 +36,10 @@ class IgorNativeToolExecutor:
     def handles(self, name: str) -> bool:
         return name in self._by_name
 
-    def list_schemas(self) -> list[dict]:
+    def list_schemas(self) -> list[ToolSchema]:
         return [
-            {"name": t.name, "description": t.description,
-             "input_schema": t.input_schema}
+            ToolSchema(name=t.name, description=t.description,
+                       input_schema=t.input_schema)
             for t in self._tools
         ]
 

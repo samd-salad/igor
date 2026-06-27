@@ -60,21 +60,21 @@ def build():
         fact_writer = None
     else:
         # Construct the embedding pipeline only when the bypass is off.
-        # (Imports stay here too — keeps the disabled branch a touch lighter.
-        # Note: server/external/sqlite_persistence.py still imports EmbeddingEncoder
-        # at module top, so fastembed is loaded regardless. This block skips the
-        # encoder + writer instantiation, not the underlying module import.)
+        # SqlitePersistence stays encoder-agnostic — it stores whatever bytes
+        # arrive on Fact.embedding and mirrors them to the vec sidecar. The
+        # writer owns the encoder and fills in embeddings before persistence
+        # sees them. Single concern per layer.
         from server.external.embedding_encoder import EmbeddingEncoder
         from server.external.vector_store import VectorStore
         from server.external.async_fact_writer import AsyncFactWriter
         from server.cognition.hybrid_retrieval import HybridRetrieval
 
         encoder = EmbeddingEncoder()
-        persistence = SqlitePersistence(brain_dir / "brain.db", encoder=encoder)
+        persistence = SqlitePersistence(brain_dir / "brain.db")
         tag_retrieval = TagRetrieval(persistence)
         vector_store = VectorStore(persistence._conn)
         retrieval = HybridRetrieval(tag_retrieval, vector_store, encoder, persistence)
-        fact_writer = AsyncFactWriter(persistence)
+        fact_writer = AsyncFactWriter(persistence, encoder=encoder)
 
     llm = ClaudeAdapter()
     clock = SystemClock()

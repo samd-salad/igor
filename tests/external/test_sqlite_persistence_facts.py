@@ -3,7 +3,6 @@ from datetime import datetime, UTC
 import uuid
 from server.cognition.contracts import Fact
 from server.external.sqlite_persistence import SqlitePersistence
-from server.external.embedding_encoder import EmbeddingEncoder
 from server.external.vector_store import VectorStore
 
 
@@ -58,52 +57,43 @@ def test_naive_timestamps_in_db_normalize_to_utc_on_read(tmp_path):
     assert delta.days > 0
 
 
-def test_save_fact_populates_embedding_blob_when_none_and_mirrors_to_vec_index(tmp_path):
-    sp = SqlitePersistence(tmp_path / "brain.db", encoder=EmbeddingEncoder())
-    fact = Fact(
-        fact_id=str(uuid.uuid4()),
-        category="prefs",
-        key="coffee",
-        value="dark roast",
-        tags=[],
-        source_episode_id=None,
-        embedding=None,   # encoder should fill this in
-        valid_at=datetime.now(UTC),
-        invalid_at=None,
-        created_at=datetime.now(UTC),
-    )
-    sp.save_fact(fact)
-
-    # canonical store populated
+def test_save_fact_with_none_embedding_stores_null_and_skips_vec_mirror(tmp_path):
+    """Persistence is encoder-agnostic — if Fact.embedding is None it stores
+    null and does NOT touch the vec sidecar. The writer is responsible for
+    encoding upstream; persistence just persists."""
+    sp = SqlitePersistence(tmp_path / "brain.db")
+    fid = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    sp.save_fact(Fact(
+        fact_id=fid, category="prefs", key="coffee", value="dark roast",
+        tags=[], source_episode_id=None, embedding=None,
+        valid_at=now, invalid_at=None, created_at=now,
+    ))
     stored = sp.find_fact("prefs", "coffee")
     assert stored is not None
-    assert stored.embedding is not None
-    assert len(stored.embedding) == 384 * 4
+    assert stored.embedding is None
+    # Nothing landed in the vec sidecar — we never had bytes to mirror.
+    raw = sp._conn.execute(
+        "SELECT count(*) AS n FROM facts_vec WHERE fact_id = ?", (fid,)
+    ).fetchone()
+    assert raw["n"] == 0
 
-    # vec sidecar mirrors it
-    vs = VectorStore(sp._conn)
-    hits = vs.search(stored.embedding, top_k=1)
-    assert hits[0][0] == fact.fact_id
 
-
-def test_save_fact_respects_precomputed_embedding(tmp_path):
-    sp = SqlitePersistence(tmp_path / "brain.db", encoder=EmbeddingEncoder())
+def test_save_fact_with_embedding_mirrors_to_vec_index(tmp_path):
+    sp = SqlitePersistence(tmp_path / "brain.db")
     pre = struct.pack("<384f", *([0.123] * 384))
-    fact = Fact(
-        fact_id=str(uuid.uuid4()),
-        category="prefs",
-        key="tea",
-        value="earl grey",
-        tags=[],
-        source_episode_id=None,
-        embedding=pre,
-        valid_at=datetime.now(UTC),
-        invalid_at=None,
-        created_at=datetime.now(UTC),
-    )
-    sp.save_fact(fact)
+    fid = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    sp.save_fact(Fact(
+        fact_id=fid, category="prefs", key="tea", value="earl grey",
+        tags=[], source_episode_id=None, embedding=pre,
+        valid_at=now, invalid_at=None, created_at=now,
+    ))
     stored = sp.find_fact("prefs", "tea")
     assert stored.embedding == pre
+    # vec sidecar mirrors the bytes
+    vs = VectorStore(sp._conn)
+    assert vs.search(pre, top_k=1) == [fid]
 
 
 def test_find_fact_by_id_returns_the_fact(tmp_path):

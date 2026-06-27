@@ -7,7 +7,7 @@ becomes a callable tool here automatically (subject to HA's expose-to-voice)."""
 from __future__ import annotations
 import logging
 
-from server.cognition.contracts import VoiceTurn
+from server.cognition.contracts import ToolSchema, VoiceTurn
 from server.external._internal.async_runner import AsyncRunner
 from server.external._internal.mcp_session import (
     McpTool, fetch_tool_catalog, invoke_tool,
@@ -37,13 +37,13 @@ class HAMCPToolExecutor:
     def handles(self, name: str) -> bool:
         return name in self._by_name
 
-    def list_schemas(self) -> list[dict]:
+    def list_schemas(self) -> list[ToolSchema]:
         return [
-            {
-                "name": t.name,
-                "description": t.description,
-                "input_schema": t.input_schema,
-            }
+            ToolSchema(
+                name=t.name,
+                description=t.description,
+                input_schema=t.input_schema,
+            )
             for t in self._catalog
         ]
 

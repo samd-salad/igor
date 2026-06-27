@@ -29,6 +29,24 @@ class ToolCallRecord:
     result: str
 
 
+@dataclass(frozen=True)
+class ToolSchema:
+    """Vendor-neutral description of a tool the LLM may call.
+
+    Executors emit these. LLM adapters translate to whatever shape their
+    provider expects (Anthropic's `input_schema`, OpenAI's `parameters`,
+    Gemini's `function_declarations`) at the boundary. cognition never
+    sees an Anthropic-shaped dict — that's the leak this value object
+    closes.
+
+    `input_schema` is JSON Schema (a cross-vendor standard); the wrapper
+    keys are what differ by provider, and only the adapter handles that.
+    """
+    name: str
+    description: str
+    input_schema: dict
+
+
 # ---------- The cross-cutting flow object ----------
 
 @dataclass(frozen=True)

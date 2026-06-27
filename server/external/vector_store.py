@@ -6,7 +6,6 @@ delete + rebuild it from facts.embedding at any time.
 """
 from __future__ import annotations
 import sqlite3
-from typing import List, Tuple
 
 
 class VectorStore:
@@ -21,14 +20,21 @@ class VectorStore:
             (fact_id, embedding),
         )
 
-    def search(self, query_embedding: bytes, top_k: int) -> List[Tuple[str, float]]:
+    def search(self, query_embedding: bytes, top_k: int) -> list[str]:
+        """Return fact_ids ranked by L2 distance to the query (nearest first).
+
+        Distance is computed internally for ordering but not surfaced —
+        callers (HybridRetrieval) consume RANK, not score. Keeping the
+        port narrow prevents the adapter's internal metric from leaking
+        upward into cognition.
+        """
         rows = self._conn.execute(
-            """SELECT fact_id, distance FROM facts_vec
+            """SELECT fact_id FROM facts_vec
                WHERE embedding MATCH ? AND k = ?
                ORDER BY distance""",
             (query_embedding, top_k),
         ).fetchall()
-        return [(r["fact_id"], r["distance"]) for r in rows]
+        return [r["fact_id"] for r in rows]
 
     def delete(self, fact_id: str) -> None:
         self._conn.execute("DELETE FROM facts_vec WHERE fact_id = ?", (fact_id,))

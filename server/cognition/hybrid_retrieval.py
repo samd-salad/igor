@@ -22,7 +22,7 @@ class _TagRetriever(Protocol):
 
 
 class _VectorStore(Protocol):
-    def search(self, query_embedding: bytes, top_k: int) -> list[tuple[str, float]]: ...
+    def search(self, query_embedding: bytes, top_k: int) -> list[str]: ...
 
 
 class _Encoder(Protocol):
@@ -55,7 +55,7 @@ class HybridRetrieval:
         scores: dict[str, float] = {}
         for rank, fact in enumerate(tag_hits):
             scores[fact.fact_id] = scores.get(fact.fact_id, 0.0) + 1.0 / (self._k + rank)
-        for rank, (fact_id, _distance) in enumerate(vec_hits):
+        for rank, fact_id in enumerate(vec_hits):
             scores[fact_id] = scores.get(fact_id, 0.0) + 1.0 / (self._k + rank)
 
         ranked_ids = sorted(scores, key=lambda fid: scores[fid], reverse=True)

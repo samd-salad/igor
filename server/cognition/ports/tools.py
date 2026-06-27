@@ -1,9 +1,9 @@
 """ToolExecutorPort — execute a named tool with args, return its string result."""
 from __future__ import annotations
 from typing import Protocol
-from server.cognition.contracts import VoiceTurn
+from server.cognition.contracts import ToolSchema, VoiceTurn
 
 
 class ToolExecutorPort(Protocol):
-    def list_schemas(self) -> list[dict]: ...
+    def list_schemas(self) -> list[ToolSchema]: ...
     def execute(self, name: str, args: dict, turn: VoiceTurn) -> str: ...
