@@ -32,6 +32,7 @@ THIRD_PARTY_LOCKED_TO_EXTERNAL = {
     "anthropic": ("server/external/claude_adapter.py",),
     "sqlite3":   ("server/external/sqlite_persistence.py",
                   "server/external/sqlite_retrieval.py",
+                  "server/external/vector_store.py",
                   "server/external/_internal/db.py",
                   "server/external/_internal/brain_json_migration.py"),
     "mcp":       ("server/external/_internal/mcp_session.py",
