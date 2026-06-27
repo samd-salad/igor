@@ -39,3 +39,19 @@ def test_open_db_adds_response_text_column_to_legacy_episodes_table(tmp_path):
         assert "response_text" in cols
     finally:
         conn.close()
+
+
+def test_open_db_loads_sqlite_vec_and_creates_vec_table(tmp_path):
+    db_path = tmp_path / "brain.db"
+    conn = open_db(db_path)
+    try:
+        # vec_version() only exists if extension loaded
+        version_row = conn.execute("SELECT vec_version()").fetchone()
+        assert version_row is not None
+        # facts_vec virtual table exists
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='facts_vec'"
+        ).fetchall()
+        assert len(rows) == 1
+    finally:
+        conn.close()

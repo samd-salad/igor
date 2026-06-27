@@ -63,3 +63,10 @@ CREATE TABLE IF NOT EXISTS reminders (
     status             TEXT NOT NULL DEFAULT 'pending',
     source_episode_id  TEXT REFERENCES episodes(episode_id)
 );
+
+-- Sidecar speed index for facts.embedding. Canonical embedding stays in facts.embedding BLOB.
+-- Regenerable: at any point you can DELETE FROM facts_vec and rebuild from facts.embedding.
+CREATE VIRTUAL TABLE IF NOT EXISTS facts_vec USING vec0(
+    fact_id TEXT PRIMARY KEY,
+    embedding FLOAT[384]
+);

@@ -1,6 +1,7 @@
 """SQLite open helper: opens the DB, applies schema, returns a Connection."""
 from __future__ import annotations
 import sqlite3
+import sqlite_vec
 from pathlib import Path
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -11,6 +12,9 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
     conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
     _apply_in_place_migrations(conn)
     return conn
