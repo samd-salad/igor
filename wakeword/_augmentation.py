@@ -6,11 +6,11 @@ varied background loudness; RIR convolution adds room-acoustic variability
 so the model generalizes beyond the recording environment."""
 from __future__ import annotations
 import numpy as np
-from scipy.signal import fftconvolve
 
-# pyroomacoustics is a heavy training-only dep (pulled in by wakeword training,
-# not by the server runtime or CI). Import lazily so test collection works in
-# environments that don't ship it.
+# scipy + pyroomacoustics are heavy training-only deps (pulled in by wakeword
+# training, not by the server runtime or CI). Imported lazily inside the
+# functions that need them so test collection works in environments that
+# don't ship the training stack.
 
 
 def random_snr_db(rng: np.random.Generator,
@@ -53,6 +53,7 @@ def mix_with_background(positive: np.ndarray, background: np.ndarray,
 def apply_rir(audio: np.ndarray, rir: np.ndarray) -> np.ndarray:
     """Convolve audio with rir and trim back to original length.
     Output is loudness-matched to the input via peak normalization."""
+    from scipy.signal import fftconvolve  # lazy: training-only dep
     in_peak = int(np.max(np.abs(audio))) if len(audio) else 0
     if in_peak == 0:
         return audio.astype(np.int16)
