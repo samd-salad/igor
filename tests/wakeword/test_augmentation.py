@@ -1,8 +1,19 @@
+import importlib.util
+
 import numpy as np
 import pytest
 
 from wakeword._augmentation import (
     mix_with_background, apply_rir, generate_synthetic_rirs, random_snr_db,
+)
+
+# pyroomacoustics is a training-only dep (not in requirements-server-text.txt
+# nor requirements-dev.txt). The functions that import it are lazy-imported,
+# so test collection works without it, but tests that actually call into
+# generate_synthetic_rirs need the dep installed.
+requires_pyroomacoustics = pytest.mark.skipif(
+    importlib.util.find_spec("pyroomacoustics") is None,
+    reason="pyroomacoustics not installed (training-only dep)",
 )
 
 
@@ -46,6 +57,7 @@ def test_mix_with_background_low_snr_lifts_floor():
     assert rms_low > rms_high
 
 
+@requires_pyroomacoustics
 def test_generate_synthetic_rirs_returns_n_arrays():
     rng = np.random.default_rng(0)
     rirs = generate_synthetic_rirs(5, rng)
@@ -57,6 +69,7 @@ def test_generate_synthetic_rirs_returns_n_arrays():
         assert 800 <= len(r) <= 16000
 
 
+@requires_pyroomacoustics
 def test_apply_rir_preserves_length():
     rng = np.random.default_rng(0)
     audio = (rng.normal(0, 1000, 16000)).astype(np.int16)
@@ -66,6 +79,7 @@ def test_apply_rir_preserves_length():
     assert out.dtype == np.int16
 
 
+@requires_pyroomacoustics
 def test_apply_rir_does_not_silence_signal():
     rng = np.random.default_rng(0)
     audio = (np.sin(2 * np.pi * 440 * np.arange(16000) / 16000) * 8000).astype(np.int16)

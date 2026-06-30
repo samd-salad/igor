@@ -2,7 +2,11 @@
 embedding rate and shape."""
 from __future__ import annotations
 import numpy as np
-from pyopen_wakeword import OpenWakeWordFeatures
+
+# pyopen_wakeword is a training-only dep (not in requirements-server-text.txt).
+# Import lazily so test collection works in CI without the wakeword training
+# stack. Constants and the frames_per_seconds helper stay importable;
+# embed_clip is the only function that touches the heavy dep.
 
 # Empirically measured: 128 frames per 3-second clip = 42.67 Hz.
 # pyopen_wakeword's MELS_PER_SECOND/EMB_STEP nominal arithmetic (97/8 ≈
@@ -20,6 +24,7 @@ def frames_per_seconds(seconds: float) -> int:
 def embed_clip(audio_int16: np.ndarray) -> np.ndarray:
     """Stream a single int16 clip through pyopen_wakeword features.
     Returns (T, 96) where T ≈ duration_seconds × 42.67."""
+    from pyopen_wakeword import OpenWakeWordFeatures  # lazy: training-only dep
     feats = OpenWakeWordFeatures.from_builtin()
     feats.reset()
     raw = audio_int16.astype(np.int16).tobytes()

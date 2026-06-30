@@ -6,8 +6,11 @@ varied background loudness; RIR convolution adds room-acoustic variability
 so the model generalizes beyond the recording environment."""
 from __future__ import annotations
 import numpy as np
-import pyroomacoustics as pra
 from scipy.signal import fftconvolve
+
+# pyroomacoustics is a heavy training-only dep (pulled in by wakeword training,
+# not by the server runtime or CI). Import lazily so test collection works in
+# environments that don't ship it.
 
 
 def random_snr_db(rng: np.random.Generator,
@@ -66,6 +69,7 @@ def generate_synthetic_rirs(n: int, rng: np.random.Generator,
                             sample_rate: int = 16000) -> list[np.ndarray]:
     """Generate n RIRs by simulating random rectangular rooms with
     pyroomacoustics. Rooms range from small (3m³) to medium (50m³)."""
+    import pyroomacoustics as pra  # lazy: training-only dep
     rirs: list[np.ndarray] = []
     for _ in range(n):
         # Random room dimensions

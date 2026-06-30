@@ -1,5 +1,10 @@
 import numpy as np
-import torch
+import pytest
+
+# Skip the whole file when torch isn't installed (CI runs without the training
+# stack — see requirements-server-text.txt). Local dev installs torch for
+# wakeword/train.py and these tests run normally.
+torch = pytest.importorskip("torch")
 
 from wakeword._training import (
     WakewordModel, hard_negative_filter, build_neg_weight_schedule,
