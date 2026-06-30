@@ -15,7 +15,12 @@ def build_neg_weight_schedule(epochs: int,
                               end: float = 8.0) -> list[float]:
     """Linear ramp of the negative-class weight from start at epoch 0 to end
     at the final epoch. Pushes the model to be more confident on negatives
-    later in training."""
+    later in training.
+
+    History: v0.7.1 tried end=2.0 (with epochs=30, low=0.05) and the model
+    catastrophically undertrained (28% holdout FP, positives collapsed to
+    min=0.06). Reverted to v0.7's end=8.0 pending diagnostic-curve evidence
+    on where to actually land."""
     if epochs <= 1:
         return [end]
     step = (end - start) / (epochs - 1)
@@ -28,7 +33,11 @@ def hard_negative_filter(preds_sigmoid: torch.Tensor,
                          high: float = 0.999) -> torch.Tensor:
     """Boolean mask selecting samples that should contribute to the gradient.
     Drops trivial samples: labels==0 with pred<low (easy negs already classified)
-    and labels==1 with pred>high (easy positives already classified)."""
+    and labels==1 with pred>high (easy positives already classified).
+
+    History: v0.7.1 tried low=0.05 alongside other softening; model
+    catastrophically undertrained. Reverted to v0.7's 0.001 pending
+    diagnostic-curve evidence."""
     labels_flat = labels.view(-1)
     preds_flat = preds_sigmoid.view(-1)
     is_easy_neg = (labels_flat == 0) & (preds_flat < low)
@@ -97,15 +106,16 @@ def train_model(
     layer_dim: int = 128,
     log_every: int = 5,
     print_fn: Callable[[str], None] = print,
+    on_epoch_end: Callable[[int, "WakewordModel"], None] | None = None,
+    pos_weight: float | None = None,
 ) -> WakewordModel:
     """Train the wakeword classifier with hard-negative mining + neg-weight ramp.
     Returns the inference-wired model (sigmoid output).
 
-    Neg-weight schedule: pos_weight is STATIC (n_neg/n_pos, handles class
-    imbalance). neg_w ramps from build_neg_weight_schedule defaults (1.0→8.0)
-    and is applied as a per-sample multiplier on negative-labeled rows only,
-    growing the penalty on hard negatives over training without disturbing
-    positive-class weighting.
+    pos_weight: if None, defaults to n_neg/n_pos (our historical setting, which
+    inverts the canonical openWakeWord loss balance — see v0.9 research findings).
+    Pass pos_weight=1.0 to match dscripka's reference recipe, where negative
+    dominance is achieved via the neg_w ramp alone.
     """
     torch.manual_seed(42)
     model = WakewordModel(layer_dim=layer_dim, inference=False)
@@ -117,7 +127,7 @@ def train_model(
     n_neg = int((y == 0).sum())
     if n_pos == 0 or n_neg == 0:
         raise ValueError("Need both positive and negative samples.")
-    pos_weight_value = n_neg / n_pos
+    pos_weight_value = pos_weight if pos_weight is not None else (n_neg / n_pos)
     print_fn(f"  Class imbalance: pos={n_pos}, neg={n_neg}, pos_weight={pos_weight_value:.2f}")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -181,5 +191,8 @@ def train_model(
                      f"loss={epoch_loss / max(1, n_batches):.4f}  "
                      f"kept={kept_pct:.1f}%  neg_w={neg_w:.2f}  "
                      f"lr={optimizer.param_groups[0]['lr']:.5f}")
+
+        if on_epoch_end is not None:
+            on_epoch_end(epoch + 1, model)
 
     return model.as_inference()

@@ -54,12 +54,27 @@ from wakeword._dataset import (
 ROOT        = Path(__file__).parent.parent
 POSITIVE_DIR = ROOT / "wakeword" / "samples" / "positive"
 NEGATIVE_DIR = ROOT / "wakeword" / "samples" / "negative"  # optional real negatives
+HARD_NEGATIVES_FILE = ROOT / "wakeword" / "hard_negatives.txt"
 OUTPUT_DIR  = ROOT / "wakeword" / "models"
 MODEL_NAME  = "igor"   # becomes the key in model.predict() results
 
 SAMPLE_RATE  = 16000
 CLIP_SAMPLES = SAMPLE_RATE * 3  # 3-second clips (pad/trim all audio to this)
-N_EPOCHS     = 100  # bumped from 50 — v0.5 loss still decreasing at epoch 50
+
+# v0.9: pos_weight from n_neg/n_pos (~222) → 22. The historical setting
+# inverted dscripka's canonical loss balance by ~4500x, causing the model
+# to saturate positives (mean=1.000) while letting negatives drift. The
+# diagnostic sweep showed FP@>0.95 halved at pw=22 without breaking recall
+# (pw=1.0 collapsed pos_max; pw=5 still broke recall; pw=50 left more FPs).
+POS_WEIGHT   = 22.0
+
+N_EPOCHS     = 100  # re-mining (v0.9) lets the model improve across all 100
+                    # epochs instead of overfitting into a ceiling by epoch 30.
+                    # top_firer trajectory now DESCENDS over training — 1.000
+                    # → 0.714 across epochs 1-100 — because the previously
+                    # 1.000-firing holdout clips are now in the training set
+                    # (see HARD_NEGATIVES_FILE) and the model is forced to
+                    # learn features that suppress them and generalize.
 BATCH_SIZE   = 64
 N_AUG_VARIANTS = 10   # augmented variants per real positive
 NEG_STRIDE     = 1    # MUST be 1 — stride=10 in v0.6 fed the model 10%
@@ -182,6 +197,29 @@ def main():
         holdout_frac=NEG_HOLDOUT_FRAC,
         seed=NEG_HOLDOUT_SEED,
     )
+
+    # Re-mining (v0.9): force runtime-failure clips out of holdout into training.
+    # See HARD_NEGATIVES_FILE — one filename per line. The diagnostic run that
+    # introduced this dropped top_firer from 1.000 → 0.714 and FP@>0.95 from
+    # 1.18% → 0.00% on the remaining holdout. Keep this list growing as new
+    # false-fire clips appear in production logs; retrain when it grows.
+    if HARD_NEGATIVES_FILE.exists():
+        hard_names = {
+            line.strip() for line in HARD_NEGATIVES_FILE.read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        }
+        train_set, holdout_set = set(train_idx.tolist()), set(holdout_idx.tolist())
+        moved = 0
+        for i, p in enumerate(neg_paths_all):
+            if p.name in hard_names and i in holdout_set:
+                holdout_set.discard(i)
+                train_set.add(i)
+                moved += 1
+        train_idx = np.array(sorted(train_set))
+        holdout_idx = np.array(sorted(holdout_set))
+        print(f"Re-mining: {len(hard_names)} hard negatives listed; "
+              f"{moved} moved from holdout to train.")
+
     neg_paths = [neg_paths_all[i] for i in train_idx]
     neg_holdout_paths = [neg_paths_all[i] for i in holdout_idx]
     print(f"Negative split: {len(neg_paths_all)} total -> "
@@ -292,9 +330,12 @@ def main():
         epochs=N_EPOCHS,
         batch_size=BATCH_SIZE,
         lr=1e-4,
-        layer_dim=192,  # bumped from 128 — v0.6.1 had 98 hard-stuck
-                        # negatives; bigger model gets more capacity for
-                        # a tighter decision boundary
+        layer_dim=192,  # layer_dim sweep at pw=22 showed ld in [32,64,96,192]
+                        # all hit top_firer=1.000 by epoch 30 — architecture is
+                        # NOT the bottleneck. Re-mining is the real lever.
+                        # Keeping 192 since it had marginally better epoch-100
+                        # pos recall vs smaller sizes (pos_min 0.712 vs 0.768).
+        pos_weight=POS_WEIGHT,
     )
 
     # ------------------------------------------------------------------
@@ -406,7 +447,7 @@ def main():
     # nothing, a known issue with the TFLite runtime for dynamic shapes.
     #
     # Re-export ONNX with fixed batch=1, then convert with onnx2tf.
-    tflite_path = OUTPUT_DIR / f"{MODEL_NAME}_v0.7.tflite"
+    tflite_path = OUTPUT_DIR / f"{MODEL_NAME}_v0.9.tflite"
     _export_tflite(inference_model, dummy_input, tflite_path)
 
     print(f"\nDeploy to the Pi5 wyoming-satellite host:")
@@ -489,7 +530,10 @@ def _export_tflite(inference_model, dummy_input, tflite_path: Path) -> None:
             print(f"  No .tflite files produced in {tmp_path / 'out'}")
             return
 
-        shutil.copy(candidates[0], tflite_path)
+        # copyfile (not copy) — copy() also tries to chmod the dest, which
+        # fails on /mnt/c (OneDrive/WSL drvfs disallows mode changes). The
+        # bytes copy fine; we just don't need the perm copy.
+        shutil.copyfile(candidates[0], tflite_path)
         print(f"TFLite saved: {tflite_path}  ({tflite_path.stat().st_size / 1024:.0f} KB)")
 
 

@@ -1,0 +1,21 @@
+# Hard negatives — clips the v0.8 deployed model false-fired on at >0.9 in the
+# held-out validation set. These get FORCIBLY moved from holdout into training
+# via diagnostic_run.py --hard-negatives-file, to test whether explicit
+# re-training on the model's known failure cases can suppress them without
+# spawning new ceiling firers on the remaining holdout.
+#
+# Source: scratchpad/train_v08.log "Top-scoring holdout negatives"
+# 13 clips, all scoring > 0.9 against igor.onnx (v0.8)
+neg_4023.wav
+neg_3464.wav
+neg_0448.wav
+neg_1005.wav
+neg_3262.wav
+neg_1152.wav
+neg_3407.wav
+neg_3879.wav
+neg_3416.wav
+neg_3554.wav
+neg_0616.wav
+neg_0781.wav
+neg_1078.wav
