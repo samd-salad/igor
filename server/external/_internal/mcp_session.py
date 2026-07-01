@@ -32,9 +32,13 @@ def _content_to_text(content_blocks: list[Any]) -> str:
 async def _session(url: str, token: str):
     """Open a ClientSession to `url` with Bearer auth carried by a dedicated
     httpx client. New SDK (1.x) wants headers on the httpx client, not on
-    streamable_http_client itself."""
+    streamable_http_client itself.
+
+    verify=False when talking to https:// — HA on the homelab uses a
+    self-signed cert. If deploying off-net, pin the cert fingerprint instead."""
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    async with httpx.AsyncClient(headers=headers) as http_client:
+    verify = not url.lower().startswith("https://")
+    async with httpx.AsyncClient(headers=headers, verify=verify) as http_client:
         async with streamable_http_client(url, http_client=http_client) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()

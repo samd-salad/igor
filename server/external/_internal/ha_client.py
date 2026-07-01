@@ -54,6 +54,13 @@ class HAClient:
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
         })
+        # HA serves HTTPS with a self-signed cert on the homelab VLAN; disable
+        # verification when using HTTPS. If moving off-net, pin HA's cert
+        # fingerprint instead (see wirenest/mcp for the pattern).
+        if self.base_url.startswith("https://"):
+            self._session.verify = False
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         self._lock = threading.Lock()
         self._cache_time: float = 0.0
         self._states_cache: list[dict] = []
